@@ -1,0 +1,387 @@
+"""
+database/models.py — Async SQLite database using SQLAlchemy + aiosqlite.
+
+Tables:
+  scans   — logs every /scan command with token info, AI score, and caller details.
+  callers — approved caller Telegram user IDs (managed via /addcaller).
+"""
+
+import logging
+from datetime import datetime, timedelta
+
+from sqlalchemy import (
+    Column, Integer, String, Float, Boolean, DateTime, BigInteger,
+    select, func, text
+)
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase
+
+from bot.config import DATABASE_URL
+
+logger = logging.getLogger(__name__)
+
+engine = create_async_engine(DATABASE_URL, echo=False)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+# ── Callers table ─────────────────────────────────────────────────────────────
+
+class Caller(Base):
+    __tablename__ = "callers"
+
+    id          = Column(Integer,    primary_key=True, autoincrement=True)
+    telegram_id = Column(BigInteger, nullable=False, unique=True, index=True)
+    added_at    = Column(DateTime,   default=datetime.utcnow, nullable=False)
+
+
+# ── Scans table ───────────────────────────────────────────────────────────────
+
+class Scan(Base):
+    __tablename__ = "scans"
+
+    id               = Column(Integer,    primary_key=True, autoincrement=True)
+    contract_address = Column(String(64), nullable=False, index=True)
+    token_name       = Column(String(128),nullable=False)
+    ai_score         = Column(Float,      nullable=False)
+    scanned_by       = Column(String(64), nullable=False)
+    group_id         = Column(BigInteger, nullable=False)
+    scanned_at       = Column(DateTime,   default=datetime.utcnow, nullable=False)
+
+    # PnL tracking
+    entry_price      = Column(Float,      nullable=True)   # market cap at scan time
+    current_price    = Column(Float,      nullable=True)   # latest market cap
+    peak_market_cap  = Column(Float,      nullable=True)   # highest MC ever seen
+    multiplier       = Column(Float,      nullable=True)   # current_price / entry_price
+    peak_multiplier  = Column(Float,      nullable=True)   # peak_market_cap / entry_price
+    points           = Column(Float,      nullable=True)   # = peak_multiplier (for leaderboard)
+    entry_liquidity  = Column(Float,      nullable=True)   # liquidity USD at scan time
+    is_win           = Column(Boolean,    nullable=True)   # peak_multiplier >= 2.0
+    is_loss          = Column(Boolean,    nullable=True)   # closed without hitting 2x
+    status           = Column(String(16), default="open",  nullable=False, server_default="open")
+    close_reason     = Column(String(32), nullable=True)   # expired | rug_mc | rug_liquidity
+    # status values: open | win | break_even | loss
+
+
+# ── Initialisation ────────────────────────────────────────────────────────────
+
+_NEW_SCAN_COLS = [
+    ("entry_price",      "REAL"),
+    ("current_price",    "REAL"),
+    ("peak_market_cap",  "REAL"),
+    ("multiplier",       "REAL"),
+    ("peak_multiplier",  "REAL"),
+    ("points",           "REAL"),
+    ("is_win",           "INTEGER"),
+    ("is_loss",          "INTEGER"),
+    ("status",           "TEXT DEFAULT 'open'"),
+    ("entry_liquidity",  "REAL"),
+    ("close_reason",     "TEXT"),
+]
+
+async def init_db() -> None:
+    """Creates all tables if they don't already exist, then adds any missing columns."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # Migrate existing scans table — add new columns if absent (SQLite-safe)
+    async with engine.begin() as conn:
+        for col_name, col_def in _NEW_SCAN_COLS:
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE scans ADD COLUMN {col_name} {col_def}")
+                )
+            except Exception:
+                pass  # column already exists
+
+    logger.info("Database initialised.")
+
+
+# ── Caller helpers ────────────────────────────────────────────────────────────
+
+async def add_caller(telegram_id: int) -> bool:
+    async with AsyncSessionLocal() as session:
+        existing = await session.execute(
+            select(Caller).where(Caller.telegram_id == telegram_id)
+        )
+        if existing.scalar_one_or_none():
+            return False
+        session.add(Caller(telegram_id=telegram_id))
+        await session.commit()
+        logger.info("Added caller: %s", telegram_id)
+        return True
+
+
+async def get_caller_ids() -> set[int]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Caller.telegram_id))
+        return {row for row in result.scalars()}
+
+
+# ── Scan write helpers ────────────────────────────────────────────────────────
+
+async def log_scan(
+    contract_address: str,
+    token_name: str,
+    ai_score: float,
+    scanned_by: str,
+    group_id: int,
+    entry_price: float | None = None,
+    entry_liquidity: float | None = None,
+) -> "Scan":
+    async with AsyncSessionLocal() as session:
+        scan = Scan(
+            contract_address=contract_address,
+            token_name=token_name,
+            ai_score=ai_score,
+            scanned_by=scanned_by,
+            group_id=group_id,
+            entry_price=entry_price,
+            entry_liquidity=entry_liquidity,
+            peak_market_cap=entry_price,   # peak starts at entry
+            peak_multiplier=1.0 if entry_price else None,
+            points=1.0 if entry_price else None,
+            status="open",
+        )
+        session.add(scan)
+        await session.commit()
+        await session.refresh(scan)
+        logger.info("Logged scan: %s score=%.1f by=%s entry_mc=%s", token_name, ai_score, scanned_by, entry_price)
+        return scan
+
+
+def _resolve_status(peak_mult: float, closed: bool) -> tuple[str, bool, bool]:
+    """
+    Returns (status, is_win, is_loss) based on peak multiplier.
+    WIN        = peak >= 2.0  🟢
+    BREAK_EVEN = peak >= 1.0 and < 2.0  🟡  (only assigned on close)
+    LOSS       = peak < 1.0 on close    🔴
+    While open: status is 'win' once 2x hit, otherwise 'open'.
+    """
+    if peak_mult >= 2.0:
+        return ("win", True, False)
+    if closed:
+        if peak_mult >= 1.0:
+            return ("break_even", False, False)
+        return ("loss", False, True)
+    return ("open", False, False)
+
+
+async def update_scan_pnl(
+    scan_id: int,
+    current_mc: float,
+    close: bool = False,
+    close_reason: str | None = None,
+) -> "Scan | None":
+    """Updates current MC, peak MC, multipliers, win/loss for one scan."""
+    async with AsyncSessionLocal() as session:
+        scan = await session.get(Scan, scan_id)
+        if scan is None or not scan.entry_price:
+            return None
+
+        current_mult = current_mc / scan.entry_price
+        new_peak_mc  = max(scan.peak_market_cap or scan.entry_price, current_mc)
+        peak_mult    = new_peak_mc / scan.entry_price
+
+        status, is_win, is_loss = _resolve_status(peak_mult, close)
+
+        scan.current_price   = current_mc
+        scan.multiplier      = round(current_mult, 4)
+        scan.peak_market_cap = new_peak_mc
+        scan.peak_multiplier = round(peak_mult, 4)
+        scan.points          = round(peak_mult, 4)
+        scan.is_win          = is_win
+        scan.is_loss         = is_loss
+        scan.status          = status
+        if close and close_reason:
+            scan.close_reason = close_reason
+
+        await session.commit()
+        await session.refresh(scan)
+        return scan
+
+
+async def close_old_scans() -> int:
+    """Closes all open scans older than 7 days. Returns number closed."""
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Scan).where(
+                Scan.status == "open",
+                Scan.entry_price.is_not(None),
+                Scan.scanned_at < cutoff,
+            )
+        )
+        scans = list(result.scalars().all())
+        for scan in scans:
+            peak_mult = (scan.peak_market_cap / scan.entry_price) if (scan.peak_market_cap and scan.entry_price) else 0.0
+            status, is_win, is_loss = _resolve_status(peak_mult, closed=True)
+            scan.is_win      = is_win
+            scan.is_loss     = is_loss
+            scan.status      = status
+            scan.close_reason = "expired"
+        await session.commit()
+    logger.info("Closed %d expired scans", len(scans))
+    return len(scans)
+
+
+# ── Scan read helpers ─────────────────────────────────────────────────────────
+
+async def get_scan_by_address(contract_address: str) -> "Scan | None":
+    """Returns the most recent scan for a given contract address, or None."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Scan)
+            .where(Scan.contract_address == contract_address)
+            .order_by(Scan.scanned_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
+async def get_open_scans() -> list["Scan"]:
+    """Returns open scans under 7 days old that have an entry_price."""
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Scan)
+            .where(
+                Scan.status == "open",
+                Scan.entry_price.is_not(None),
+                Scan.scanned_at >= cutoff,
+            )
+            .order_by(Scan.scanned_at.desc())
+        )
+        return list(result.scalars().all())
+
+
+async def get_leaderboard(limit: int = 10) -> list[dict]:
+    """
+    Returns top callers ranked by total peak_multiplier points.
+    Each entry: {username, scans, wins, break_evens, losses, win_pct, total_points}
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(
+                Scan.scanned_by,
+                func.count(Scan.id).label("scans"),
+                func.sum(func.cast(Scan.is_win,  Integer)).label("wins"),
+                func.sum(func.cast(Scan.is_loss, Integer)).label("losses"),
+                func.coalesce(func.sum(Scan.peak_multiplier), 0).label("total_points"),
+            )
+            .group_by(Scan.scanned_by)
+            .order_by(func.coalesce(func.sum(Scan.peak_multiplier), 0).desc())
+            .limit(limit)
+        )
+        rows = []
+        for r in result:
+            wins   = r.wins   or 0
+            losses = r.losses or 0
+            decided = wins + losses
+            win_pct = round(wins / decided * 100) if decided else 0
+            rows.append({
+                "username":     r.scanned_by,
+                "scans":        r.scans,
+                "wins":         wins,
+                "losses":       losses,
+                "win_pct":      win_pct,
+                "total_points": round(r.total_points or 0, 2),
+            })
+        return rows
+
+
+async def get_break_evens_count(username: str) -> int:
+    """Returns number of break_even scans for a user."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(Scan.id))
+            .where(Scan.scanned_by == username, Scan.status == "break_even")
+        )
+        return result.scalar() or 0
+
+
+async def get_signal_leaders(limit: int = 10) -> list[dict]:
+    """Returns callers ranked by total peak_multiplier points (W/L only, no break_even column)."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(
+                Scan.scanned_by,
+                func.count(Scan.id).label("scans"),
+                func.sum(func.cast(Scan.is_win,  Integer)).label("wins"),
+                func.sum(func.cast(Scan.is_loss, Integer)).label("losses"),
+                func.coalesce(func.sum(Scan.peak_multiplier), 0).label("total_points"),
+            )
+            .group_by(Scan.scanned_by)
+            .having(func.count(Scan.id) >= 1)
+            .order_by(func.coalesce(func.sum(Scan.peak_multiplier), 0).desc())
+            .limit(limit)
+        )
+        rows = []
+        for r in result:
+            wins   = r.wins   or 0
+            losses = r.losses or 0
+            decided = wins + losses
+            win_pct = round(wins / decided * 100) if decided else 0
+            rows.append({
+                "username":     r.scanned_by,
+                "scans":        r.scans,
+                "wins":         wins,
+                "losses":       losses,
+                "win_pct":      win_pct,
+                "total_points": round(r.total_points or 0, 2),
+            })
+        return rows
+
+
+async def get_top_calls(limit: int = 10, since: "datetime | None" = None) -> list[dict]:
+    """Returns top scans by peak_multiplier, optionally filtered by time window."""
+    async with AsyncSessionLocal() as session:
+        query = (
+            select(
+                Scan.token_name,
+                Scan.scanned_by,
+                Scan.peak_multiplier,
+                Scan.close_reason,
+                Scan.status,
+            )
+            .where(Scan.peak_multiplier.is_not(None))
+        )
+        if since:
+            query = query.where(Scan.scanned_at >= since)
+        query = query.order_by(Scan.peak_multiplier.desc()).limit(limit)
+        result = await session.execute(query)
+        return [
+            {
+                "token_name":      r.token_name,
+                "scanned_by":      r.scanned_by,
+                "peak_multiplier": r.peak_multiplier,
+                "close_reason":    r.close_reason,
+                "status":          r.status,
+            }
+            for r in result
+        ]
+
+
+async def get_top_calls_stats(since: "datetime | None" = None) -> dict:
+    """Returns total call count and average peak_multiplier for the given window."""
+    async with AsyncSessionLocal() as session:
+        query = select(
+            func.count(Scan.id).label("total"),
+            func.coalesce(func.avg(Scan.peak_multiplier), 0).label("avg_x"),
+        ).where(Scan.peak_multiplier.is_not(None))
+        if since:
+            query = query.where(Scan.scanned_at >= since)
+        result = await session.execute(query)
+        row = result.one()
+        return {"total": row.total or 0, "avg_x": round(row.avg_x or 0, 2)}
+
+
+async def get_recent_scans(limit: int = 20) -> list["Scan"]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Scan).order_by(Scan.scanned_at.desc()).limit(limit)
+        )
+        return list(result.scalars().all())

@@ -1,0 +1,111 @@
+"""
+main.py — Entry point for the AI Trading Network Bot.
+
+Startup sequence:
+  1. Load config from .env
+  2. Initialise the SQLite database
+  3. Register all routers/handlers
+  4. Start background peak-tracker task
+  5. Start polling Telegram for updates
+"""
+
+import asyncio
+import logging
+
+from aiogram import Bot, Dispatcher
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+
+from bot.config import BOT_TOKEN
+from bot.handlers import router
+from bot.scanner import fetch_live_data
+from database.models import init_db, get_open_scans, update_scan_pnl, close_old_scans
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ── Background task ───────────────────────────────────────────────────────────
+
+async def peak_tracker_loop() -> None:
+    """
+    Every 5 minutes:
+    - Fetches current MC for all open scans under 7 days old
+    - Updates peak MC if higher
+    - Auto-closes scans older than 7 days (locks in peak X forever)
+    """
+    await asyncio.sleep(30)   # brief startup delay
+    while True:
+        try:
+            # Close expired scans first (7 days)
+            closed = await close_old_scans()
+            if closed:
+                logger.info("Peak tracker: closed %d expired scans", closed)
+
+            # Update peaks for remaining open scans; check rug conditions
+            open_scans = await get_open_scans()
+            for scan in open_scans:
+                live = await fetch_live_data(scan.contract_address)
+                if not live:
+                    continue
+
+                mc  = live["market_cap"]
+                liq = live["liquidity_usd"]
+
+                # Rug: MC collapsed 80%+ below entry
+                if mc and scan.entry_price and mc < scan.entry_price * 0.20:
+                    await update_scan_pnl(scan.id, mc, close=True, close_reason="rug_mc")
+                    logger.info("Rug (MC) detected: %s", scan.token_name)
+                # Rug: liquidity drained below $1000
+                elif liq < 1000:
+                    await update_scan_pnl(scan.id, mc or scan.entry_price, close=True, close_reason="rug_liquidity")
+                    logger.info("Rug (liquidity) detected: %s", scan.token_name)
+                else:
+                    await update_scan_pnl(scan.id, mc)
+
+            if open_scans:
+                logger.info("Peak tracker: updated %d open scans", len(open_scans))
+        except Exception as e:
+            logger.error("Peak tracker error: %s", e)
+
+        await asyncio.sleep(300)   # 5 minutes
+
+
+# ── Main coroutine ────────────────────────────────────────────────────────────
+
+async def main() -> None:
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN is not set. Check your .env file.")
+
+    logger.info("Initialising database…")
+    await init_db()
+
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+    )
+
+    dp = Dispatcher()
+    dp.include_router(router)
+
+    # Start peak tracker in background
+    asyncio.create_task(peak_tracker_loop())
+
+    logger.info("Bot is starting. Press Ctrl+C to stop.")
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+        logger.info("Bot stopped.")
+
+
+# ── Run ───────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    asyncio.run(main())
