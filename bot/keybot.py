@@ -86,9 +86,26 @@ def _stop_loss_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def _wallet_keyboard() -> InlineKeyboardMarkup:
+def _wallet_input_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="⬅️ Back", callback_data="kb:menu"))
+    return builder.as_markup()
+
+
+def _wallet_options_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="✏️ Change Wallet",   callback_data="kb:change_wallet"))
+    builder.row(InlineKeyboardButton(text="🗑️ Remove Wallet",   callback_data="kb:confirm_remove"))
+    builder.row(InlineKeyboardButton(text="⬅️ Back",            callback_data="kb:menu"))
+    return builder.as_markup()
+
+
+def _confirm_remove_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Yes, Remove", callback_data="kb:remove_wallet"),
+        InlineKeyboardButton(text="❌ No, Keep it", callback_data="kb:menu"),
+    )
     return builder.as_markup()
 
 
@@ -156,12 +173,42 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
 
     elif action == "wallet":
+        s = await get_keybot_settings(user_id)
+        if s and s.wallet_address:
+            await callback.message.edit_text(
+                "👛 *Wallet Address*\n\nWhat would you like to do?",
+                parse_mode="Markdown", reply_markup=_wallet_options_keyboard(),
+            )
+        else:
+            await state.set_state(KeyBotStates.waiting_for_wallet)
+            await callback.message.edit_text(
+                "👛 *Wallet Address*\n\nType your Solana wallet address and send it:",
+                parse_mode="Markdown", reply_markup=_wallet_input_keyboard(),
+            )
+        await callback.answer()
+
+    elif action == "change_wallet":
         await state.set_state(KeyBotStates.waiting_for_wallet)
         await callback.message.edit_text(
-            "👛 *Wallet Address*\n\nType your Solana wallet address and send it:",
-            parse_mode="Markdown", reply_markup=_wallet_keyboard(),
+            "👛 *Change Wallet Address*\n\nType your new Solana wallet address and send it:",
+            parse_mode="Markdown", reply_markup=_wallet_input_keyboard(),
         )
         await callback.answer()
+
+    elif action == "confirm_remove":
+        await callback.message.edit_text(
+            "🗑️ *Remove Wallet*\n\nAre you sure you want to remove your wallet address?",
+            parse_mode="Markdown", reply_markup=_confirm_remove_keyboard(),
+        )
+        await callback.answer()
+
+    elif action == "remove_wallet":
+        await upsert_keybot_settings(user_id, wallet_address=None)
+        s = await get_keybot_settings(user_id)
+        await callback.message.edit_text(
+            _menu_text(s), parse_mode="Markdown", reply_markup=_main_keyboard(s)
+        )
+        await callback.answer("🗑️ Wallet removed")
 
     elif action == "positions":
         await callback.answer("📊 No open positions yet — coming in Phase 2!", show_alert=True)
@@ -211,6 +258,7 @@ async def receive_wallet(message: Message, state: FSMContext):
         await message.reply(
             "⚠️ Invalid Solana address. Please try again or tap ⬅️ Back.",
             parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),
         )
         return
     s = await upsert_keybot_settings(message.from_user.id, wallet_address=wallet)
