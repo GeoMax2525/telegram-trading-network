@@ -3,9 +3,10 @@ keyboards.py — Inline keyboard builders.
 
 Trade Card buttons:
   📊 Chart         — opens DexScreener chart in browser
-  💰 Buy           — opens a buy link (Jupiter aggregator)
   📢 Share Signal  — callback to re-broadcast the card to MAIN_GROUP_ID
   🚩 Flag as Risky — callback to flag the token for manual review
+  ⚡ KeyBot Buy    — one-click buy via KeyBot settings
+  💸 KeyBot Sell   — one-click 100% sell via KeyBot settings
 
 PnL buttons:
   🔄 Refresh       — callback to refresh the PnL message in place
@@ -27,20 +28,15 @@ def trade_card_keyboard(
     """
     builder = InlineKeyboardBuilder()
 
-    # Row 1 — external links
+    # Row 1 — chart link
     builder.row(
         InlineKeyboardButton(
             text="📊 Chart",
             url=dex_url if dex_url else f"https://dexscreener.com/solana/{contract_address}",
         ),
-        InlineKeyboardButton(
-            text="💰 Buy",
-            # Jupiter aggregator deeplink for Solana tokens
-            url=f"https://jup.ag/swap/SOL-{contract_address}",
-        ),
     )
 
-    # Row 2 — action callbacks (handled in handlers.py)
+    # Row 2 — social callbacks
     builder.row(
         InlineKeyboardButton(
             text="📢 Share Signal",
@@ -52,11 +48,15 @@ def trade_card_keyboard(
         ),
     )
 
-    # Row 3 — KeyBot
+    # Row 3 — KeyBot trading
     builder.row(
         InlineKeyboardButton(
             text="⚡ KeyBot Buy",
             callback_data=f"kbbuy:{contract_address}",
+        ),
+        InlineKeyboardButton(
+            text="💸 KeyBot Sell",
+            callback_data=f"kbsell:{contract_address}",
         ),
     )
 

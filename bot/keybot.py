@@ -16,7 +16,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.trading import get_jupiter_quote, execute_swap
+from bot.trading import SOL_MINT, get_jupiter_quote, get_token_balance, execute_swap
 from bot.wallet import get_keypair, get_wallet_address, get_sol_balance
 from database.models import get_keybot_settings, upsert_keybot_settings
 
@@ -345,5 +345,76 @@ async def cb_keybot_buy(callback: CallbackQuery):
         logger.error("Swap failed for %s: %s", address, exc)
         await status_msg.edit_text(
             f"❌ *Swap Failed*\n\n`{str(exc)[:300]}`",
+            parse_mode="Markdown",
+        )
+
+
+# ── 💸 KeyBot Sell callback (on Trade Cards) ─────────────────────────────────
+
+@router.callback_query(lambda c: c.data and c.data.startswith("kbsell:"))
+async def cb_keybot_sell(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    address = callback.data.split(":", 1)[1]
+
+    keypair = get_keypair()
+    if keypair is None:
+        await callback.answer(
+            "❌ WALLET_PRIVATE_KEY not configured on the server.", show_alert=True
+        )
+        return
+
+    wallet_address = str(keypair.pubkey())
+
+    # Parse token name from Trade Card
+    token_name = address[:8] + "…"
+    if callback.message and callback.message.text:
+        for line in callback.message.text.splitlines():
+            if line.startswith("🪙"):
+                token_name = line.split("*")[1] if "*" in line else token_name
+                break
+
+    await callback.answer("💸 Checking balance…")
+    status_msg = await callback.message.reply("⏳ Checking token balance…")
+
+    try:
+        # Check how many tokens we hold
+        token_amount = await get_token_balance(wallet_address, address)
+        if token_amount == 0:
+            await status_msg.edit_text(
+                f"📭 *No tokens to sell*\n\nWallet holds 0 of `{token_name}`.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Get sell quote: token → SOL (100% of balance)
+        await status_msg.edit_text("⏳ Getting Jupiter sell quote…")
+        quote = await get_jupiter_quote(
+            output_mint=SOL_MINT,
+            amount=token_amount,
+            input_mint=address,
+        )
+        price_impact  = float(quote.get("priceImpactPct", 0))
+        out_lamports  = int(quote.get("outAmount", 0))
+        sol_received  = round(out_lamports / 1_000_000_000, 4)
+
+        # Sign & broadcast
+        await status_msg.edit_text("⏳ Signing and sending transaction…")
+        signature = await execute_swap(quote, keypair)
+
+        await status_msg.edit_text(
+            f"✅ *Sell Executed!*\n\n"
+            f"🪙 Token:          `{token_name}`\n"
+            f"📦 Sold:           `100% of holdings`\n"
+            f"💰 SOL Received:   `~{sol_received} SOL`\n"
+            f"📊 Price Impact:   `{price_impact:.2f}%`\n\n"
+            f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+    except Exception as exc:
+        logger.error("Sell failed for %s: %s", address, exc)
+        await status_msg.edit_text(
+            f"❌ *Sell Failed*\n\n`{str(exc)[:300]}`",
             parse_mode="Markdown",
         )

@@ -1,7 +1,8 @@
 """
 trading.py — Jupiter swap integration.
 
-get_jupiter_quote()  — fetches best SOL→token route from Jupiter API v6
+get_token_balance()  — fetches SPL token balance from Solana RPC
+get_jupiter_quote()  — fetches best swap route from Jupiter API v6
 execute_swap()       — signs the Jupiter transaction and broadcasts it
 
 Slippage default: 1% (100 bps).
@@ -23,25 +24,73 @@ SOLANA_RPC_URL    = "https://api.mainnet-beta.solana.com"
 DEFAULT_SLIPPAGE  = 100   # bps  (1 %)
 
 
+async def get_token_balance(wallet_address: str, token_mint: str) -> int:
+    """
+    Returns the raw (integer) SPL token balance held by *wallet_address*
+    for the given *token_mint*.  Returns 0 if no account exists or on error.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenAccountsByOwner",
+        "params": [
+            wallet_address,
+            {"mint": token_mint},
+            {"encoding": "jsonParsed"},
+        ],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(SOLANA_RPC_URL, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+        accounts = data.get("result", {}).get("value", [])
+        if not accounts:
+            return 0
+
+        # Sum across all token accounts for this mint (usually just one)
+        total = 0
+        for acct in accounts:
+            amount_str = (
+                acct.get("account", {})
+                    .get("data", {})
+                    .get("parsed", {})
+                    .get("info", {})
+                    .get("tokenAmount", {})
+                    .get("amount", "0")
+            )
+            total += int(amount_str)
+        return total
+
+    except Exception as exc:
+        logger.error("Failed to fetch token balance for %s: %s", token_mint, exc)
+        return 0
+
+
 async def get_jupiter_quote(
     output_mint: str,
-    amount_lamports: int,
+    amount: int,
     slippage_bps: int = DEFAULT_SLIPPAGE,
+    input_mint: str = SOL_MINT,
 ) -> dict:
     """
-    Returns the best swap quote for SOL → *output_mint*.
+    Returns the best swap quote for *input_mint* → *output_mint*.
 
-    :param output_mint:    Contract address of the token to buy.
-    :param amount_lamports: Amount of SOL to spend, in lamports (1 SOL = 1e9).
-    :param slippage_bps:   Max acceptable slippage in basis points.
-    :raises httpx.HTTPStatusError: on non-2xx response from Jupiter.
+    Defaults to SOL → token (buy).  Pass input_mint=token, output_mint=SOL_MINT
+    for a sell.
+
+    :param output_mint:  Destination token mint address.
+    :param amount:       Amount of input token in its smallest unit.
+    :param slippage_bps: Max acceptable slippage in basis points.
+    :param input_mint:   Source token mint (default: SOL).
     :raises RuntimeError: if Jupiter returns no routes.
     """
     params = {
-        "inputMint":      SOL_MINT,
-        "outputMint":     output_mint,
-        "amount":         str(amount_lamports),
-        "slippageBps":    slippage_bps,
+        "inputMint":        input_mint,
+        "outputMint":       output_mint,
+        "amount":           str(amount),
+        "slippageBps":      slippage_bps,
         "onlyDirectRoutes": False,
     }
     async with httpx.AsyncClient(timeout=15) as client:
