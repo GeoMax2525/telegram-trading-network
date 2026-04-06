@@ -16,7 +16,8 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.wallet import get_wallet_address, get_sol_balance
+from bot.trading import get_jupiter_quote, execute_swap
+from bot.wallet import get_keypair, get_wallet_address, get_sol_balance
 from database.models import get_keybot_settings, upsert_keybot_settings
 
 logger = logging.getLogger(__name__)
@@ -290,27 +291,59 @@ async def receive_wallet(message: Message, state: FSMContext):
 
 @router.callback_query(lambda c: c.data and c.data.startswith("kbbuy:"))
 async def cb_keybot_buy(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    s = await get_keybot_settings(user_id)
+    user_id  = callback.from_user.id
+    address  = callback.data.split(":", 1)[1]
 
-    if s is None:
+    # Validate settings
+    s = await get_keybot_settings(user_id)
+    if s is None or not s.buy_amount_sol:
         await callback.answer("⚙️ Set up KeyBot first with /keybot", show_alert=True)
         return
 
-    token_name = "this token"
+    keypair = get_keypair()
+    if keypair is None:
+        await callback.answer(
+            "❌ WALLET_PRIVATE_KEY not configured on the server.", show_alert=True
+        )
+        return
+
+    # Parse token name from the Trade Card text
+    token_name = address[:8] + "…"
     if callback.message and callback.message.text:
         for line in callback.message.text.splitlines():
             if line.startswith("🪙"):
                 token_name = line.split("*")[1] if "*" in line else token_name
                 break
 
-    await callback.answer()
-    await callback.message.reply(
-        f"⚡ *KeyBot Simulation*\n\n"
-        f"📋 Token:       `{token_name}`\n"
-        f"💰 Buy:         `{s.buy_amount_sol} SOL`\n"
-        f"🎯 Take Profit: `{s.take_profit_x}x`\n"
-        f"🛑 Stop Loss:   `-{s.stop_loss_pct}%`\n\n"
-        f"_Phase 1 — simulation only. Real execution coming soon._",
-        parse_mode="Markdown",
-    )
+    await callback.answer("⚡ Executing swap…")
+    status_msg = await callback.message.reply("⏳ Getting Jupiter quote…")
+
+    try:
+        amount_lamports = int(s.buy_amount_sol * 1_000_000_000)
+
+        # Get best route
+        quote = await get_jupiter_quote(address, amount_lamports)
+        price_impact = float(quote.get("priceImpactPct", 0))
+
+        # Sign & broadcast
+        await status_msg.edit_text("⏳ Signing and sending transaction…")
+        signature = await execute_swap(quote, keypair)
+
+        await status_msg.edit_text(
+            f"✅ *Swap Executed!*\n\n"
+            f"🪙 Token:          `{token_name}`\n"
+            f"💰 Spent:          `{s.buy_amount_sol} SOL`\n"
+            f"📊 Price Impact:   `{price_impact:.2f}%`\n"
+            f"🎯 Take Profit:    `{s.take_profit_x}x`\n"
+            f"🛑 Stop Loss:      `-{s.stop_loss_pct}%`\n\n"
+            f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+    except Exception as exc:
+        logger.error("Swap failed for %s: %s", address, exc)
+        await status_msg.edit_text(
+            f"❌ *Swap Failed*\n\n`{str(exc)[:300]}`",
+            parse_mode="Markdown",
+        )
