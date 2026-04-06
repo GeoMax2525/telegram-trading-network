@@ -98,11 +98,10 @@ async def get_jupiter_quote(
     for a sell.
     """
     params = {
-        "inputMint":        input_mint,
-        "outputMint":       output_mint,
-        "amount":           str(amount),
-        "slippageBps":      slippage_bps,
-        "onlyDirectRoutes": False,
+        "inputMint":   input_mint,
+        "outputMint":  output_mint,
+        "amount":      str(amount),
+        "slippageBps": slippage_bps,
     }
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
         async with session.get(
