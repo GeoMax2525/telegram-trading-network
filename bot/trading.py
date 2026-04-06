@@ -7,13 +7,15 @@ execute_swap()       — signs the Jupiter transaction and broadcasts it
 
 Slippage default: 1% (100 bps).
 SOL mint:  So11111111111111111111111111111111111111112
+RPC:       Helius (set HELIUS_RPC_URL in Railway env vars)
 """
 
 import base64
 import logging
-from typing import Optional
 
 import httpx
+
+from bot.config import HELIUS_RPC_URL
 
 logger = logging.getLogger(__name__)
 
@@ -22,27 +24,27 @@ JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
 JUPITER_SWAP_URL  = "https://quote-api.jup.ag/v6/swap"
 DEFAULT_SLIPPAGE  = 100   # bps  (1 %)
 
-# RPC endpoints tried in order — first success wins
-SOLANA_RPC_URLS = [
-    "https://solana-mainnet.g.alchemy.com/v2/demo",
-    "https://rpc.ankr.com/solana",
-]
+_JUPITER_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept":       "application/json",
+}
 
+
+# ── RPC helper ────────────────────────────────────────────────────────────────
 
 async def _rpc_post(payload: dict) -> dict:
-    """POST *payload* to Solana RPC, trying each endpoint until one succeeds."""
-    last_exc: Exception = RuntimeError("No RPC endpoints configured.")
+    """POST *payload* to the Helius RPC endpoint."""
     async with httpx.AsyncClient(timeout=30) as client:
-        for url in SOLANA_RPC_URLS:
-            try:
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                return resp.json()
-            except Exception as exc:
-                logger.warning("RPC %s failed: %s — trying next endpoint", url, exc)
-                last_exc = exc
-    raise last_exc
+        resp = await client.post(
+            HELIUS_RPC_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
+
+# ── Token balance ─────────────────────────────────────────────────────────────
 
 async def get_token_balance(wallet_address: str, token_mint: str) -> int:
     """
@@ -60,12 +62,11 @@ async def get_token_balance(wallet_address: str, token_mint: str) -> int:
         ],
     }
     try:
-        data = await _rpc_post(payload)
+        data     = await _rpc_post(payload)
         accounts = data.get("result", {}).get("value", [])
         if not accounts:
             return 0
 
-        # Sum across all token accounts for this mint (usually just one)
         total = 0
         for acct in accounts:
             amount_str = (
@@ -83,6 +84,8 @@ async def get_token_balance(wallet_address: str, token_mint: str) -> int:
         logger.error("Failed to fetch token balance for %s: %s", token_mint, exc)
         return 0
 
+
+# ── Jupiter quote ─────────────────────────────────────────────────────────────
 
 async def get_jupiter_quote(
     output_mint: str,
@@ -109,8 +112,12 @@ async def get_jupiter_quote(
         "slippageBps":      slippage_bps,
         "onlyDirectRoutes": False,
     }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(JUPITER_QUOTE_URL, params=params)
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            JUPITER_QUOTE_URL,
+            params=params,
+            headers=_JUPITER_HEADERS,
+        )
         resp.raise_for_status()
         data = resp.json()
 
@@ -119,6 +126,8 @@ async def get_jupiter_quote(
 
     return data
 
+
+# ── Execute swap ──────────────────────────────────────────────────────────────
 
 async def execute_swap(quote_response: dict, keypair) -> str:
     """
@@ -141,7 +150,11 @@ async def execute_swap(quote_response: dict, keypair) -> str:
         "prioritizationFeeLamports": "auto",
     }
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(JUPITER_SWAP_URL, json=swap_payload)
+        resp = await client.post(
+            JUPITER_SWAP_URL,
+            json=swap_payload,
+            headers=_JUPITER_HEADERS,
+        )
         resp.raise_for_status()
         swap_data = resp.json()
 
@@ -153,9 +166,9 @@ async def execute_swap(quote_response: dict, keypair) -> str:
     tx        = VersionedTransaction.from_bytes(tx_bytes)
     signed_tx = VersionedTransaction(tx.message, [keypair])
 
-    # ── Step 3: Broadcast via Solana JSON-RPC ─────────────────────────────────
+    # ── Step 3: Broadcast via Helius RPC ─────────────────────────────────────
     raw_b64 = base64.b64encode(bytes(signed_tx)).decode()
-    rpc_payload = {
+    rpc_data = await _rpc_post({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "sendTransaction",
@@ -163,8 +176,7 @@ async def execute_swap(quote_response: dict, keypair) -> str:
             raw_b64,
             {"encoding": "base64", "preflightCommitment": "confirmed"},
         ],
-    }
-    rpc_data = await _rpc_post(rpc_payload)
+    })
 
     if "error" in rpc_data:
         raise RuntimeError(f"RPC error: {rpc_data['error'].get('message', rpc_data['error'])}")

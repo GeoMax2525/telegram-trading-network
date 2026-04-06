@@ -44,5 +44,13 @@ VERDICT_THRESHOLDS = {
 # ── DexScreener ───────────────────────────────────────────────────────────────
 DEXSCREENER_URL = "https://api.dexscreener.com/latest/dex/tokens/{address}"
 
+# ── Solana RPC ────────────────────────────────────────────────────────────────
+# Set HELIUS_RPC_URL in Railway env vars for a dedicated key, e.g.:
+#   https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
+HELIUS_RPC_URL: str = os.getenv(
+    "HELIUS_RPC_URL",
+    "https://mainnet.helius-rpc.com/?api-key=demo",
+)
+
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL = "sqlite+aiosqlite:///./trading_network.db"

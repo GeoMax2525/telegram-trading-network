@@ -13,10 +13,9 @@ from typing import Optional
 
 import aiohttp
 
-logger = logging.getLogger(__name__)
+from bot.config import HELIUS_RPC_URL
 
-SOLANA_RPC = "https://solana-mainnet.g.alchemy.com/v2/demo"
-SOLANA_RPC_FALLBACK = "https://rpc.ankr.com/solana"
+logger = logging.getLogger(__name__)
 
 # Module-level keypair cache — loaded once on first access
 _keypair = None
@@ -73,18 +72,17 @@ async def get_sol_balance(address: str) -> Optional[float]:
         "method": "getBalance",
         "params": [address],
     }
-    for rpc_url in (SOLANA_RPC, SOLANA_RPC_FALLBACK):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    rpc_url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    data = await resp.json()
-                    lamports = data["result"]["value"]
-                    return round(lamports / 1_000_000_000, 4)
-        except Exception as exc:
-            logger.warning("RPC %s failed for balance: %s — trying fallback", rpc_url, exc)
-    logger.error("All RPC endpoints failed for balance check: %s", address)
-    return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                HELIUS_RPC_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json()
+                lamports = data["result"]["value"]
+                return round(lamports / 1_000_000_000, 4)
+    except Exception as exc:
+        logger.error("Failed to fetch SOL balance for %s: %s", address, exc)
+        return None
