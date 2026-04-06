@@ -15,9 +15,11 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import BOT_TOKEN
 from bot.handlers import router
+from bot.keybot import router as keybot_router
 from bot.scanner import fetch_live_data
 from database.models import init_db, get_open_scans, update_scan_pnl, close_old_scans
 
@@ -90,8 +92,9 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
     )
 
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+    dp.include_router(keybot_router)
 
     # Start peak tracker in background
     asyncio.create_task(peak_tracker_loop())

@@ -28,6 +28,21 @@ class Base(DeclarativeBase):
     pass
 
 
+# ── KeyBot settings table ─────────────────────────────────────────────────────
+
+class KeyBotSettings(Base):
+    __tablename__ = "keybot_settings"
+
+    id             = Column(Integer,    primary_key=True, autoincrement=True)
+    admin_id       = Column(BigInteger, nullable=False, unique=True, index=True)
+    buy_amount_sol = Column(Float,      nullable=False, default=0.5)
+    take_profit_x  = Column(Float,      nullable=False, default=3.0)
+    stop_loss_pct  = Column(Float,      nullable=False, default=30.0)
+    wallet_address = Column(String(64), nullable=True)
+    created_at     = Column(DateTime,   default=datetime.utcnow, nullable=False)
+    updated_at     = Column(DateTime,   default=datetime.utcnow, nullable=False)
+
+
 # ── Callers table ─────────────────────────────────────────────────────────────
 
 class Caller(Base):
@@ -377,6 +392,38 @@ async def get_top_calls_stats(since: "datetime | None" = None) -> dict:
         result = await session.execute(query)
         row = result.one()
         return {"total": row.total or 0, "avg_x": round(row.avg_x or 0, 2)}
+
+
+async def get_keybot_settings(admin_id: int) -> "KeyBotSettings | None":
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(KeyBotSettings).where(KeyBotSettings.admin_id == admin_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def upsert_keybot_settings(admin_id: int, **kwargs) -> "KeyBotSettings":
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(KeyBotSettings).where(KeyBotSettings.admin_id == admin_id)
+        )
+        settings = result.scalar_one_or_none()
+        if settings is None:
+            settings = KeyBotSettings(
+                admin_id=admin_id,
+                buy_amount_sol=kwargs.get("buy_amount_sol", 0.5),
+                take_profit_x=kwargs.get("take_profit_x",  3.0),
+                stop_loss_pct=kwargs.get("stop_loss_pct",  30.0),
+                wallet_address=kwargs.get("wallet_address"),
+            )
+            session.add(settings)
+        else:
+            for key, val in kwargs.items():
+                setattr(settings, key, val)
+            settings.updated_at = datetime.utcnow()
+        await session.commit()
+        await session.refresh(settings)
+        return settings
 
 
 async def get_recent_scans(limit: int = 20) -> list["Scan"]:
