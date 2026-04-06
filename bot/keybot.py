@@ -16,7 +16,6 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.config import ADMIN_IDS
 from database.models import get_keybot_settings, upsert_keybot_settings
 
 logger = logging.getLogger(__name__)
@@ -105,9 +104,6 @@ def _menu_text(s) -> str:
 
 @router.message(Command("keybot"))
 async def cmd_keybot(message: Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.reply("⛔ Admin only.")
-        return
     await state.clear()
     s = await get_keybot_settings(message.from_user.id)
     await message.reply(_menu_text(s), parse_mode="Markdown", reply_markup=_main_keyboard(s))
@@ -117,11 +113,7 @@ async def cmd_keybot(message: Message, state: FSMContext):
 
 @router.callback_query(lambda c: c.data and c.data.startswith("kb:"))
 async def cb_keybot(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("⛔ Admin only.", show_alert=True)
-        return
-
-    action   = callback.data.split(":", 1)[1]
+    action  = callback.data.split(":", 1)[1]
     admin_id = callback.from_user.id
 
     if action == "menu":
@@ -201,8 +193,6 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
 
 @router.message(KeyBotStates.waiting_for_wallet)
 async def receive_wallet(message: Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
     wallet = (message.text or "").strip()
     if not (32 <= len(wallet) <= 44) or " " in wallet:
         await message.reply("⚠️ Invalid Solana address. Please try again or /keybot to cancel.")
@@ -221,13 +211,8 @@ async def receive_wallet(message: Message, state: FSMContext):
 @router.callback_query(lambda c: c.data and c.data.startswith("kbbuy:"))
 async def cb_keybot_buy(callback: CallbackQuery):
     address  = callback.data.split(":", 1)[1]
-    admin_id = callback.from_user.id
+    user_id  = callback.from_user.id
 
-    if admin_id not in ADMIN_IDS:
-        await callback.answer("⛔ KeyBot is for admins only.", show_alert=True)
-        return
-
-    s = await get_keybot_settings(admin_id)
     if s is None:
         await callback.answer("⚙️ Set up KeyBot first with /keybot", show_alert=True)
         return
