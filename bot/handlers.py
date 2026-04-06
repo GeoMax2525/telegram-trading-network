@@ -423,6 +423,8 @@ async def auto_scan(message: Message):
     if not message.text:
         return
     text = message.text.strip()
+    if text.startswith("/"):
+        return
     if len(text) < 32 or len(text) > 50 or ' ' in text:
         return
     await _do_scan(message, text)

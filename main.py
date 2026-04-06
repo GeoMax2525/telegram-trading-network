@@ -93,8 +93,8 @@ async def main() -> None:
     )
 
     dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
     dp.include_router(keybot_router)
+    dp.include_router(router)
 
     # Start peak tracker in background
     asyncio.create_task(peak_tracker_loop())
