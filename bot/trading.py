@@ -20,8 +20,14 @@ from bot.config import HELIUS_RPC_URL
 logger = logging.getLogger(__name__)
 
 SOL_MINT          = "So11111111111111111111111111111111111111112"
-JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
-JUPITER_SWAP_URL  = "https://quote-api.jup.ag/v6/swap"
+
+# Jupiter endpoints — primary uses QuickNode's hosted Jupiter (more reliable DNS on Railway);
+# fallback uses public.jupiterapi.com if the primary fails.
+_JUPITER_ENDPOINTS = [
+    ("https://jupiter-swap-api.quiknode.pro", "QuickNode"),
+    ("https://public.jupiterapi.com",         "jupiterapi.com"),
+]
+
 DEFAULT_SLIPPAGE  = 100   # bps  (1 %)
 
 _TIMEOUT      = aiohttp.ClientTimeout(total=30)
@@ -95,7 +101,7 @@ async def get_jupiter_quote(
     Returns the best swap quote for *input_mint* → *output_mint*.
 
     Defaults to SOL → token (buy).  Pass input_mint=token, output_mint=SOL_MINT
-    for a sell.
+    for a sell.  Tries each endpoint in _JUPITER_ENDPOINTS in order.
     """
     params = {
         "inputMint":   input_mint,
@@ -103,19 +109,23 @@ async def get_jupiter_quote(
         "amount":      str(amount),
         "slippageBps": slippage_bps,
     }
-    async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-        async with session.get(
-            JUPITER_QUOTE_URL,
-            params=params,
-            headers=_JSON_HEADERS,
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+    last_exc: Exception = RuntimeError("No Jupiter endpoints configured.")
+    for base, label in _JUPITER_ENDPOINTS:
+        url = f"{base}/v6/quote"
+        try:
+            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+                async with session.get(url, params=params, headers=_JSON_HEADERS) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+            if not data.get("outAmount"):
+                raise RuntimeError("Jupiter returned no routes for this token.")
+            logger.info("Jupiter quote via %s", label)
+            return data
+        except Exception as exc:
+            logger.warning("Jupiter quote failed (%s): %s", label, exc)
+            last_exc = exc
 
-    if not data.get("outAmount"):
-        raise RuntimeError("Jupiter returned no routes for this token.")
-
-    return data
+    raise last_exc
 
 
 # ── Execute swap ──────────────────────────────────────────────────────────────
@@ -135,17 +145,26 @@ async def execute_swap(quote_response: dict, keypair) -> str:
         "dynamicComputeUnitLimit":   True,
         "prioritizationFeeLamports": "auto",
     }
-    async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-        async with session.post(
-            JUPITER_SWAP_URL,
-            json=swap_payload,
-            headers=_JSON_HEADERS,
-        ) as resp:
-            resp.raise_for_status()
-            swap_data = await resp.json()
+    swap_data: dict = {}
+    last_exc: Exception = RuntimeError("No Jupiter endpoints configured.")
+    for base, label in _JUPITER_ENDPOINTS:
+        url = f"{base}/v6/swap"
+        try:
+            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+                async with session.post(url, json=swap_payload, headers=_JSON_HEADERS) as resp:
+                    resp.raise_for_status()
+                    swap_data = await resp.json()
+            if "swapTransaction" not in swap_data:
+                raise RuntimeError(f"Jupiter swap build failed: {swap_data}")
+            logger.info("Jupiter swap tx built via %s", label)
+            break
+        except Exception as exc:
+            logger.warning("Jupiter swap failed (%s): %s", label, exc)
+            last_exc = exc
+            swap_data = {}
 
     if "swapTransaction" not in swap_data:
-        raise RuntimeError(f"Jupiter swap build failed: {swap_data}")
+        raise last_exc
 
     # ── Step 2: Deserialise → sign with our keypair ───────────────────────────
     tx_bytes  = base64.b64decode(swap_data["swapTransaction"])
