@@ -13,7 +13,7 @@ RPC:       Helius (set HELIUS_RPC_URL in Railway env vars)
 import base64
 import logging
 
-import httpx
+import aiohttp
 
 from bot.config import HELIUS_RPC_URL
 
@@ -24,24 +24,22 @@ JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
 JUPITER_SWAP_URL  = "https://quote-api.jup.ag/v6/swap"
 DEFAULT_SLIPPAGE  = 100   # bps  (1 %)
 
-_JUPITER_HEADERS = {
-    "Content-Type": "application/json",
-    "Accept":       "application/json",
-}
+_TIMEOUT      = aiohttp.ClientTimeout(total=30)
+_JSON_HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
 
 
 # ── RPC helper ────────────────────────────────────────────────────────────────
 
 async def _rpc_post(payload: dict) -> dict:
     """POST *payload* to the Helius RPC endpoint."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+        async with session.post(
             HELIUS_RPC_URL,
             json=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
-        return resp.json()
+            headers=_JSON_HEADERS,
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.json()
 
 
 # ── Token balance ─────────────────────────────────────────────────────────────
@@ -98,12 +96,6 @@ async def get_jupiter_quote(
 
     Defaults to SOL → token (buy).  Pass input_mint=token, output_mint=SOL_MINT
     for a sell.
-
-    :param output_mint:  Destination token mint address.
-    :param amount:       Amount of input token in its smallest unit.
-    :param slippage_bps: Max acceptable slippage in basis points.
-    :param input_mint:   Source token mint (default: SOL).
-    :raises RuntimeError: if Jupiter returns no routes.
     """
     params = {
         "inputMint":        input_mint,
@@ -112,14 +104,14 @@ async def get_jupiter_quote(
         "slippageBps":      slippage_bps,
         "onlyDirectRoutes": False,
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+        async with session.get(
             JUPITER_QUOTE_URL,
             params=params,
-            headers=_JUPITER_HEADERS,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+            headers=_JSON_HEADERS,
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
 
     if not data.get("outAmount"):
         raise RuntimeError("Jupiter returned no routes for this token.")
@@ -133,11 +125,6 @@ async def execute_swap(quote_response: dict, keypair) -> str:
     """
     Builds the swap transaction via Jupiter, signs it with *keypair*,
     submits it to the Solana network, and returns the transaction signature.
-
-    :param quote_response: The dict returned by get_jupiter_quote().
-    :param keypair:        solders.keypair.Keypair for the trading wallet.
-    :returns: Base58 transaction signature string.
-    :raises RuntimeError: on any failure (Jupiter build, RPC error, etc.).
     """
     from solders.transaction import VersionedTransaction  # type: ignore
 
@@ -149,14 +136,14 @@ async def execute_swap(quote_response: dict, keypair) -> str:
         "dynamicComputeUnitLimit":   True,
         "prioritizationFeeLamports": "auto",
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+        async with session.post(
             JUPITER_SWAP_URL,
             json=swap_payload,
-            headers=_JUPITER_HEADERS,
-        )
-        resp.raise_for_status()
-        swap_data = resp.json()
+            headers=_JSON_HEADERS,
+        ) as resp:
+            resp.raise_for_status()
+            swap_data = await resp.json()
 
     if "swapTransaction" not in swap_data:
         raise RuntimeError(f"Jupiter swap build failed: {swap_data}")
@@ -167,7 +154,7 @@ async def execute_swap(quote_response: dict, keypair) -> str:
     signed_tx = VersionedTransaction(tx.message, [keypair])
 
     # ── Step 3: Broadcast via Helius RPC ─────────────────────────────────────
-    raw_b64 = base64.b64encode(bytes(signed_tx)).decode()
+    raw_b64  = base64.b64encode(bytes(signed_tx)).decode()
     rpc_data = await _rpc_post({
         "jsonrpc": "2.0",
         "id": 1,
