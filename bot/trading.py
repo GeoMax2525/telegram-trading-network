@@ -21,11 +21,11 @@ logger = logging.getLogger(__name__)
 
 SOL_MINT          = "So11111111111111111111111111111111111111112"
 
-# Jupiter endpoints — primary uses QuickNode's hosted Jupiter (more reliable DNS on Railway);
-# fallback uses public.jupiterapi.com if the primary fails.
+# Jupiter endpoints tried in order.  Each entry is (base, label, uses_v6_path).
+# public.jupiterapi.com serves /quote and /swap directly (no /v6/ prefix).
 _JUPITER_ENDPOINTS = [
-    ("https://jupiter-swap-api.quiknode.pro", "QuickNode"),
-    ("https://public.jupiterapi.com",         "jupiterapi.com"),
+    ("https://lite.jupiter.ag",     "lite.jupiter.ag",     True),
+    ("https://public.jupiterapi.com", "jupiterapi.com",    False),
 ]
 
 DEFAULT_SLIPPAGE  = 100   # bps  (1 %)
@@ -110,8 +110,8 @@ async def get_jupiter_quote(
         "slippageBps": slippage_bps,
     }
     last_exc: Exception = RuntimeError("No Jupiter endpoints configured.")
-    for base, label in _JUPITER_ENDPOINTS:
-        url = f"{base}/v6/quote"
+    for base, label, v6 in _JUPITER_ENDPOINTS:
+        url = f"{base}/v6/quote" if v6 else f"{base}/quote"
         try:
             async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
                 async with session.get(url, params=params, headers=_JSON_HEADERS) as resp:
@@ -147,8 +147,8 @@ async def execute_swap(quote_response: dict, keypair) -> str:
     }
     swap_data: dict = {}
     last_exc: Exception = RuntimeError("No Jupiter endpoints configured.")
-    for base, label in _JUPITER_ENDPOINTS:
-        url = f"{base}/v6/swap"
+    for base, label, v6 in _JUPITER_ENDPOINTS:
+        url = f"{base}/v6/swap" if v6 else f"{base}/swap"
         try:
             async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
                 async with session.post(url, json=swap_payload, headers=_JSON_HEADERS) as resp:
