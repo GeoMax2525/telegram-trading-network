@@ -27,7 +27,8 @@ router = Router()
 # ── FSM states ────────────────────────────────────────────────────────────────
 
 class KeyBotStates(StatesGroup):
-    waiting_for_wallet = State()
+    waiting_for_wallet     = State()
+    waiting_for_buy_amount = State()
 
 
 # ── Keyboard builders ─────────────────────────────────────────────────────────
@@ -66,7 +67,8 @@ def _buy_amount_keyboard() -> InlineKeyboardMarkup:
     for amt in (0.1, 0.25, 0.5, 1.0, 2.0):
         builder.button(text=f"{amt} SOL", callback_data=f"kb:set_buy:{amt}")
     builder.adjust(3, 2)
-    builder.row(InlineKeyboardButton(text="⬅️ Back", callback_data="kb:menu"))
+    builder.row(InlineKeyboardButton(text="✏️ Custom", callback_data="kb:custom_buy"))
+    builder.row(InlineKeyboardButton(text="⬅️ Back",   callback_data="kb:menu"))
     return builder.as_markup()
 
 
@@ -179,6 +181,15 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         )
         await callback.answer()
 
+    elif action == "custom_buy":
+        await state.set_state(KeyBotStates.waiting_for_buy_amount)
+        await callback.message.edit_text(
+            "✏️ *Custom Buy Amount*\n\nType the amount of SOL you want to spend per trade:\n_(e.g. 0.3 or 1.5)_",
+            parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),   # reuse the simple Back keyboard
+        )
+        await callback.answer()
+
     elif action == "take_profit":
         await callback.message.edit_text(
             "🎯 *Take Profit*\nAuto-sell when the token hits this multiplier:",
@@ -282,6 +293,36 @@ async def receive_wallet(message: Message, state: FSMContext):
     text, keyboard = await _build_menu(message.from_user.id)
     await message.reply(
         "✅ *Wallet saved!*\n\n" + text,
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+
+
+# ── FSM: custom buy amount input ──────────────────────────────────────────────
+
+@router.message(KeyBotStates.waiting_for_buy_amount)
+async def receive_buy_amount(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if raw.startswith("/"):
+        await state.clear()
+        return
+    try:
+        val = float(raw.replace(",", "."))
+        if val <= 0:
+            raise ValueError
+    except ValueError:
+        await message.reply(
+            "⚠️ Please enter a valid number greater than 0 (e.g. `0.3` or `1.5`).",
+            parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),
+        )
+        return
+
+    await upsert_keybot_settings(message.from_user.id, buy_amount_sol=val)
+    await state.clear()
+    text, keyboard = await _build_menu(message.from_user.id)
+    await message.reply(
+        f"✅ *Buy amount set to {val} SOL*\n\n" + text,
         parse_mode="Markdown",
         reply_markup=keyboard,
     )
