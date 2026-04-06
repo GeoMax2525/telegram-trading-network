@@ -55,7 +55,7 @@ def trade_card_keyboard(
             callback_data=f"kbbuy:{contract_address}",
         ),
         InlineKeyboardButton(
-            text="💸 KeyBot Sell",
+            text="🔫 Full Clip",
             callback_data=f"kbsell:{contract_address}",
         ),
     )
