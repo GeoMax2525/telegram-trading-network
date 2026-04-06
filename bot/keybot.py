@@ -16,6 +16,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from bot.wallet import get_wallet_address, get_sol_balance
 from database.models import get_keybot_settings, upsert_keybot_settings
 
 logger = logging.getLogger(__name__)
@@ -111,20 +112,41 @@ def _confirm_remove_keyboard() -> InlineKeyboardMarkup:
 
 # ── Menu text ─────────────────────────────────────────────────────────────────
 
-def _menu_text(s) -> str:
+def _menu_text(s, balance: float | None = None) -> str:
     sol = s.buy_amount_sol if s else 0.5
     tp  = s.take_profit_x  if s else 3.0
     sl  = s.stop_loss_pct  if s else 30.0
     w   = s.wallet_address  if s else None
-    w_str = f"`{w}`" if w else "_Not set_"
+
+    if w:
+        short = f"{w[:6]}…{w[-4:]}"
+        bal   = f" | `{balance:.4f} SOL`" if balance is not None else ""
+        w_str = f"`{short}`{bal}"
+    else:
+        w_str = "_Not set_"
+
     return (
         "⚡ *KEY BOT SETTINGS*\n\n"
         f"💰 Buy Amount:       `{sol} SOL`\n"
         f"🎯 Take Profit:      `{tp}x`\n"
         f"🛑 Stop Loss:        `{sl}%`\n"
-        f"👛 Wallet Address:   {w_str}\n"
+        f"👛 Wallet:           {w_str}\n"
         f"📊 Open Positions:   `0`\n"
     )
+
+
+async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Fetches settings + balance and returns (menu_text, keyboard)."""
+    s = await get_keybot_settings(user_id)
+
+    # Auto-populate wallet from env WALLET_PRIVATE_KEY if not already set
+    if not (s and s.wallet_address):
+        addr = get_wallet_address()
+        if addr:
+            s = await upsert_keybot_settings(user_id, wallet_address=addr)
+
+    balance = await get_sol_balance(s.wallet_address) if (s and s.wallet_address) else None
+    return _menu_text(s, balance), _main_keyboard(s)
 
 
 # ── /keybot command ───────────────────────────────────────────────────────────
@@ -132,8 +154,8 @@ def _menu_text(s) -> str:
 @router.message(Command("keybot"))
 async def cmd_keybot(message: Message, state: FSMContext):
     await state.clear()
-    s = await get_keybot_settings(message.from_user.id)
-    await message.reply(_menu_text(s), parse_mode="Markdown", reply_markup=_main_keyboard(s))
+    text, keyboard = await _build_menu(message.from_user.id)
+    await message.reply(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
 # ── Settings callbacks ────────────────────────────────────────────────────────
@@ -145,10 +167,8 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
 
     if action == "menu":
         await state.clear()
-        s = await get_keybot_settings(user_id)
-        await callback.message.edit_text(
-            _menu_text(s), parse_mode="Markdown", reply_markup=_main_keyboard(s)
-        )
+        text, keyboard = await _build_menu(user_id)
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
         await callback.answer()
 
     elif action == "buy_amount":
@@ -204,10 +224,8 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
 
     elif action == "remove_wallet":
         await upsert_keybot_settings(user_id, wallet_address=None)
-        s = await get_keybot_settings(user_id)
-        await callback.message.edit_text(
-            _menu_text(s), parse_mode="Markdown", reply_markup=_main_keyboard(s)
-        )
+        text, keyboard = await _build_menu(user_id)
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
         await callback.answer("🗑️ Wallet removed")
 
     elif action == "positions":
@@ -220,26 +238,23 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
 
     elif action.startswith("set_buy:"):
         val = float(action.split(":", 1)[1])
-        s = await upsert_keybot_settings(user_id, buy_amount_sol=val)
-        await callback.message.edit_text(
-            _menu_text(s), parse_mode="Markdown", reply_markup=_main_keyboard(s)
-        )
+        await upsert_keybot_settings(user_id, buy_amount_sol=val)
+        text, keyboard = await _build_menu(user_id)
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
         await callback.answer(f"✅ Buy amount set to {val} SOL")
 
     elif action.startswith("set_tp:"):
         val = float(action.split(":", 1)[1])
-        s = await upsert_keybot_settings(user_id, take_profit_x=val)
-        await callback.message.edit_text(
-            _menu_text(s), parse_mode="Markdown", reply_markup=_main_keyboard(s)
-        )
+        await upsert_keybot_settings(user_id, take_profit_x=val)
+        text, keyboard = await _build_menu(user_id)
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
         await callback.answer(f"✅ Take profit set to {val}x")
 
     elif action.startswith("set_sl:"):
         val = float(action.split(":", 1)[1])
-        s = await upsert_keybot_settings(user_id, stop_loss_pct=val)
-        await callback.message.edit_text(
-            _menu_text(s), parse_mode="Markdown", reply_markup=_main_keyboard(s)
-        )
+        await upsert_keybot_settings(user_id, stop_loss_pct=val)
+        text, keyboard = await _build_menu(user_id)
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
         await callback.answer(f"✅ Stop loss set to {val}%")
 
     else:
@@ -261,12 +276,13 @@ async def receive_wallet(message: Message, state: FSMContext):
             reply_markup=_wallet_input_keyboard(),
         )
         return
-    s = await upsert_keybot_settings(message.from_user.id, wallet_address=wallet)
+    await upsert_keybot_settings(message.from_user.id, wallet_address=wallet)
     await state.clear()
+    text, keyboard = await _build_menu(message.from_user.id)
     await message.reply(
-        "✅ *Wallet saved!*\n\n" + _menu_text(s),
+        "✅ *Wallet saved!*\n\n" + text,
         parse_mode="Markdown",
-        reply_markup=_main_keyboard(s),
+        reply_markup=keyboard,
     )
 
 
