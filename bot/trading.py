@@ -20,8 +20,28 @@ logger = logging.getLogger(__name__)
 SOL_MINT          = "So11111111111111111111111111111111111111112"
 JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
 JUPITER_SWAP_URL  = "https://quote-api.jup.ag/v6/swap"
-SOLANA_RPC_URL    = "https://api.mainnet-beta.solana.com"
 DEFAULT_SLIPPAGE  = 100   # bps  (1 %)
+
+# RPC endpoints tried in order — first success wins
+SOLANA_RPC_URLS = [
+    "https://solana-mainnet.g.alchemy.com/v2/demo",
+    "https://rpc.ankr.com/solana",
+]
+
+
+async def _rpc_post(payload: dict) -> dict:
+    """POST *payload* to Solana RPC, trying each endpoint until one succeeds."""
+    last_exc: Exception = RuntimeError("No RPC endpoints configured.")
+    async with httpx.AsyncClient(timeout=30) as client:
+        for url in SOLANA_RPC_URLS:
+            try:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as exc:
+                logger.warning("RPC %s failed: %s — trying next endpoint", url, exc)
+                last_exc = exc
+    raise last_exc
 
 
 async def get_token_balance(wallet_address: str, token_mint: str) -> int:
@@ -40,11 +60,7 @@ async def get_token_balance(wallet_address: str, token_mint: str) -> int:
         ],
     }
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(SOLANA_RPC_URL, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-
+        data = await _rpc_post(payload)
         accounts = data.get("result", {}).get("value", [])
         if not accounts:
             return 0
@@ -148,10 +164,7 @@ async def execute_swap(quote_response: dict, keypair) -> str:
             {"encoding": "base64", "preflightCommitment": "confirmed"},
         ],
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        rpc_resp = await client.post(SOLANA_RPC_URL, json=rpc_payload)
-        rpc_resp.raise_for_status()
-        rpc_data = rpc_resp.json()
+    rpc_data = await _rpc_post(rpc_payload)
 
     if "error" in rpc_data:
         raise RuntimeError(f"RPC error: {rpc_data['error'].get('message', rpc_data['error'])}")
