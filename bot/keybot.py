@@ -142,13 +142,17 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """Fetches settings + balance and returns (menu_text, keyboard)."""
     s = await get_keybot_settings(user_id)
 
+    # First open: save defaults to DB so settings persist from here on
+    if s is None:
+        s = await upsert_keybot_settings(user_id)
+
     # Auto-populate wallet from env WALLET_PRIVATE_KEY if not already set
-    if not (s and s.wallet_address):
+    if not s.wallet_address:
         addr = get_wallet_address()
         if addr:
             s = await upsert_keybot_settings(user_id, wallet_address=addr)
 
-    balance = await get_sol_balance(s.wallet_address) if (s and s.wallet_address) else None
+    balance = await get_sol_balance(s.wallet_address) if s.wallet_address else None
     return _menu_text(s, balance), _main_keyboard(s)
 
 
