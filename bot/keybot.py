@@ -16,7 +16,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.trading import SOL_MINT, get_jupiter_quote, get_token_balance, execute_swap
+from bot.trading import SOL_MINT, get_ultra_order, get_token_balance, execute_ultra_order
 from bot.wallet import get_keypair, get_wallet_address, get_sol_balance
 from database.models import get_keybot_settings, upsert_keybot_settings
 
@@ -365,14 +365,15 @@ async def cb_keybot_buy(callback: CallbackQuery):
 
     try:
         amount_lamports = int(s.buy_amount_sol * 1_000_000_000)
+        wallet_address  = str(keypair.pubkey())
 
-        # Get best route
-        quote = await get_jupiter_quote(address, amount_lamports)
-        price_impact = float(quote.get("priceImpactPct", 0))
+        # Get Ultra order (quote + transaction in one step)
+        order        = await get_ultra_order(address, amount_lamports, wallet_address)
+        price_impact = float(order.get("priceImpactPct", 0))
 
-        # Sign & broadcast
+        # Sign & submit
         await status_msg.edit_text("⏳ Signing and sending transaction…")
-        signature = await execute_swap(quote, keypair)
+        signature = await execute_ultra_order(order, keypair)
 
         await status_msg.edit_text(
             f"✅ *Swap Executed!*\n\n"
@@ -431,20 +432,21 @@ async def cb_keybot_sell(callback: CallbackQuery):
             )
             return
 
-        # Get sell quote: token → SOL (100% of balance)
+        # Get Ultra sell order: token → SOL (100% of balance)
         await status_msg.edit_text("⏳ Getting Jupiter sell quote…")
-        quote = await get_jupiter_quote(
+        order = await get_ultra_order(
             output_mint=SOL_MINT,
             amount=token_amount,
+            wallet_address=wallet_address,
             input_mint=address,
         )
-        price_impact  = float(quote.get("priceImpactPct", 0))
-        out_lamports  = int(quote.get("outAmount", 0))
+        price_impact  = float(order.get("priceImpactPct", 0))
+        out_lamports  = int(order.get("outAmount", 0))
         sol_received  = round(out_lamports / 1_000_000_000, 4)
 
-        # Sign & broadcast
+        # Sign & submit
         await status_msg.edit_text("⏳ Signing and sending transaction…")
-        signature = await execute_swap(quote, keypair)
+        signature = await execute_ultra_order(order, keypair)
 
         await status_msg.edit_text(
             f"✅ *Sell Executed!*\n\n"
