@@ -51,7 +51,7 @@ def trade_card_keyboard(
     # Row 3 — KeyBot trading
     builder.row(
         InlineKeyboardButton(
-            text="⚡ KeyBot Buy",
+            text="🔑 Key Buy",
             callback_data=f"kbbuy:{contract_address}",
         ),
         InlineKeyboardButton(
