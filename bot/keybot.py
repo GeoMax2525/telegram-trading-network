@@ -38,9 +38,20 @@ class KeyBotStates(StatesGroup):
     waiting_for_buy_amount = State()
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _fmt_mc(mc: float) -> str:
+    """Format a market-cap value as $1.23M / $456K / $789."""
+    if mc >= 1_000_000:
+        return f"${mc / 1_000_000:.2f}M"
+    if mc >= 1_000:
+        return f"${mc / 1_000:.1f}K"
+    return f"${mc:.0f}"
+
+
 # ── Keyboard builders ─────────────────────────────────────────────────────────
 
-def _main_keyboard(s) -> InlineKeyboardMarkup:
+def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
     sol     = s.buy_amount_sol
     tp      = s.take_profit_x
     sl      = s.stop_loss_pct
@@ -60,9 +71,13 @@ def _main_keyboard(s) -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(
         text=w_label, callback_data="kb:wallet"
     ))
-    builder.row(InlineKeyboardButton(
-        text="📊 Open Positions: 0", callback_data="kb:positions"
-    ))
+    # One Close button per open position
+    for pos in (positions or []):
+        label = pos.token_name[:20] if pos.token_name else pos.token_address[:10]
+        builder.row(InlineKeyboardButton(
+            text=f"🔫 Close {label}",
+            callback_data=f"kbclose:{pos.id}",
+        ))
     builder.row(InlineKeyboardButton(
         text="❌ Close", callback_data="kb:close"
     ))
@@ -122,7 +137,14 @@ def _confirm_remove_keyboard() -> InlineKeyboardMarkup:
 
 # ── Menu text ─────────────────────────────────────────────────────────────────
 
-def _menu_text(s, balance: float | None = None, open_pos_count: int = 0) -> str:
+_DIVIDER = "─" * 17
+
+
+def _menu_text(
+    s,
+    balance:  float | None = None,
+    pos_data: list         = None,   # list of (Position, current_mc | None)
+) -> str:
     sol = s.buy_amount_sol
     tp  = s.take_profit_x
     sl  = s.stop_loss_pct
@@ -135,103 +157,78 @@ def _menu_text(s, balance: float | None = None, open_pos_count: int = 0) -> str:
     else:
         w_str = "_Not set_"
 
-    return (
+    text = (
         "⚡ *KEY BOT SETTINGS*\n\n"
-        f"💰 Buy Amount:       `{sol} SOL`\n"
-        f"🎯 Take Profit:      `{tp}x`\n"
-        f"🛑 Stop Loss:        `{sl}%`\n"
-        f"👛 Wallet:           {w_str}\n"
-        f"📊 Open Positions:   `{open_pos_count}`\n"
+        f"💰 Buy Amount:  `{sol} SOL`\n"
+        f"🎯 Take Profit: `{tp}x`\n"
+        f"🛑 Stop Loss:   `{sl}%`\n"
+        f"👛 Wallet:      {w_str}"
     )
 
+    if not pos_data:
+        return text
 
-def _fmt_mc(mc: float) -> str:
-    """Format a market-cap value as $1.23M / $456K / $789."""
-    if mc >= 1_000_000:
-        return f"${mc / 1_000_000:.2f}M"
-    if mc >= 1_000:
-        return f"${mc / 1_000:.1f}K"
-    return f"${mc:.0f}"
+    lines = [text, f"\n📊 *OPEN POSITIONS ({len(pos_data)})*"]
+    for pos, current_mc in pos_data:
+        entry_str  = _fmt_mc(pos.entry_mc)  if pos.entry_mc  else "N/A"
+        now_str    = _fmt_mc(current_mc)     if current_mc    else "N/A"
+        mult_str   = f"{current_mc / pos.entry_mc:.2f}x" if (current_mc and pos.entry_mc) else "N/A"
+        addr_short = f"{pos.token_address[:6]}…{pos.token_address[-6:]}"
 
+        lines.append(
+            f"{_DIVIDER}\n"
+            f"🟢 *{pos.token_name}*\n"
+            f"📍 `{addr_short}`\n"
+            f"Entry MC: {entry_str} | Current: {now_str}\n"
+            f"📈 {mult_str} | 💸 {pos.amount_sol_spent} SOL in\n"
+            f"🎯 TP: {pos.take_profit_x}x | 🛑 SL: {pos.stop_loss_pct}%"
+        )
+    lines.append(_DIVIDER)
 
-async def _build_positions_view(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Returns (text, keyboard) for the Open Positions screen."""
-    logger.info("Fetching open positions for user_id=%s", user_id)
-    positions = await get_open_positions(user_id=user_id)
-    logger.info("Found %d open positions for user_id=%s", len(positions), user_id)
-    builder   = InlineKeyboardBuilder()
-
-    if not positions:
-        text = "📊 *OPEN POSITIONS*\n\n_No open positions._"
-    else:
-        lines = [f"📊 *OPEN POSITIONS ({len(positions)})*"]
-        for pos in positions:
-            live       = await fetch_live_data(pos.token_address)
-            current_mc = live["market_cap"] if live else None
-
-            entry_str = _fmt_mc(pos.entry_mc) if pos.entry_mc else "N/A"
-            if current_mc and pos.entry_mc:
-                mult_str = f"{current_mc / pos.entry_mc:.2f}x"
-                now_str  = _fmt_mc(current_mc)
-            else:
-                mult_str = "N/A"
-                now_str  = "N/A"
-
-            lines.append(
-                f"\n🟢 *{pos.token_name}*\n"
-                f"Entry MC: {entry_str} | Now: {now_str}\n"
-                f"{mult_str} | {pos.amount_sol_spent} SOL spent\n"
-                f"TP: {pos.take_profit_x}x | SL: {pos.stop_loss_pct}%"
-            )
-            builder.row(InlineKeyboardButton(
-                text=f"🔴 Close {pos.token_name[:20]}",
-                callback_data=f"kbclose:{pos.id}",
-            ))
-
-        text = "\n".join(lines)
-
-    builder.row(InlineKeyboardButton(text="⬅️ Back", callback_data="kb:menu"))
-    return text, builder.as_markup()
+    return "\n".join(lines)
 
 
 async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """
-    Loads saved settings from DB and returns (menu_text, keyboard).
+    Loads saved settings + open positions from DB and returns (menu_text, keyboard).
 
-    - First open: creates a row with defaults (buy=0.5 SOL, tp=3x, sl=30%)
-      so settings are persisted from that point on.
-    - Subsequent opens: always reads the saved values — never resets them.
-    - If WALLET_PRIVATE_KEY is set server-side and no wallet is saved yet,
-      auto-fills it in the same upsert (single DB write).
+    - First open: creates a row with defaults (buy=0.5 SOL, tp=3x, sl=30%).
+    - Subsequent opens: always reads saved values.
+    - Open positions are shown inline with live MC fetched in parallel.
     """
     s = await get_keybot_settings(user_id)
 
     if s is None:
-        # First time this user opens /keybot — save defaults immediately.
-        # Also grab the server wallet if configured, all in one write.
         env_wallet = get_wallet_address()
         kwargs = {}
         if env_wallet:
             kwargs["wallet_address"] = env_wallet
         s = await upsert_keybot_settings(user_id, **kwargs)
     elif not s.wallet_address:
-        # Row exists but no wallet yet — fill from env if available.
         env_wallet = get_wallet_address()
         if env_wallet:
             s = await upsert_keybot_settings(user_id, wallet_address=env_wallet)
 
-    balance, open_pos_count = await asyncio.gather(
+    # Fetch SOL balance + open positions concurrently
+    balance_result, positions = await asyncio.gather(
         get_sol_balance(s.wallet_address) if s.wallet_address else asyncio.sleep(0),
         get_open_positions(user_id=user_id),
     )
-    # gather returns the raw list for get_open_positions; sleep(0) returns None for no-wallet
-    if isinstance(open_pos_count, list):
-        open_pos_count = len(open_pos_count)
-    else:
-        open_pos_count = 0
-    if not isinstance(balance, float):
-        balance = None
-    return _menu_text(s, balance, open_pos_count), _main_keyboard(s)
+    balance = balance_result if isinstance(balance_result, float) else None
+
+    # Fetch live MC for every open position concurrently
+    pos_data: list = []
+    if positions:
+        logger.info("_build_menu: fetching live MC for %d positions (user=%s)", len(positions), user_id)
+        live_results = await asyncio.gather(
+            *[fetch_live_data(pos.token_address) for pos in positions],
+            return_exceptions=True,
+        )
+        for pos, live in zip(positions, live_results):
+            mc = live["market_cap"] if isinstance(live, dict) and live else None
+            pos_data.append((pos, mc))
+
+    return _menu_text(s, balance, pos_data), _main_keyboard(s, positions)
 
 
 # ── /keybot command ───────────────────────────────────────────────────────────
@@ -321,16 +318,6 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         text, keyboard = await _build_menu(user_id)
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
         await callback.answer("🗑️ Wallet removed")
-
-    elif action == "positions":
-        try:
-            text, keyboard = await _build_positions_view(user_id)
-            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
-        except Exception as exc:
-            logger.error("Positions view error for user %s: %s", user_id, exc)
-            await callback.answer(f"❌ Error loading positions: {str(exc)[:100]}", show_alert=True)
-            return
-        await callback.answer()
 
     elif action == "close":
         await state.clear()
@@ -658,8 +645,8 @@ async def cb_close_position(callback: CallbackQuery):
             disable_web_page_preview=True,
         )
 
-        # Refresh the positions view in the original message
-        text, keyboard = await _build_positions_view(user_id)
+        # Refresh the main menu (positions now shown inline)
+        text, keyboard = await _build_menu(user_id)
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
     except Exception as exc:
