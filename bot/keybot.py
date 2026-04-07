@@ -17,7 +17,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.config import CALLER_GROUP_ID
+from bot.config import CALLER_GROUP_ID, SCAN_TOPIC_ID
 from bot.scanner import fetch_live_data
 from bot.trading import SOL_MINT, get_ultra_order, get_token_balance, execute_ultra_order
 from bot.wallet import get_keypair, get_wallet_address, get_sol_balance
@@ -746,6 +746,7 @@ async def position_monitor_loop(bot: Bot) -> None:
                                 f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
                                 parse_mode="Markdown",
                                 disable_web_page_preview=True,
+                                message_thread_id=SCAN_TOPIC_ID,
                             )
                             logger.info(
                                 "Auto-closed position %d (%s): %s mult=%.2fx pnl=%.4f SOL",
@@ -769,6 +770,7 @@ async def position_monitor_loop(bot: Bot) -> None:
                             f"📈 Result: `{mult}x`\n\n"
                             f"_No server wallet configured — sell manually._",
                             parse_mode="Markdown",
+                            message_thread_id=SCAN_TOPIC_ID,
                         )
 
                 except Exception as pos_exc:

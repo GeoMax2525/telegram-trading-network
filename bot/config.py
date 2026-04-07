@@ -18,6 +18,11 @@ CALLER_GROUP_ID: int = int(os.getenv("CALLER_GROUP_ID", "0"))
 # Group where Trade Cards are broadcast
 MAIN_GROUP_ID: int = int(os.getenv("MAIN_GROUP_ID", "0"))
 
+# Thread ID of the Scans topic inside CALLER_GROUP_ID.
+# Used to route TP/SL notifications to the correct topic thread.
+# Set SCAN_TOPIC_ID in Railway env vars (see instructions for finding it).
+SCAN_TOPIC_ID: int | None = int(os.getenv("SCAN_TOPIC_ID", "0")) or None
+
 # Comma-separated Telegram user IDs with admin privileges
 ADMIN_IDS: list[int] = [
     int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().lstrip("-").isdigit()
