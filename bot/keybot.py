@@ -122,7 +122,7 @@ def _confirm_remove_keyboard() -> InlineKeyboardMarkup:
 
 # ── Menu text ─────────────────────────────────────────────────────────────────
 
-def _menu_text(s, balance: float | None = None) -> str:
+def _menu_text(s, balance: float | None = None, open_pos_count: int = 0) -> str:
     sol = s.buy_amount_sol
     tp  = s.take_profit_x
     sl  = s.stop_loss_pct
@@ -141,7 +141,7 @@ def _menu_text(s, balance: float | None = None) -> str:
         f"🎯 Take Profit:      `{tp}x`\n"
         f"🛑 Stop Loss:        `{sl}%`\n"
         f"👛 Wallet:           {w_str}\n"
-        f"📊 Open Positions:   `0`\n"
+        f"📊 Open Positions:   `{open_pos_count}`\n"
     )
 
 
@@ -156,7 +156,9 @@ def _fmt_mc(mc: float) -> str:
 
 async def _build_positions_view(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """Returns (text, keyboard) for the Open Positions screen."""
+    logger.info("Fetching open positions for user_id=%s", user_id)
     positions = await get_open_positions(user_id=user_id)
+    logger.info("Found %d open positions for user_id=%s", len(positions), user_id)
     builder   = InlineKeyboardBuilder()
 
     if not positions:
@@ -218,8 +220,18 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         if env_wallet:
             s = await upsert_keybot_settings(user_id, wallet_address=env_wallet)
 
-    balance = await get_sol_balance(s.wallet_address) if s.wallet_address else None
-    return _menu_text(s, balance), _main_keyboard(s)
+    balance, open_pos_count = await asyncio.gather(
+        get_sol_balance(s.wallet_address) if s.wallet_address else asyncio.sleep(0),
+        get_open_positions(user_id=user_id),
+    )
+    # gather returns the raw list for get_open_positions; sleep(0) returns None for no-wallet
+    if isinstance(open_pos_count, list):
+        open_pos_count = len(open_pos_count)
+    else:
+        open_pos_count = 0
+    if not isinstance(balance, float):
+        balance = None
+    return _menu_text(s, balance, open_pos_count), _main_keyboard(s)
 
 
 # ── /keybot command ───────────────────────────────────────────────────────────
@@ -311,8 +323,13 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         await callback.answer("🗑️ Wallet removed")
 
     elif action == "positions":
-        text, keyboard = await _build_positions_view(user_id)
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        try:
+            text, keyboard = await _build_positions_view(user_id)
+            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        except Exception as exc:
+            logger.error("Positions view error for user %s: %s", user_id, exc)
+            await callback.answer(f"❌ Error loading positions: {str(exc)[:100]}", show_alert=True)
+            return
         await callback.answer()
 
     elif action == "close":
@@ -450,30 +467,12 @@ async def cb_keybot_buy(callback: CallbackQuery):
         await status_msg.edit_text("⏳ Signing and sending transaction…")
         signature = await execute_ultra_order(order, keypair)
 
-        # Fetch entry MC + price for position record
-        live       = await fetch_live_data(address)
-        entry_mc   = live["market_cap"] if live else None
-        entry_price = live["price_usd"] if live else None
-
-        # Save open position
-        await open_position(
-            user_id=user_id,
-            token_address=address,
-            token_name=token_name,
-            amount_sol_spent=s.buy_amount_sol,
-            take_profit_x=s.take_profit_x,
-            stop_loss_pct=s.stop_loss_pct,
-            entry_price=entry_price,
-            entry_mc=entry_mc,
-            tokens_received=tokens_received,
-        )
-
-        mc_str = f" | MC: {_fmt_mc(entry_mc)}" if entry_mc else ""
+        mc_str = ""
         await status_msg.edit_text(
             f"✅ *Swap Executed!*\n\n"
             f"🪙 Token:          `{token_name}`\n"
             f"💰 Spent:          `{s.buy_amount_sol} SOL`\n"
-            f"📊 Price Impact:   `{price_impact:.2f}%`{mc_str}\n"
+            f"📊 Price Impact:   `{price_impact:.2f}%`\n"
             f"🎯 Take Profit:    `{s.take_profit_x}x`\n"
             f"🛑 Stop Loss:      `-{s.stop_loss_pct}%`\n\n"
             f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
@@ -487,6 +486,29 @@ async def cb_keybot_buy(callback: CallbackQuery):
             f"❌ *Swap Failed*\n\n`{str(exc)[:300]}`",
             parse_mode="Markdown",
         )
+        return
+
+    # Save position separately — DB failure must not hide a successful swap
+    try:
+        live        = await fetch_live_data(address)
+        entry_mc    = live["market_cap"] if live else None
+        entry_price = live["price_usd"]  if live else None
+        logger.info("Saving position: user=%s token=%s sol=%.4f entry_mc=%s",
+                    user_id, token_name, s.buy_amount_sol, entry_mc)
+        await open_position(
+            user_id=user_id,
+            token_address=address,
+            token_name=token_name,
+            amount_sol_spent=s.buy_amount_sol,
+            take_profit_x=s.take_profit_x,
+            stop_loss_pct=s.stop_loss_pct,
+            entry_price=entry_price,
+            entry_mc=entry_mc,
+            tokens_received=tokens_received,
+        )
+        logger.info("Position saved for %s", token_name)
+    except Exception as db_exc:
+        logger.error("Failed to save position for %s: %s", token_name, db_exc)
 
 
 # ── 💸 KeyBot Sell callback (on Trade Cards) ─────────────────────────────────
