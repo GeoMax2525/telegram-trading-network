@@ -25,6 +25,7 @@ from database.models import (
     get_keybot_settings, upsert_keybot_settings,
     open_position, close_position,
     get_open_positions, get_position_by_id, get_open_position_by_token,
+    debug_all_positions,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,16 +211,26 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
             s = await upsert_keybot_settings(user_id, wallet_address=env_wallet)
 
     # Fetch SOL balance + open positions concurrently
-    balance_result, positions = await asyncio.gather(
+    gathered = await asyncio.gather(
         get_sol_balance(s.wallet_address) if s.wallet_address else asyncio.sleep(0),
         get_open_positions(user_id=user_id),
+        return_exceptions=True,
     )
+    balance_result, positions_result = gathered[0], gathered[1]
+
     balance = balance_result if isinstance(balance_result, float) else None
+
+    if isinstance(positions_result, Exception):
+        logger.error("_build_menu: get_open_positions failed for user %s: %s", user_id, positions_result)
+        positions = []
+    else:
+        positions = positions_result
+
+    logger.info("_build_menu: found %d open positions for user_id=%s", len(positions), user_id)
 
     # Fetch live MC for every open position concurrently
     pos_data: list = []
     if positions:
-        logger.info("_build_menu: fetching live MC for %d positions (user=%s)", len(positions), user_id)
         live_results = await asyncio.gather(
             *[fetch_live_data(pos.token_address) for pos in positions],
             return_exceptions=True,
@@ -227,6 +238,12 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         for pos, live in zip(positions, live_results):
             mc = live["market_cap"] if isinstance(live, dict) and live else None
             pos_data.append((pos, mc))
+            logger.info(
+                "_build_menu: pos id=%d %r entry_mc=%s current_mc=%s",
+                pos.id, pos.token_name,
+                f"{pos.entry_mc:.0f}" if pos.entry_mc else "None",
+                f"{mc:.0f}" if mc else "None",
+            )
 
     return _menu_text(s, balance, pos_data), _main_keyboard(s, positions)
 
@@ -236,6 +253,7 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
 @router.message(Command("keybot"))
 async def cmd_keybot(message: Message, state: FSMContext):
     await state.clear()
+    await debug_all_positions()   # dump full positions table to Railway logs
     text, keyboard = await _build_menu(message.from_user.id)
     await message.reply(text, parse_mode="Markdown", reply_markup=keyboard)
 

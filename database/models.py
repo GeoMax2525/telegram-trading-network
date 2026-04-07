@@ -527,6 +527,29 @@ async def get_position_by_id(position_id: int) -> "Position | None":
         return await session.get(Position, position_id)
 
 
+async def debug_all_positions() -> None:
+    """Dumps every row in the positions table to the log. Call on startup or demand."""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Position).order_by(Position.id))
+            rows = result.scalars().all()
+        if not rows:
+            logger.info("DEBUG positions table: 0 rows")
+            return
+        logger.info("DEBUG positions table: %d rows total", len(rows))
+        for p in rows:
+            logger.info(
+                "  pos id=%d user_id=%d token=%s name=%r status=%s "
+                "sol=%.4f entry_mc=%s opened=%s",
+                p.id, p.user_id, p.token_address[:12], p.token_name,
+                p.status, p.amount_sol_spent,
+                f"{p.entry_mc:.0f}" if p.entry_mc else "None",
+                p.opened_at.strftime("%Y-%m-%d %H:%M") if p.opened_at else "None",
+            )
+    except Exception as exc:
+        logger.error("debug_all_positions failed: %s", exc)
+
+
 async def get_open_position_by_token(user_id: int, token_address: str) -> "Position | None":
     """Returns the latest open position for a (user, token) pair, or None."""
     async with AsyncSessionLocal() as session:
