@@ -214,16 +214,43 @@ async def fetch_current_market_cap(address: str) -> Optional[float]:
 
 async def fetch_live_data(address: str) -> Optional[dict]:
     """
-    Returns {market_cap, liquidity_usd, price_usd} for the given address, or None on failure.
-    Used by the background tracker and position monitor.
+    Returns live token data dict, or None on failure.
+    Keys: market_cap, liquidity_usd, price_usd, symbol, price_changes{m5,h1,h6,h24}
     """
     pair = await fetch_token_data(address)
     if pair is None:
         return None
-    mc    = float(pair.get("marketCap") or pair.get("fdv") or 0)
-    liq   = float((pair.get("liquidity") or {}).get("usd") or 0)
-    price = float(pair.get("priceUsd") or 0)
-    return {"market_cap": mc, "liquidity_usd": liq, "price_usd": price}
+    mc     = float(pair.get("marketCap") or pair.get("fdv") or 0)
+    liq    = float((pair.get("liquidity") or {}).get("usd") or 0)
+    price  = float(pair.get("priceUsd") or 0)
+    pc     = pair.get("priceChange") or {}
+    symbol = (pair.get("baseToken") or {}).get("symbol", "???")
+    return {
+        "market_cap":    mc,
+        "liquidity_usd": liq,
+        "price_usd":     price,
+        "symbol":        symbol,
+        "price_changes": {
+            "m5":  float(pc.get("m5")  or 0),
+            "h1":  float(pc.get("h1")  or 0),
+            "h6":  float(pc.get("h6")  or 0),
+            "h24": float(pc.get("h24") or 0),
+        },
+    }
+
+
+async def fetch_sol_price_usd() -> float:
+    """Returns current SOL/USD price from Jupiter price API, or 0 on failure."""
+    url = "https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                return float(
+                    data["data"]["So11111111111111111111111111111111111111112"]["price"]
+                )
+    except Exception:
+        return 0.0
 
 
 async def scan_token(address: str) -> Optional[dict]:

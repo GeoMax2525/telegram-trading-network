@@ -18,7 +18,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.config import CALLER_GROUP_ID, SCAN_TOPIC_ID
-from bot.scanner import fetch_live_data
+from bot.scanner import fetch_live_data, fetch_sol_price_usd
 from bot.trading import SOL_MINT, get_ultra_order, get_token_balance, execute_ultra_order
 from bot.wallet import get_keypair, get_wallet_address, get_sol_balance
 from database.models import (
@@ -42,12 +42,30 @@ class KeyBotStates(StatesGroup):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _fmt_mc(mc: float) -> str:
-    """Format a market-cap value as $1.23M / $456K / $789."""
+    if mc >= 1_000_000_000:
+        return f"${mc / 1_000_000_000:.2f}B"
     if mc >= 1_000_000:
         return f"${mc / 1_000_000:.2f}M"
     if mc >= 1_000:
         return f"${mc / 1_000:.1f}K"
     return f"${mc:.0f}"
+
+
+def _fmt_price(price: float) -> str:
+    if price == 0:
+        return "$0"
+    if price >= 1:
+        return f"${price:.2f}"
+    if price >= 0.01:
+        return f"${price:.4f}"
+    if price >= 0.000001:
+        return f"${price:.8f}".rstrip("0")
+    return f"${price:.2e}"
+
+
+def _fmt_pct(v: float) -> str:
+    sign = "+" if v >= 0 else ""
+    return f"{sign}{v:.1f}%"
 
 
 # ── Keyboard builders ─────────────────────────────────────────────────────────
@@ -138,13 +156,11 @@ def _confirm_remove_keyboard() -> InlineKeyboardMarkup:
 
 # ── Menu text ─────────────────────────────────────────────────────────────────
 
-_DIVIDER = "─" * 17
-
-
 def _menu_text(
     s,
-    balance:  float | None = None,
-    pos_data: list         = None,   # list of (Position, current_mc | None)
+    balance:       float | None = None,
+    pos_live_data: list         = None,   # [(Position, live_dict | None), ...]
+    sol_price_usd: float        = 0.0,
 ) -> str:
     sol = s.buy_amount_sol
     tp  = s.take_profit_x
@@ -158,7 +174,7 @@ def _menu_text(
     else:
         w_str = "_Not set_"
 
-    text = (
+    settings = (
         "⚡ *KEY BOT SETTINGS*\n\n"
         f"💰 Buy Amount:  `{sol} SOL`\n"
         f"🎯 Take Profit: `{tp}x`\n"
@@ -166,25 +182,54 @@ def _menu_text(
         f"👛 Wallet:      {w_str}"
     )
 
-    if not pos_data:
-        return text
+    if not pos_live_data:
+        return settings
 
-    lines = [text, f"\n📊 *OPEN POSITIONS ({len(pos_data)})*"]
-    for pos, current_mc in pos_data:
-        entry_str  = _fmt_mc(pos.entry_mc)  if pos.entry_mc  else "N/A"
-        now_str    = _fmt_mc(current_mc)     if current_mc    else "N/A"
-        mult_str   = f"{current_mc / pos.entry_mc:.2f}x" if (current_mc and pos.entry_mc) else "N/A"
-        addr_short = f"{pos.token_address[:6]}…{pos.token_address[-6:]}"
+    lines = [settings, "", "📂 *OPEN POSITIONS*"]
+    total_pos_sol = 0.0
+
+    for i, (pos, live) in enumerate(pos_live_data, 1):
+        current_mc  = (live or {}).get("market_cap", 0) or 0
+        price_usd   = (live or {}).get("price_usd",  0) or 0
+        symbol      = (live or {}).get("symbol", "???")
+        pc          = (live or {}).get("price_changes", {})
+
+        if pos.entry_mc and pos.entry_mc > 0 and current_mc > 0:
+            ratio           = current_mc / pos.entry_mc
+            current_val_sol = pos.amount_sol_spent * ratio
+            profit_sol      = current_val_sol - pos.amount_sol_spent
+            profit_pct      = (ratio - 1.0) * 100.0
+        else:
+            current_val_sol = pos.amount_sol_spent
+            profit_sol      = 0.0
+            profit_pct      = 0.0
+
+        total_pos_sol  += current_val_sol
+        current_val_usd = current_val_sol * sol_price_usd if sol_price_usd else 0.0
+
+        p_sign = "+" if profit_pct >= 0 else ""
+        s_sign = "+" if profit_sol >= 0 else ""
+
+        mc_str    = _fmt_mc(current_mc) if current_mc else "N/A"
+        price_str = _fmt_price(price_usd) if price_usd else "N/A"
 
         lines.append(
-            f"{_DIVIDER}\n"
-            f"🟢 *{pos.token_name}*\n"
-            f"📍 `{addr_short}`\n"
-            f"Entry MC: {entry_str} | Current: {now_str}\n"
-            f"📈 {mult_str} | 💸 {pos.amount_sol_spent} SOL in\n"
-            f"🎯 TP: {pos.take_profit_x}x | 🛑 SL: {pos.stop_loss_pct}%"
+            f"/{i} *${symbol}*\n"
+            f"Profit: `{p_sign}{profit_pct:.1f}%` / `{s_sign}{profit_sol:.4f} SOL`\n"
+            f"Value: `${current_val_usd:.2f}` / `{current_val_sol:.4f} SOL`\n"
+            f"Mcap: `{mc_str}` @ `{price_str}`\n"
+            f"5m: {_fmt_pct(pc.get('m5', 0))}, "
+            f"1h: {_fmt_pct(pc.get('h1', 0))}, "
+            f"6h: {_fmt_pct(pc.get('h6', 0))}, "
+            f"24h: {_fmt_pct(pc.get('h24', 0))}"
         )
-    lines.append(_DIVIDER)
+
+    bal_str  = f"{balance:.2f}" if balance is not None else "?"
+    net_sol  = (balance or 0.0) + total_pos_sol
+    net_usd  = net_sol * sol_price_usd if sol_price_usd else 0.0
+
+    lines.append(f"\nBalance: `{bal_str} SOL`")
+    lines.append(f"Net Worth: `{net_sol:.2f} SOL` / `${net_usd:.2f}`")
 
     return "\n".join(lines)
 
@@ -228,24 +273,29 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
 
     logger.info("_build_menu: found %d open positions for user_id=%s", len(positions), user_id)
 
-    # Fetch live MC for every open position concurrently
-    pos_data: list = []
+    # Fetch live data for every position + SOL price concurrently
+    pos_live_data: list = []
+    sol_price_usd: float = 0.0
     if positions:
-        live_results = await asyncio.gather(
-            *[fetch_live_data(pos.token_address) for pos in positions],
-            return_exceptions=True,
-        )
+        fetch_tasks = [fetch_live_data(pos.token_address) for pos in positions]
+        fetch_tasks.append(fetch_sol_price_usd())
+        all_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+        live_results  = all_results[:-1]
+        sol_result    = all_results[-1]
+        sol_price_usd = sol_result if isinstance(sol_result, float) else 0.0
+
         for pos, live in zip(positions, live_results):
-            mc = live["market_cap"] if isinstance(live, dict) and live else None
-            pos_data.append((pos, mc))
+            live_dict = live if isinstance(live, dict) else None
+            pos_live_data.append((pos, live_dict))
             logger.info(
                 "_build_menu: pos id=%d %r entry_mc=%s current_mc=%s",
                 pos.id, pos.token_name,
                 f"{pos.entry_mc:.0f}" if pos.entry_mc else "None",
-                f"{mc:.0f}" if mc else "None",
+                f"{live_dict['market_cap']:.0f}" if live_dict else "None",
             )
 
-    return _menu_text(s, balance, pos_data), _main_keyboard(s, positions)
+    return _menu_text(s, balance, pos_live_data, sol_price_usd), _main_keyboard(s, positions)
 
 
 # ── /keybot command ───────────────────────────────────────────────────────────
