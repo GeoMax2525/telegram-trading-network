@@ -34,10 +34,10 @@ class KeyBotStates(StatesGroup):
 # ── Keyboard builders ─────────────────────────────────────────────────────────
 
 def _main_keyboard(s) -> InlineKeyboardMarkup:
-    sol = s.buy_amount_sol if s else 0.5
-    tp  = s.take_profit_x  if s else 3.0
-    sl  = s.stop_loss_pct  if s else 30.0
-    w   = s.wallet_address  if s else None
+    sol     = s.buy_amount_sol
+    tp      = s.take_profit_x
+    sl      = s.stop_loss_pct
+    w       = s.wallet_address
     w_label = f"👛 Wallet: {w[:6]}…{w[-4:]}" if w else "👛 Wallet Address: Not set"
 
     builder = InlineKeyboardBuilder()
@@ -116,10 +116,10 @@ def _confirm_remove_keyboard() -> InlineKeyboardMarkup:
 # ── Menu text ─────────────────────────────────────────────────────────────────
 
 def _menu_text(s, balance: float | None = None) -> str:
-    sol = s.buy_amount_sol if s else 0.5
-    tp  = s.take_profit_x  if s else 3.0
-    sl  = s.stop_loss_pct  if s else 30.0
-    w   = s.wallet_address  if s else None
+    sol = s.buy_amount_sol
+    tp  = s.take_profit_x
+    sl  = s.stop_loss_pct
+    w   = s.wallet_address
 
     if w:
         short = f"{w[:6]}…{w[-4:]}"
@@ -139,18 +139,30 @@ def _menu_text(s, balance: float | None = None) -> str:
 
 
 async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Fetches settings + balance and returns (menu_text, keyboard)."""
+    """
+    Loads saved settings from DB and returns (menu_text, keyboard).
+
+    - First open: creates a row with defaults (buy=0.5 SOL, tp=3x, sl=30%)
+      so settings are persisted from that point on.
+    - Subsequent opens: always reads the saved values — never resets them.
+    - If WALLET_PRIVATE_KEY is set server-side and no wallet is saved yet,
+      auto-fills it in the same upsert (single DB write).
+    """
     s = await get_keybot_settings(user_id)
 
-    # First open: save defaults to DB so settings persist from here on
     if s is None:
-        s = await upsert_keybot_settings(user_id)
-
-    # Auto-populate wallet from env WALLET_PRIVATE_KEY if not already set
-    if not s.wallet_address:
-        addr = get_wallet_address()
-        if addr:
-            s = await upsert_keybot_settings(user_id, wallet_address=addr)
+        # First time this user opens /keybot — save defaults immediately.
+        # Also grab the server wallet if configured, all in one write.
+        env_wallet = get_wallet_address()
+        kwargs = {}
+        if env_wallet:
+            kwargs["wallet_address"] = env_wallet
+        s = await upsert_keybot_settings(user_id, **kwargs)
+    elif not s.wallet_address:
+        # Row exists but no wallet yet — fill from env if available.
+        env_wallet = get_wallet_address()
+        if env_wallet:
+            s = await upsert_keybot_settings(user_id, wallet_address=env_wallet)
 
     balance = await get_sol_balance(s.wallet_address) if s.wallet_address else None
     return _menu_text(s, balance), _main_keyboard(s)
