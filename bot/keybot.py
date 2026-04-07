@@ -4,9 +4,10 @@ keybot.py — KeyBot settings menu and simulated buy execution.
 Phase 1: UI + preset storage only (no real on-chain trading).
 """
 
+import asyncio
 import logging
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -16,9 +17,15 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from bot.config import CALLER_GROUP_ID
+from bot.scanner import fetch_live_data
 from bot.trading import SOL_MINT, get_ultra_order, get_token_balance, execute_ultra_order
 from bot.wallet import get_keypair, get_wallet_address, get_sol_balance
-from database.models import get_keybot_settings, upsert_keybot_settings
+from database.models import (
+    get_keybot_settings, upsert_keybot_settings,
+    open_position, close_position,
+    get_open_positions, get_position_by_id, get_open_position_by_token,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -136,6 +143,53 @@ def _menu_text(s, balance: float | None = None) -> str:
         f"👛 Wallet:           {w_str}\n"
         f"📊 Open Positions:   `0`\n"
     )
+
+
+def _fmt_mc(mc: float) -> str:
+    """Format a market-cap value as $1.23M / $456K / $789."""
+    if mc >= 1_000_000:
+        return f"${mc / 1_000_000:.2f}M"
+    if mc >= 1_000:
+        return f"${mc / 1_000:.1f}K"
+    return f"${mc:.0f}"
+
+
+async def _build_positions_view(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Returns (text, keyboard) for the Open Positions screen."""
+    positions = await get_open_positions(user_id=user_id)
+    builder   = InlineKeyboardBuilder()
+
+    if not positions:
+        text = "📊 *OPEN POSITIONS*\n\n_No open positions._"
+    else:
+        lines = [f"📊 *OPEN POSITIONS ({len(positions)})*"]
+        for pos in positions:
+            live       = await fetch_live_data(pos.token_address)
+            current_mc = live["market_cap"] if live else None
+
+            entry_str = _fmt_mc(pos.entry_mc) if pos.entry_mc else "N/A"
+            if current_mc and pos.entry_mc:
+                mult_str = f"{current_mc / pos.entry_mc:.2f}x"
+                now_str  = _fmt_mc(current_mc)
+            else:
+                mult_str = "N/A"
+                now_str  = "N/A"
+
+            lines.append(
+                f"\n🟢 *{pos.token_name}*\n"
+                f"Entry MC: {entry_str} | Now: {now_str}\n"
+                f"{mult_str} | {pos.amount_sol_spent} SOL spent\n"
+                f"TP: {pos.take_profit_x}x | SL: {pos.stop_loss_pct}%"
+            )
+            builder.row(InlineKeyboardButton(
+                text=f"🔴 Close {pos.token_name[:12]}",
+                callback_data=f"kbclose:{pos.id}",
+            ))
+
+        text = "\n".join(lines)
+
+    builder.row(InlineKeyboardButton(text="⬅️ Back", callback_data="kb:menu"))
+    return text, builder.as_markup()
 
 
 async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -257,7 +311,9 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         await callback.answer("🗑️ Wallet removed")
 
     elif action == "positions":
-        await callback.answer("📊 No open positions yet — coming in Phase 2!", show_alert=True)
+        text, keyboard = await _build_positions_view(user_id)
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        await callback.answer()
 
     elif action == "close":
         await state.clear()
@@ -380,18 +436,38 @@ async def cb_keybot_buy(callback: CallbackQuery):
         wallet_address  = str(keypair.pubkey())
 
         # Get Ultra order (quote + transaction in one step)
-        order        = await get_ultra_order(address, amount_lamports, wallet_address)
-        price_impact = float(order.get("priceImpactPct", 0))
+        order            = await get_ultra_order(address, amount_lamports, wallet_address)
+        price_impact     = float(order.get("priceImpactPct", 0))
+        tokens_received  = str(order.get("outAmount", ""))
 
         # Sign & submit
         await status_msg.edit_text("⏳ Signing and sending transaction…")
         signature = await execute_ultra_order(order, keypair)
 
+        # Fetch entry MC + price for position record
+        live       = await fetch_live_data(address)
+        entry_mc   = live["market_cap"] if live else None
+        entry_price = live["price_usd"] if live else None
+
+        # Save open position
+        await open_position(
+            user_id=user_id,
+            token_address=address,
+            token_name=token_name,
+            amount_sol_spent=s.buy_amount_sol,
+            take_profit_x=s.take_profit_x,
+            stop_loss_pct=s.stop_loss_pct,
+            entry_price=entry_price,
+            entry_mc=entry_mc,
+            tokens_received=tokens_received,
+        )
+
+        mc_str = f" | MC: {_fmt_mc(entry_mc)}" if entry_mc else ""
         await status_msg.edit_text(
             f"✅ *Swap Executed!*\n\n"
             f"🪙 Token:          `{token_name}`\n"
             f"💰 Spent:          `{s.buy_amount_sol} SOL`\n"
-            f"📊 Price Impact:   `{price_impact:.2f}%`\n"
+            f"📊 Price Impact:   `{price_impact:.2f}%`{mc_str}\n"
             f"🎯 Take Profit:    `{s.take_profit_x}x`\n"
             f"🛑 Stop Loss:      `-{s.stop_loss_pct}%`\n\n"
             f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
@@ -460,12 +536,21 @@ async def cb_keybot_sell(callback: CallbackQuery):
         await status_msg.edit_text("⏳ Signing and sending transaction…")
         signature = await execute_ultra_order(order, keypair)
 
+        # Close open position if one exists for this token
+        pnl_sol: float | None = None
+        pos = await get_open_position_by_token(user_id, address)
+        if pos:
+            pnl_sol = round(sol_received - pos.amount_sol_spent, 4)
+            await close_position(pos.id, "manual", pnl_sol)
+
+        pnl_str = f"\n💹 PnL:            `{pnl_sol:+.4f} SOL`" if pnl_sol is not None else ""
         await status_msg.edit_text(
             f"✅ *Sell Executed!*\n\n"
             f"🪙 Token:          `{token_name}`\n"
             f"📦 Sold:           `100% of holdings`\n"
             f"💰 SOL Received:   `~{sol_received} SOL`\n"
-            f"📊 Price Impact:   `{price_impact:.2f}%`\n\n"
+            f"📊 Price Impact:   `{price_impact:.2f}%`"
+            f"{pnl_str}\n\n"
             f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
             parse_mode="Markdown",
             disable_web_page_preview=True,
@@ -477,3 +562,174 @@ async def cb_keybot_sell(callback: CallbackQuery):
             f"❌ *Sell Failed*\n\n`{str(exc)[:300]}`",
             parse_mode="Markdown",
         )
+
+
+# ── 🔴 Close Position callback (from Open Positions view) ────────────────────
+
+@router.callback_query(lambda c: c.data and c.data.startswith("kbclose:"))
+async def cb_close_position(callback: CallbackQuery):
+    user_id     = callback.from_user.id
+    position_id = int(callback.data.split(":", 1)[1])
+
+    pos = await get_position_by_id(position_id)
+    if pos is None or pos.status != "open":
+        await callback.answer("Position already closed.", show_alert=True)
+        return
+    if pos.user_id != user_id:
+        await callback.answer("Not your position.", show_alert=True)
+        return
+
+    keypair = get_keypair()
+    if keypair is None:
+        await callback.answer("❌ WALLET_PRIVATE_KEY not configured.", show_alert=True)
+        return
+
+    wallet_address = str(keypair.pubkey())
+    await callback.answer("🔴 Closing position…")
+    status_msg = await callback.message.reply(
+        f"⏳ Closing position for *{pos.token_name}*…", parse_mode="Markdown"
+    )
+
+    try:
+        token_amount = await get_token_balance(wallet_address, pos.token_address)
+        if token_amount == 0:
+            await close_position(pos.id, "manual", pnl_sol=None)
+            await status_msg.edit_text(
+                f"📭 *Position Closed*\n\nNo tokens found in wallet for `{pos.token_name}`.",
+                parse_mode="Markdown",
+            )
+            return
+
+        order        = await get_ultra_order(
+            output_mint=SOL_MINT,
+            amount=token_amount,
+            wallet_address=wallet_address,
+            input_mint=pos.token_address,
+        )
+        out_lamports = int(order.get("outAmount", 0))
+        sol_received = round(out_lamports / 1_000_000_000, 4)
+        signature    = await execute_ultra_order(order, keypair)
+
+        pnl_sol = round(sol_received - pos.amount_sol_spent, 4)
+        await close_position(pos.id, "manual", pnl_sol)
+
+        pnl_emoji = "🟢" if pnl_sol >= 0 else "🔴"
+        await status_msg.edit_text(
+            f"✅ *Position Closed*\n\n"
+            f"🪙 Token:          `{pos.token_name}`\n"
+            f"💰 SOL Received:   `{sol_received} SOL`\n"
+            f"{pnl_emoji} PnL:            `{pnl_sol:+.4f} SOL`\n\n"
+            f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+        # Refresh the positions view in the original message
+        text, keyboard = await _build_positions_view(user_id)
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+    except Exception as exc:
+        logger.error("Close position %d failed: %s", position_id, exc)
+        await status_msg.edit_text(
+            f"❌ *Close Failed*\n\n`{str(exc)[:300]}`", parse_mode="Markdown"
+        )
+
+
+# ── Background: position monitor ──────────────────────────────────────────────
+
+async def position_monitor_loop(bot: Bot) -> None:
+    """
+    Every 5 minutes checks all open positions across all users:
+    - If current MC >= entry_mc * take_profit_x → sell + close as tp_hit
+    - If current MC <= entry_mc * (1 - stop_loss_pct/100) → sell + close as sl_hit
+    Sends a notification to CALLER_GROUP_ID on auto-close.
+    """
+    await asyncio.sleep(60)   # startup delay
+    while True:
+        try:
+            positions = await get_open_positions()   # all users
+            keypair   = get_keypair()
+
+            for pos in positions:
+                if not pos.entry_mc:
+                    continue
+                try:
+                    live = await fetch_live_data(pos.token_address)
+                    if not live or not live["market_cap"]:
+                        continue
+                    current_mc = live["market_cap"]
+
+                    tp_mc = pos.entry_mc * pos.take_profit_x
+                    sl_mc = pos.entry_mc * (1 - pos.stop_loss_pct / 100)
+
+                    hit_tp = current_mc >= tp_mc
+                    hit_sl = current_mc <= sl_mc
+
+                    if not (hit_tp or hit_sl):
+                        continue
+
+                    reason = "tp_hit" if hit_tp else "sl_hit"
+                    emoji  = "🎯" if hit_tp else "🛑"
+                    label  = "TAKE PROFIT HIT" if hit_tp else "STOP LOSS HIT"
+
+                    # Auto-sell if server wallet is configured
+                    if keypair:
+                        wallet_address = str(keypair.pubkey())
+                        token_amount   = await get_token_balance(wallet_address, pos.token_address)
+                        if token_amount > 0:
+                            order        = await get_ultra_order(
+                                output_mint=SOL_MINT,
+                                amount=token_amount,
+                                wallet_address=wallet_address,
+                                input_mint=pos.token_address,
+                            )
+                            out_lamports = int(order.get("outAmount", 0))
+                            sol_received = round(out_lamports / 1_000_000_000, 4)
+                            signature    = await execute_ultra_order(order, keypair)
+                            pnl_sol      = round(sol_received - pos.amount_sol_spent, 4)
+                            await close_position(pos.id, reason, pnl_sol)
+
+                            pnl_emoji = "🟢" if pnl_sol >= 0 else "🔴"
+                            mult      = round(current_mc / pos.entry_mc, 2)
+                            await bot.send_message(
+                                CALLER_GROUP_ID,
+                                f"{emoji} *{label}*\n\n"
+                                f"🪙 Token: `{pos.token_name}`\n"
+                                f"📈 Multiplier: `{mult}x`\n"
+                                f"💰 SOL spent: `{pos.amount_sol_spent}`\n"
+                                f"💸 SOL received: `{sol_received}`\n"
+                                f"{pnl_emoji} PnL: `{pnl_sol:+.4f} SOL`\n\n"
+                                f"🔗 [Solscan](https://solscan.io/tx/{signature})",
+                                parse_mode="Markdown",
+                                disable_web_page_preview=True,
+                            )
+                            logger.info(
+                                "Auto-closed position %d (%s): %s pnl=%.4f",
+                                pos.id, pos.token_name, reason, pnl_sol,
+                            )
+                        else:
+                            # No tokens to sell — mark closed anyway
+                            await close_position(pos.id, reason, pnl_sol=None)
+                    else:
+                        # No server wallet — just mark closed, notify without sell
+                        await close_position(pos.id, reason, pnl_sol=None)
+                        mult = round(current_mc / pos.entry_mc, 2)
+                        await bot.send_message(
+                            CALLER_GROUP_ID,
+                            f"{emoji} *{label}* _(no server wallet — manual sell required)_\n\n"
+                            f"🪙 Token: `{pos.token_name}`\n"
+                            f"📈 Multiplier: `{mult}x`\n"
+                            f"💰 SOL spent: `{pos.amount_sol_spent}`",
+                            parse_mode="Markdown",
+                        )
+
+                except Exception as pos_exc:
+                    logger.error("Position monitor error for pos %d: %s", pos.id, pos_exc)
+
+            if positions:
+                logger.info("Position monitor: checked %d open positions", len(positions))
+
+        except Exception as exc:
+            logger.error("Position monitor loop error: %s", exc)
+
+        await asyncio.sleep(300)   # 5 minutes

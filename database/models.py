@@ -32,6 +32,28 @@ class Base(DeclarativeBase):
     pass
 
 
+# ── Positions table ───────────────────────────────────────────────────────────
+
+class Position(Base):
+    __tablename__ = "positions"
+
+    id               = Column(Integer,    primary_key=True, autoincrement=True)
+    user_id          = Column(BigInteger, nullable=False, index=True)
+    token_address    = Column(String(64), nullable=False, index=True)
+    token_name       = Column(String(128),nullable=False)
+    entry_price      = Column(Float,      nullable=True)   # token price USD at buy
+    entry_mc         = Column(Float,      nullable=True)   # market cap USD at buy
+    amount_sol_spent = Column(Float,      nullable=False)
+    tokens_received  = Column(String(32), nullable=True)   # raw integer as string
+    take_profit_x    = Column(Float,      nullable=False, default=3.0)
+    stop_loss_pct    = Column(Float,      nullable=False, default=30.0)
+    status           = Column(String(16), default="open",  nullable=False, server_default="open")
+    opened_at        = Column(DateTime,   default=datetime.utcnow, nullable=False)
+    closed_at        = Column(DateTime,   nullable=True)
+    close_reason     = Column(String(32), nullable=True)   # tp_hit | sl_hit | manual
+    pnl_sol          = Column(Float,      nullable=True)
+
+
 # ── KeyBot settings table ─────────────────────────────────────────────────────
 
 class KeyBotSettings(Base):
@@ -435,6 +457,90 @@ async def upsert_keybot_settings(admin_id: int, **kwargs) -> "KeyBotSettings":
         await session.commit()
         await session.refresh(settings)
         return settings
+
+
+# ── Position helpers ──────────────────────────────────────────────────────────
+
+async def open_position(
+    user_id:          int,
+    token_address:    str,
+    token_name:       str,
+    amount_sol_spent: float,
+    take_profit_x:    float,
+    stop_loss_pct:    float,
+    entry_price:      float | None = None,
+    entry_mc:         float | None = None,
+    tokens_received:  str   | None = None,
+) -> "Position":
+    async with AsyncSessionLocal() as session:
+        pos = Position(
+            user_id=user_id,
+            token_address=token_address,
+            token_name=token_name,
+            entry_price=entry_price,
+            entry_mc=entry_mc,
+            amount_sol_spent=amount_sol_spent,
+            tokens_received=tokens_received,
+            take_profit_x=take_profit_x,
+            stop_loss_pct=stop_loss_pct,
+            status="open",
+        )
+        session.add(pos)
+        await session.commit()
+        await session.refresh(pos)
+        logger.info("Opened position %d: %s %.4f SOL", pos.id, token_name, amount_sol_spent)
+        return pos
+
+
+async def close_position(
+    position_id:  int,
+    close_reason: str,
+    pnl_sol:      float | None = None,
+) -> "Position | None":
+    async with AsyncSessionLocal() as session:
+        pos = await session.get(Position, position_id)
+        if pos is None or pos.status != "open":
+            return None
+        pos.status       = "closed"
+        pos.close_reason = close_reason
+        pos.pnl_sol      = pnl_sol
+        pos.closed_at    = datetime.utcnow()
+        await session.commit()
+        await session.refresh(pos)
+        logger.info("Closed position %d: reason=%s pnl=%s", position_id, close_reason, pnl_sol)
+        return pos
+
+
+async def get_open_positions(user_id: int | None = None) -> list["Position"]:
+    """Returns all open positions, optionally filtered by user_id."""
+    async with AsyncSessionLocal() as session:
+        query = select(Position).where(Position.status == "open")
+        if user_id is not None:
+            query = query.where(Position.user_id == user_id)
+        query = query.order_by(Position.opened_at.desc())
+        result = await session.execute(query)
+        return list(result.scalars().all())
+
+
+async def get_position_by_id(position_id: int) -> "Position | None":
+    async with AsyncSessionLocal() as session:
+        return await session.get(Position, position_id)
+
+
+async def get_open_position_by_token(user_id: int, token_address: str) -> "Position | None":
+    """Returns the latest open position for a (user, token) pair, or None."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Position)
+            .where(
+                Position.user_id == user_id,
+                Position.token_address == token_address,
+                Position.status == "open",
+            )
+            .order_by(Position.opened_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
 
 async def get_recent_scans(limit: int = 20) -> list["Scan"]:

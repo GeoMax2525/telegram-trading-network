@@ -19,7 +19,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import BOT_TOKEN
 from bot.handlers import router
-from bot.keybot import router as keybot_router
+from bot.keybot import router as keybot_router, position_monitor_loop
 from bot.scanner import fetch_live_data
 from database.models import init_db, get_open_scans, update_scan_pnl, close_old_scans
 
@@ -96,8 +96,9 @@ async def main() -> None:
     dp.include_router(keybot_router)
     dp.include_router(router)
 
-    # Start peak tracker in background
+    # Start background tasks
     asyncio.create_task(peak_tracker_loop())
+    asyncio.create_task(position_monitor_loop(bot))
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     try:

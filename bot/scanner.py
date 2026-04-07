@@ -214,15 +214,16 @@ async def fetch_current_market_cap(address: str) -> Optional[float]:
 
 async def fetch_live_data(address: str) -> Optional[dict]:
     """
-    Returns {market_cap, liquidity_usd} for the given address, or None on failure.
-    Used by the background tracker for rug detection.
+    Returns {market_cap, liquidity_usd, price_usd} for the given address, or None on failure.
+    Used by the background tracker and position monitor.
     """
     pair = await fetch_token_data(address)
     if pair is None:
         return None
-    mc  = float(pair.get("marketCap") or pair.get("fdv") or 0)
-    liq = float((pair.get("liquidity") or {}).get("usd") or 0)
-    return {"market_cap": mc, "liquidity_usd": liq}
+    mc    = float(pair.get("marketCap") or pair.get("fdv") or 0)
+    liq   = float((pair.get("liquidity") or {}).get("usd") or 0)
+    price = float(pair.get("priceUsd") or 0)
+    return {"market_cap": mc, "liquidity_usd": liq, "price_usd": price}
 
 
 async def scan_token(address: str) -> Optional[dict]:
