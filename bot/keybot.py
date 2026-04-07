@@ -25,7 +25,7 @@ from database.models import (
     get_keybot_settings, upsert_keybot_settings,
     open_position, close_position,
     get_open_positions, get_position_by_id, get_open_position_by_token,
-    debug_all_positions,
+    update_position_entry_mc, debug_all_positions,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,7 +175,7 @@ def _menu_text(
         w_str = "_Not set_"
 
     settings = (
-        "⚡ *KEY BOT SETTINGS*\n\n"
+        "🔑 *KEY BOT*\n\n"
         f"💰 Buy Amount:  `{sol} SOL`\n"
         f"🎯 Take Profit: `{tp}x`\n"
         f"🛑 Stop Loss:   `{sl}%`\n"
@@ -546,10 +546,11 @@ async def cb_keybot_buy(callback: CallbackQuery):
     # Save position separately — DB failure must not hide a successful swap
     try:
         live        = await fetch_live_data(address)
-        entry_mc    = live["market_cap"] if live else None
-        entry_price = live["price_usd"]  if live else None
-        logger.info("Saving position: user=%s token=%s sol=%.4f entry_mc=%s",
-                    user_id, token_name, s.buy_amount_sol, entry_mc)
+        entry_mc    = (live["market_cap"] or None) if live else None
+        entry_price = (live["price_usd"]  or None) if live else None
+        logger.info("Saving position: user=%s token=%s sol=%.4f entry_mc=%s entry_price=%s tp=%.1fx sl=%.0f%%",
+                    user_id, token_name, s.buy_amount_sol, entry_mc, entry_price,
+                    s.take_profit_x, s.stop_loss_pct)
         await open_position(
             user_id=user_id,
             token_address=address,
@@ -742,18 +743,21 @@ async def position_monitor_loop(bot: Bot) -> None:
             keypair   = get_keypair()
 
             for pos in positions:
-                if pos.entry_mc is None or pos.entry_mc <= 0:
-                    logger.warning(
-                        "Position %d (%s): skipping — entry_mc=%s",
-                        pos.id, pos.token_name, pos.entry_mc,
-                    )
-                    continue
                 try:
                     live = await fetch_live_data(pos.token_address)
-                    if not live or not live["market_cap"]:
+                    if not live or not live.get("market_cap"):
                         logger.warning("Position %d (%s): no live data from DexScreener", pos.id, pos.token_name)
                         continue
                     current_mc = live["market_cap"]
+
+                    # Patch entry_mc if it was 0/None at buy time (token not indexed yet)
+                    if pos.entry_mc is None or pos.entry_mc <= 0:
+                        logger.warning(
+                            "Position %d (%s): entry_mc was %s — patching to current MC %s",
+                            pos.id, pos.token_name, pos.entry_mc, _fmt_mc(current_mc),
+                        )
+                        await update_position_entry_mc(pos.id, current_mc)
+                        pos.entry_mc = current_mc  # update in-memory so this tick proceeds
 
                     tp_mc  = pos.entry_mc * pos.take_profit_x
                     sl_mc  = pos.entry_mc * (1 - pos.stop_loss_pct / 100)

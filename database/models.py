@@ -550,6 +550,16 @@ async def debug_all_positions() -> None:
         logger.error("debug_all_positions failed: %s", exc)
 
 
+async def update_position_entry_mc(position_id: int, entry_mc: float) -> None:
+    """Patches entry_mc on a position where it was 0/None at buy time."""
+    async with AsyncSessionLocal() as session:
+        pos = await session.get(Position, position_id)
+        if pos and pos.status == "open":
+            pos.entry_mc = entry_mc
+            await session.commit()
+            logger.info("Patched entry_mc for position %d: %.0f", position_id, entry_mc)
+
+
 async def get_open_position_by_token(user_id: int, token_address: str) -> "Position | None":
     """Returns the latest open position for a (user, token) pair, or None."""
     async with AsyncSessionLocal() as session:
