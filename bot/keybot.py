@@ -169,29 +169,29 @@ def _menu_text(
 
     if w:
         short = f"{w[:6]}…{w[-4:]}"
-        bal   = f" | `{balance:.4f} SOL`" if balance is not None else ""
-        w_str = f"`{short}`{bal}"
+        bal   = f" | {balance:.4f} SOL" if balance is not None else ""
+        w_str = f"{short}{bal}"
     else:
-        w_str = "_Not set_"
+        w_str = "Not set"
 
-    settings = (
-        "🔑 *KEY BOT*\n\n"
-        f"💰 Buy Amount:  `{sol} SOL`\n"
-        f"🎯 Take Profit: `{tp}x`\n"
-        f"🛑 Stop Loss:   `{sl}%`\n"
-        f"👛 Wallet:      {w_str}"
-    )
+    lines = [
+        "🔑 KEY BOT\n",
+        f"💰 Buy Amount:  {sol} SOL",
+        f"🎯 Take Profit: {tp}x",
+        f"🛑 Stop Loss:   {sl}%",
+        f"👛 Wallet:      {w_str}",
+    ]
 
     if not pos_live_data:
-        return settings
+        return "\n".join(lines)
 
-    lines = [settings, "", "📂 *OPEN POSITIONS*"]
+    lines.append("\n📂 OPEN POSITIONS")
     total_pos_sol = 0.0
 
     for i, (pos, live) in enumerate(pos_live_data, 1):
         current_mc  = (live or {}).get("market_cap", 0) or 0
         price_usd   = (live or {}).get("price_usd",  0) or 0
-        symbol      = (live or {}).get("symbol", "???")
+        symbol      = (live or {}).get("symbol", pos.token_name or "???")
         pc          = (live or {}).get("price_changes", {})
 
         if pos.entry_mc and pos.entry_mc > 0 and current_mc > 0:
@@ -204,33 +204,30 @@ def _menu_text(
             profit_sol      = 0.0
             profit_pct      = 0.0
 
-        total_pos_sol  += current_val_sol
-        current_val_usd = current_val_sol * sol_price_usd if sol_price_usd else 0.0
+        total_pos_sol   += current_val_sol
+        current_val_usd  = current_val_sol * sol_price_usd if sol_price_usd else 0.0
 
         p_sign = "+" if profit_pct >= 0 else ""
-        s_sign = "+" if profit_sol >= 0 else ""
+        mc_str    = _fmt_mc(current_mc)    if current_mc else "N/A"
+        price_str = _fmt_price(price_usd)  if price_usd  else "N/A"
 
-        mc_str    = _fmt_mc(current_mc) if current_mc else "N/A"
-        price_str = _fmt_price(price_usd) if price_usd else "N/A"
-
-        safe_symbol = symbol.replace("_", r"\_")
         lines.append(
-            f"/{i} *${safe_symbol}*\n"
-            f"Profit: `{p_sign}{profit_pct:.1f}%` / `{s_sign}{profit_sol:.4f} SOL`\n"
-            f"Value: `${current_val_usd:.2f}` / `{current_val_sol:.4f} SOL`\n"
-            f"Mcap: `{mc_str}` @ `{price_str}`\n"
+            f"/{i} ${symbol}\n"
+            f"Profit: {p_sign}{profit_pct:.2f}% / {profit_sol:.4f} SOL\n"
+            f"Value: ${current_val_usd:.2f} / {current_val_sol:.4f} SOL\n"
+            f"Mcap: {mc_str} @ {price_str}\n"
             f"5m: {_fmt_pct(pc.get('m5', 0))}, "
             f"1h: {_fmt_pct(pc.get('h1', 0))}, "
             f"6h: {_fmt_pct(pc.get('h6', 0))}, "
             f"24h: {_fmt_pct(pc.get('h24', 0))}"
         )
 
-    bal_str  = f"{balance:.2f}" if balance is not None else "?"
-    net_sol  = (balance or 0.0) + total_pos_sol
-    net_usd  = net_sol * sol_price_usd if sol_price_usd else 0.0
+    bal_str = f"{balance:.2f}" if balance is not None else "?"
+    net_sol = (balance or 0.0) + total_pos_sol
+    net_usd = net_sol * sol_price_usd if sol_price_usd else 0.0
 
-    lines.append(f"\nBalance: `{bal_str} SOL`")
-    lines.append(f"Net Worth: `{net_sol:.2f} SOL` / `${net_usd:.2f}`")
+    lines.append(f"\nBalance: {bal_str} SOL")
+    lines.append(f"Net Worth: {net_sol:.2f} SOL / ${net_usd:.2f}")
 
     return "\n".join(lines)
 
@@ -306,11 +303,7 @@ async def cmd_keybot(message: Message, state: FSMContext):
     await state.clear()
     await debug_all_positions()   # dump full positions table to Railway logs
     text, keyboard = await _build_menu(message.from_user.id)
-    try:
-        await message.reply(text, parse_mode="Markdown", reply_markup=keyboard)
-    except Exception as render_exc:
-        logger.error("reply failed (Markdown parse error?): %s\nMessage text:\n%s", render_exc, text)
-        await message.reply(text, reply_markup=keyboard)  # retry without parse_mode
+    await message.reply(text, reply_markup=keyboard)
 
 
 # ── Settings callbacks ────────────────────────────────────────────────────────
@@ -323,11 +316,7 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
     if action == "menu":
         await state.clear()
         text, keyboard = await _build_menu(user_id)
-        try:
-            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
-        except Exception as render_exc:
-            logger.error("edit_text failed (Markdown parse error?): %s\nMessage text:\n%s", render_exc, text)
-            await callback.message.edit_text(text, reply_markup=keyboard)  # retry without parse_mode
+        await callback.message.edit_text(text, reply_markup=keyboard)
         await callback.answer()
 
     elif action == "buy_amount":
@@ -393,7 +382,7 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
     elif action == "remove_wallet":
         await upsert_keybot_settings(user_id, wallet_address=None)
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        await callback.message.edit_text(text, reply_markup=keyboard)
         await callback.answer("🗑️ Wallet removed")
 
     elif action == "close":
@@ -405,21 +394,21 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         val = float(action.split(":", 1)[1])
         await upsert_keybot_settings(user_id, buy_amount_sol=val)
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        await callback.message.edit_text(text, reply_markup=keyboard)
         await callback.answer(f"✅ Buy amount set to {val} SOL")
 
     elif action.startswith("set_tp:"):
         val = float(action.split(":", 1)[1])
         await upsert_keybot_settings(user_id, take_profit_x=val)
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        await callback.message.edit_text(text, reply_markup=keyboard)
         await callback.answer(f"✅ Take profit set to {val}x")
 
     elif action.startswith("set_sl:"):
         val = float(action.split(":", 1)[1])
         await upsert_keybot_settings(user_id, stop_loss_pct=val)
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        await callback.message.edit_text(text, reply_markup=keyboard)
         await callback.answer(f"✅ Stop loss set to {val}%")
 
     else:
@@ -445,8 +434,7 @@ async def receive_wallet(message: Message, state: FSMContext):
     await state.clear()
     text, keyboard = await _build_menu(message.from_user.id)
     await message.reply(
-        "✅ *Wallet saved!*\n\n" + text,
-        parse_mode="Markdown",
+        "✅ Wallet saved!\n\n" + text,
         reply_markup=keyboard,
     )
 
@@ -475,8 +463,7 @@ async def receive_buy_amount(message: Message, state: FSMContext):
     await state.clear()
     text, keyboard = await _build_menu(message.from_user.id)
     await message.reply(
-        f"✅ *Buy amount set to {val} SOL*\n\n" + text,
-        parse_mode="Markdown",
+        f"✅ Buy amount set to {val} SOL\n\n" + text,
         reply_markup=keyboard,
     )
 
@@ -725,7 +712,7 @@ async def cb_close_position(callback: CallbackQuery):
 
         # Refresh the main menu (positions now shown inline)
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        await callback.message.edit_text(text, reply_markup=keyboard)
 
     except Exception as exc:
         logger.error("Close position %d failed: %s", position_id, exc)
