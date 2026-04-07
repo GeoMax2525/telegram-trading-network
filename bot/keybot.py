@@ -684,34 +684,41 @@ async def position_monitor_loop(bot: Bot) -> None:
     Sends a notification to CALLER_GROUP_ID on auto-close.
     """
     await asyncio.sleep(60)   # startup delay
+    logger.info("Position monitor started — checking every 5 minutes")
     while True:
         try:
             positions = await get_open_positions()   # all users
+            logger.info("Position monitor tick: %d open position(s)", len(positions))
             keypair   = get_keypair()
 
             for pos in positions:
-                if not pos.entry_mc:
+                if pos.entry_mc is None or pos.entry_mc <= 0:
+                    logger.warning(
+                        "Position %d (%s): skipping — entry_mc=%s",
+                        pos.id, pos.token_name, pos.entry_mc,
+                    )
                     continue
                 try:
                     live = await fetch_live_data(pos.token_address)
                     if not live or not live["market_cap"]:
-                        logger.warning("Position %d (%s): no live data", pos.id, pos.token_name)
+                        logger.warning("Position %d (%s): no live data from DexScreener", pos.id, pos.token_name)
                         continue
                     current_mc = live["market_cap"]
 
-                    tp_mc = pos.entry_mc * pos.take_profit_x
-                    sl_mc = pos.entry_mc * (1 - pos.stop_loss_pct / 100)
-                    mult  = round(current_mc / pos.entry_mc, 2)
-
-                    logger.info(
-                        "Position %d (%s): current_mc=%s mult=%.2fx tp_mc=%s sl_mc=%s",
-                        pos.id, pos.token_name,
-                        _fmt_mc(current_mc), mult,
-                        _fmt_mc(tp_mc), _fmt_mc(sl_mc),
-                    )
-
+                    tp_mc  = pos.entry_mc * pos.take_profit_x
+                    sl_mc  = pos.entry_mc * (1 - pos.stop_loss_pct / 100)
+                    mult   = round(current_mc / pos.entry_mc, 2)
                     hit_tp = current_mc >= tp_mc
                     hit_sl = current_mc <= sl_mc
+
+                    logger.info(
+                        "Position %d (%s): entry_mc=%s current_mc=%s mult=%.2fx "
+                        "| TP target=%s (hit=%s) SL target=%s (hit=%s)",
+                        pos.id, pos.token_name,
+                        _fmt_mc(pos.entry_mc), _fmt_mc(current_mc), mult,
+                        _fmt_mc(tp_mc), hit_tp,
+                        _fmt_mc(sl_mc), hit_sl,
+                    )
 
                     if not (hit_tp or hit_sl):
                         continue
@@ -788,3 +795,4 @@ async def position_monitor_loop(bot: Bot) -> None:
             logger.error("Position monitor loop error: %s", exc)
 
         await asyncio.sleep(300)   # 5 minutes
+        logger.info("Position monitor: waking up for next tick")
