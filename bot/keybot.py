@@ -690,11 +690,20 @@ async def position_monitor_loop(bot: Bot) -> None:
                 try:
                     live = await fetch_live_data(pos.token_address)
                     if not live or not live["market_cap"]:
+                        logger.warning("Position %d (%s): no live data", pos.id, pos.token_name)
                         continue
                     current_mc = live["market_cap"]
 
                     tp_mc = pos.entry_mc * pos.take_profit_x
                     sl_mc = pos.entry_mc * (1 - pos.stop_loss_pct / 100)
+                    mult  = round(current_mc / pos.entry_mc, 2)
+
+                    logger.info(
+                        "Position %d (%s): current_mc=%s mult=%.2fx tp_mc=%s sl_mc=%s",
+                        pos.id, pos.token_name,
+                        _fmt_mc(current_mc), mult,
+                        _fmt_mc(tp_mc), _fmt_mc(sl_mc),
+                    )
 
                     hit_tp = current_mc >= tp_mc
                     hit_sl = current_mc <= sl_mc
@@ -705,6 +714,10 @@ async def position_monitor_loop(bot: Bot) -> None:
                     reason = "tp_hit" if hit_tp else "sl_hit"
                     emoji  = "🎯" if hit_tp else "🛑"
                     label  = "TAKE PROFIT HIT" if hit_tp else "STOP LOSS HIT"
+
+                    mult       = round(current_mc / pos.entry_mc, 2)
+                    entry_str  = _fmt_mc(pos.entry_mc)
+                    exit_str   = _fmt_mc(current_mc)
 
                     # Auto-sell if server wallet is configured
                     if keypair:
@@ -723,37 +736,38 @@ async def position_monitor_loop(bot: Bot) -> None:
                             pnl_sol      = round(sol_received - pos.amount_sol_spent, 4)
                             await close_position(pos.id, reason, pnl_sol)
 
-                            pnl_emoji = "🟢" if pnl_sol >= 0 else "🔴"
-                            mult      = round(current_mc / pos.entry_mc, 2)
+                            pnl_sign = "+" if pnl_sol >= 0 else ""
                             await bot.send_message(
                                 CALLER_GROUP_ID,
                                 f"{emoji} *{label}*\n\n"
                                 f"🪙 Token: `{pos.token_name}`\n"
-                                f"📈 Multiplier: `{mult}x`\n"
-                                f"💰 SOL spent: `{pos.amount_sol_spent}`\n"
-                                f"💸 SOL received: `{sol_received}`\n"
-                                f"{pnl_emoji} PnL: `{pnl_sol:+.4f} SOL`\n\n"
-                                f"🔗 [Solscan](https://solscan.io/tx/{signature})",
+                                f"📊 Entry MC: `{entry_str}` | Exit MC: `{exit_str}`\n"
+                                f"📈 Result: `{mult}x` | PNL: `{pnl_sign}{pnl_sol:.4f} SOL`\n\n"
+                                f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
                                 parse_mode="Markdown",
                                 disable_web_page_preview=True,
                             )
                             logger.info(
-                                "Auto-closed position %d (%s): %s pnl=%.4f",
-                                pos.id, pos.token_name, reason, pnl_sol,
+                                "Auto-closed position %d (%s): %s mult=%.2fx pnl=%.4f SOL",
+                                pos.id, pos.token_name, reason, mult, pnl_sol,
                             )
                         else:
-                            # No tokens to sell — mark closed anyway
+                            # No tokens in wallet — mark closed anyway
                             await close_position(pos.id, reason, pnl_sol=None)
+                            logger.warning(
+                                "Position %d (%s): %s triggered but wallet holds 0 tokens",
+                                pos.id, pos.token_name, reason,
+                            )
                     else:
-                        # No server wallet — just mark closed, notify without sell
+                        # No server wallet — notify for manual action
                         await close_position(pos.id, reason, pnl_sol=None)
-                        mult = round(current_mc / pos.entry_mc, 2)
                         await bot.send_message(
                             CALLER_GROUP_ID,
-                            f"{emoji} *{label}* _(no server wallet — manual sell required)_\n\n"
+                            f"{emoji} *{label}* ⚠️ _Manual sell required_\n\n"
                             f"🪙 Token: `{pos.token_name}`\n"
-                            f"📈 Multiplier: `{mult}x`\n"
-                            f"💰 SOL spent: `{pos.amount_sol_spent}`",
+                            f"📊 Entry MC: `{entry_str}` | Exit MC: `{exit_str}`\n"
+                            f"📈 Result: `{mult}x`\n\n"
+                            f"_No server wallet configured — sell manually._",
                             parse_mode="Markdown",
                         )
 
