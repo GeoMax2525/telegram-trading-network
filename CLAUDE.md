@@ -1,50 +1,49 @@
-# telegram-trading-network — Project Summary
+# LowKey Alpha - Telegram AI Trading Network
 
-## Bot
-- **Username:** @LowKeyAlphaAi_bot
-- **Bot ID:** 8760436484
+## Bot Info
+- Bot: @LowKeyAlphaAi_bot
+- Token: 8760436484:AAFK0Z9krt0XjRkzRDtUYav0XP1GRowy2F0
+- Callers HQ ID: -1003852140576
+- Main Group ID: -5222687721
 
-## Group IDs
-- **CALLER_GROUP_ID:** `-1003852140576` — Callers HQ (where /scan and auto-scan are allowed)
-- **MAIN_GROUP_ID:** `-5222687721` — Main group (where Trade Cards are broadcast via Share button)
+## Hosting
+- Railway (auto-deploys on git push)
+- PostgreSQL database (persistent)
+- Helius RPC: beta.helius-rpc.com
+- GitHub: GeoMax2525/telegram-trading-network
 
-> Note: CALLER_GROUP_ID changed from `-5223364048` to `-1003852140576` when forum topics were
-> enabled, promoting the group to a supergroup with a new Telegram-assigned ID.
+## Files
+- main.py - starts bot, registers routers
+- bot/config.py - settings
+- bot/handlers.py - scan, pnl, leaderboard commands
+- bot/scanner.py - DexScreener API
+- bot/keyboards.py - Trade Card buttons
+- bot/keybot.py - /keybot settings menu
+- bot/trading.py - Jupiter Ultra swap execution
+- bot/wallet.py - Solana wallet
+- database/models.py - PostgreSQL models
 
-## Project Path
-`C:\Users\gchel\telegram-trading-network`
+## Commands
+- Auto-scan: paste contract address in Callers HQ
+- /pnl <contract> - check PNL
+- /sl - signal leaders leaderboard
+- /lb - top calls leaderboard
+- /keybot - trading settings
 
-## Stack
-- Python 3.x + aiogram 3
-- SQLite via aiosqlite (database/models.py)
-- DexScreener API for token data (bot/scanner.py)
-- Virtual environment: `venv/`
+## Trade Card Buttons
+- Chart, Share Signal, Flag as Risky
+- 🔑 Key Buy - one click buy via Jupiter Ultra
+- 🔫 Full Clip - instant sell 100%
 
-## Key Files
-| File | Purpose |
-|------|---------|
-| `main.py` | Entry point — init DB, register router, start polling |
-| `bot/handlers.py` | All message/command/callback handlers |
-| `bot/config.py` | Loads .env; defines group IDs and scoring weights |
-| `bot/scanner.py` | Fetches and scores token data from DexScreener |
-| `bot/keyboards.py` | Inline keyboard builder (Share / Flag buttons) |
-| `database/models.py` | SQLite schema, log_scan(), get_leaderboard() |
+## KeyBot Settings
+- Buy Amount (SOL)
+- Take Profit (X multiplier)
+- Stop Loss (%)
+- Wallet Address
+- Open Positions (in progress)
 
-## Running the Bot
-```bash
-cd C:\Users\gchel\telegram-trading-network && source venv/Scripts/activate && python main.py
-```
-
-## Features
-- `/scan <address>` — manual token scan (CALLER_GROUP_ID or private chat only)
-- **Auto-scan** — paste a bare Solana contract address (32–44 base58 chars, nothing else)
-  in CALLER_GROUP_ID and the bot auto-scans it without needing the /scan prefix
-- `/leaderboard` — top scanners by scan count
-- **Share** button — broadcasts Trade Card to MAIN_GROUP_ID
-- **Flag** button — logs token as risky
-
-## aiogram Notes
-- Handlers must NOT declare `bot: Bot` as a parameter — use `message.bot` instead.
-  Declaring `bot: Bot` causes injection conflicts in aiogram 3 and silently breaks handlers.
-- `drop_pending_updates=True` is set in main.py — messages sent while the bot is offline
-  are discarded on next startup.
+## Next To Build
+- Open Positions tracker with auto TP/SL
+- Multi-sig withdrawals
+- Token launch + profit sharing
+- AI auto-trader
