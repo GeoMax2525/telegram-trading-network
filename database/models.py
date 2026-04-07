@@ -1,9 +1,13 @@
 """
-database/models.py — Async SQLite database using SQLAlchemy + aiosqlite.
+database/models.py — Async database using SQLAlchemy.
+
+Uses PostgreSQL (asyncpg) when DATABASE_URL is set (Railway production),
+falls back to SQLite (aiosqlite) when DATABASE_URL is not set (local dev).
 
 Tables:
-  scans   — logs every /scan command with token info, AI score, and caller details.
-  callers — approved caller Telegram user IDs (managed via /addcaller).
+  scans            — logs every /scan command with token info, AI score, and caller details.
+  callers          — approved caller Telegram user IDs (managed via /addcaller).
+  keybot_settings  — per-user KeyBot trading presets.
 """
 
 import logging
@@ -102,17 +106,24 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # Migrate existing scans table — add new columns if absent (SQLite-safe)
+    # Migrate existing scans table — add new columns if absent.
+    # PostgreSQL supports IF NOT EXISTS; SQLite needs try/except.
+    is_postgres = DATABASE_URL.startswith("postgresql")
     async with engine.begin() as conn:
         for col_name, col_def in _NEW_SCAN_COLS:
-            try:
+            if is_postgres:
                 await conn.execute(
-                    text(f"ALTER TABLE scans ADD COLUMN {col_name} {col_def}")
+                    text(f"ALTER TABLE scans ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
                 )
-            except Exception:
-                pass  # column already exists
+            else:
+                try:
+                    await conn.execute(
+                        text(f"ALTER TABLE scans ADD COLUMN {col_name} {col_def}")
+                    )
+                except Exception:
+                    pass  # column already exists
 
-    logger.info("Database initialised.")
+    logger.info("Database initialised (%s).", "PostgreSQL" if is_postgres else "SQLite")
 
 
 # ── Caller helpers ────────────────────────────────────────────────────────────

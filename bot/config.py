@@ -53,4 +53,13 @@ HELIUS_RPC_URL: str = os.getenv(
 )
 
 # ── Database ──────────────────────────────────────────────────────────────────
-DATABASE_URL = "sqlite+aiosqlite:///./trading_network.db"
+# Railway injects DATABASE_URL as postgres:// or postgresql://.
+# asyncpg (SQLAlchemy async driver) requires the postgresql+asyncpg:// scheme.
+# Falls back to SQLite when DATABASE_URL is not set (local dev).
+_raw_db_url: str = os.getenv("DATABASE_URL", "")
+if _raw_db_url.startswith("postgres://"):
+    DATABASE_URL: str = _raw_db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif _raw_db_url.startswith("postgresql://"):
+    DATABASE_URL = _raw_db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+else:
+    DATABASE_URL = "sqlite+aiosqlite:///./trading_network.db"
