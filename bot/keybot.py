@@ -213,8 +213,9 @@ def _menu_text(
         mc_str    = _fmt_mc(current_mc) if current_mc else "N/A"
         price_str = _fmt_price(price_usd) if price_usd else "N/A"
 
+        safe_symbol = symbol.replace("_", r"\_")
         lines.append(
-            f"/{i} *${symbol}*\n"
+            f"/{i} *${safe_symbol}*\n"
             f"Profit: `{p_sign}{profit_pct:.1f}%` / `{s_sign}{profit_sol:.4f} SOL`\n"
             f"Value: `${current_val_usd:.2f}` / `{current_val_sol:.4f} SOL`\n"
             f"Mcap: `{mc_str}` @ `{price_str}`\n"
@@ -305,7 +306,11 @@ async def cmd_keybot(message: Message, state: FSMContext):
     await state.clear()
     await debug_all_positions()   # dump full positions table to Railway logs
     text, keyboard = await _build_menu(message.from_user.id)
-    await message.reply(text, parse_mode="Markdown", reply_markup=keyboard)
+    try:
+        await message.reply(text, parse_mode="Markdown", reply_markup=keyboard)
+    except Exception as render_exc:
+        logger.error("reply failed (Markdown parse error?): %s\nMessage text:\n%s", render_exc, text)
+        await message.reply(text, reply_markup=keyboard)  # retry without parse_mode
 
 
 # ── Settings callbacks ────────────────────────────────────────────────────────
@@ -318,7 +323,11 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
     if action == "menu":
         await state.clear()
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        try:
+            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        except Exception as render_exc:
+            logger.error("edit_text failed (Markdown parse error?): %s\nMessage text:\n%s", render_exc, text)
+            await callback.message.edit_text(text, reply_markup=keyboard)  # retry without parse_mode
         await callback.answer()
 
     elif action == "buy_amount":
