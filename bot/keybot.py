@@ -182,7 +182,7 @@ async def _build_positions_view(user_id: int) -> tuple[str, InlineKeyboardMarkup
                 f"TP: {pos.take_profit_x}x | SL: {pos.stop_loss_pct}%"
             )
             builder.row(InlineKeyboardButton(
-                text=f"🔴 Close {pos.token_name[:12]}",
+                text=f"🔴 Close {pos.token_name[:20]}",
                 callback_data=f"kbclose:{pos.id}",
             ))
 
@@ -420,12 +420,18 @@ async def cb_keybot_buy(callback: CallbackQuery):
         )
         return
 
-    # Parse token name from the Trade Card text
+    # Parse token name + ticker from Trade Card line: 🪙 *NAME* ($SYMBOL)
     token_name = address[:8] + "…"
     if callback.message and callback.message.text:
         for line in callback.message.text.splitlines():
             if line.startswith("🪙"):
-                token_name = line.split("*")[1] if "*" in line else token_name
+                parts = line.split("*")
+                if len(parts) >= 3:
+                    name   = parts[1]           # e.g. "ZECK"
+                    ticker = parts[2].strip()   # e.g. "($ZECK)"
+                    token_name = f"{name} {ticker}".strip()
+                elif len(parts) >= 2:
+                    token_name = parts[1]
                 break
 
     await callback.answer("⚡ Executing swap…")
@@ -499,12 +505,18 @@ async def cb_keybot_sell(callback: CallbackQuery):
 
     wallet_address = str(keypair.pubkey())
 
-    # Parse token name from Trade Card
+    # Parse token name + ticker from Trade Card line: 🪙 *NAME* ($SYMBOL)
     token_name = address[:8] + "…"
     if callback.message and callback.message.text:
         for line in callback.message.text.splitlines():
             if line.startswith("🪙"):
-                token_name = line.split("*")[1] if "*" in line else token_name
+                parts = line.split("*")
+                if len(parts) >= 3:
+                    name   = parts[1]
+                    ticker = parts[2].strip()
+                    token_name = f"{name} {ticker}".strip()
+                elif len(parts) >= 2:
+                    token_name = parts[1]
                 break
 
     await callback.answer("💸 Checking balance…")
