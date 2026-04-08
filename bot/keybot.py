@@ -183,6 +183,7 @@ def _menu_text(
     ]
 
     if not pos_live_data:
+        lines.append("\n(No open positions)")
         return "\n".join(lines)
 
     lines.append("\n📂 OPEN POSITIONS")
@@ -211,9 +212,9 @@ def _menu_text(
         mc_str    = _fmt_mc(current_mc)   if current_mc else "N/A"
         price_str = _fmt_price(price_usd) if price_usd  else "N/A"
 
-        # Holder rank line — always shown, N/A if Solscan unavailable
+        # Holder rank line — always shown, N/A if Helius call failed
         if holder:
-            rank_str = f"#{holder['rank']}" if holder.get("rank") else ">500"
+            rank_str = f"#{holder['rank']}" if holder.get("rank") else ">20"
             bal_fmt  = f"{holder['balance']:,.0f}"
             pct_fmt  = f"{holder['pct_supply']:.3f}"
             holder_line = f"Holder Rank: {rank_str} | Hold: {bal_fmt} ({pct_fmt}% supply)\n"
@@ -279,7 +280,7 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     else:
         positions = positions_result
 
-    logger.info("_build_menu: found %d open positions for user_id=%s", len(positions), user_id)
+    logger.info("_build_menu: user_id=%s found %d open position(s) in DB", user_id, len(positions))
 
     # Fetch live data + holder info for every position + SOL price concurrently.
     # Task order: live_0, holder_0, live_1, holder_1, ..., sol_price

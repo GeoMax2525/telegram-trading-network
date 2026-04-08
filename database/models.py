@@ -28,8 +28,16 @@ engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 # Log DB type immediately at import so Railway shows it on every boot
-_db_type = "PostgreSQL" if DATABASE_URL.startswith("postgresql") else "SQLite"
-logger.info("🗄  Database engine: %s", _db_type)
+_is_postgres = DATABASE_URL.startswith("postgresql")
+_db_type     = "PostgreSQL" if _is_postgres else "SQLite"
+if _is_postgres:
+    logger.info("DB: Using PostgreSQL — Positions, KeyBotSettings, Scans all in PostgreSQL")
+else:
+    logger.warning(
+        "DB: WARNING — using SQLite fallback. "
+        "Set DATABASE_URL env var to use PostgreSQL. "
+        "All data will be LOST on Railway redeploy!"
+    )
 
 
 class Base(DeclarativeBase):
@@ -130,7 +138,10 @@ _NEW_SCAN_COLS = [
 async def init_db() -> None:
     """Creates all tables if they don't already exist, then adds any missing columns."""
     is_postgres = DATABASE_URL.startswith("postgresql")
-    logger.info("init_db: using %s", "PostgreSQL" if is_postgres else "SQLite")
+    logger.info(
+        "init_db: %s — tables: positions, keybot_settings, scans, callers",
+        "PostgreSQL" if is_postgres else "SQLite (WARNING: data lost on redeploy!)",
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
