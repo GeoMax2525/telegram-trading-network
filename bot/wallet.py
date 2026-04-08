@@ -6,6 +6,7 @@ Supports both base58-encoded secret key and JSON byte-array format
 (as exported by Phantom / Solana CLI).
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -61,83 +62,93 @@ def get_wallet_address() -> Optional[str]:
     return str(kp.pubkey()) if kp else None
 
 
+_SOLSCAN_BASE    = "https://public-api.solscan.io"
+_SOLSCAN_HEADERS = {"accept": "application/json", "User-Agent": "Mozilla/5.0"}
+_HOLDER_LIMIT    = 50    # results per page
+_HOLDER_MAX_RANK = 500   # stop searching after this rank
+
+
+async def _solscan_get(session: aiohttp.ClientSession, url: str) -> Optional[dict]:
+    """GET a Solscan endpoint, return parsed JSON or None on error."""
+    try:
+        async with session.get(url, headers=_SOLSCAN_HEADERS) as resp:
+            if resp.status != 200:
+                logger.warning("Solscan %s returned HTTP %d", url, resp.status)
+                return None
+            return await resp.json(content_type=None)
+    except Exception as exc:
+        logger.error("Solscan request failed (%s): %s", url, exc)
+        return None
+
+
 async def get_holder_info(wallet_address: str, mint: str) -> Optional[dict]:
     """
-    Returns holder rank, UI token balance, and % of total supply for wallet_address.
-    Batches three RPC calls in one request:
-      - getTokenAccountsByOwner  → our token account pubkey + balance
-      - getTokenLargestAccounts  → top-20 holder list (to find our rank)
-      - getTokenSupply           → total supply for % calculation
+    Uses Solscan public API to find holder rank, UI balance, and % of supply.
+
+    Strategy:
+      - Fetch token meta + first holder page concurrently.
+      - Paginate holder pages (50/page) until wallet_address is found as `owner`.
+      - Cap search at _HOLDER_MAX_RANK (500). Returns None if not found.
 
     Returns:
-      {"rank": int|None, "balance": float, "pct_supply": float}
-      rank is None when wallet is not in the top-20 holder list.
-    Returns None on RPC failure or if the wallet holds 0 of the token.
+      {"rank": int, "balance": float, "pct_supply": float}
+    Returns None on API failure or if wallet is not in the top 500 holders.
     """
-    payload = [
-        {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [wallet_address, {"mint": mint}, {"encoding": "jsonParsed"}],
-        },
-        {
-            "jsonrpc": "2.0", "id": 2,
-            "method": "getTokenLargestAccounts",
-            "params": [mint],
-        },
-        {
-            "jsonrpc": "2.0", "id": 3,
-            "method": "getTokenSupply",
-            "params": [mint],
-        },
-    ]
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                HELIUS_RPC_URL,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                results = await resp.json()
+    meta_url  = f"{_SOLSCAN_BASE}/token/meta?tokenAddress={mint}"
+    page0_url = (
+        f"{_SOLSCAN_BASE}/token/holders"
+        f"?tokenAddress={mint}&limit={_HOLDER_LIMIT}&offset=0"
+    )
 
-        by_id = {r["id"]: r for r in results}
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        # Page 0 and token meta in parallel
+        meta_data, page0_data = await asyncio.gather(
+            _solscan_get(session, meta_url),
+            _solscan_get(session, page0_url),
+        )
 
-        # Our token accounts for this mint
-        our_accounts = by_id[1].get("result", {}).get("value", [])
-        if not our_accounts:
-            return None  # wallet holds none of this token
-
-        token_account_pubkey = our_accounts[0]["pubkey"]
-        token_amount_info    = our_accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
-        our_raw     = int(token_amount_info["amount"])
-        our_balance = float(token_amount_info.get("uiAmount") or 0)
-
-        if our_raw == 0:
+        if not page0_data:
             return None
 
-        # Top-20 largest holders → find our rank
-        largest = by_id[2].get("result", {}).get("value", [])
-        rank = None
-        for idx, holder in enumerate(largest, 1):
-            if holder.get("address") == token_account_pubkey:
-                rank = idx
-                break
+        # Token decimals + total supply (raw integer string)
+        decimals     = int((meta_data or {}).get("decimals", 0))
+        supply_raw   = int((meta_data or {}).get("supply", 0) or 0)
+        total_supply = supply_raw  # raw units
 
-        # Total supply
-        supply_info  = by_id[3].get("result", {}).get("value", {})
-        total_supply = int(supply_info.get("amount", 0))
-        pct_supply   = (our_raw / total_supply * 100) if total_supply > 0 else 0.0
+        holders      = page0_data.get("data", [])
+        total_listed = page0_data.get("total", 0)
+        pages_needed = min(
+            (_HOLDER_MAX_RANK + _HOLDER_LIMIT - 1) // _HOLDER_LIMIT,
+            (total_listed  + _HOLDER_LIMIT - 1) // _HOLDER_LIMIT,
+        )
 
-        return {
-            "rank":       rank,        # int (1-20) or None if not in top 20
-            "balance":    our_balance, # UI amount (e.g. 1_250_000.0)
-            "pct_supply": pct_supply,  # e.g. 0.125
-        }
+        for page in range(pages_needed):
+            if page > 0:
+                offset = page * _HOLDER_LIMIT
+                url    = (
+                    f"{_SOLSCAN_BASE}/token/holders"
+                    f"?tokenAddress={mint}&limit={_HOLDER_LIMIT}&offset={offset}"
+                )
+                data = await _solscan_get(session, url)
+                if not data:
+                    break
+                holders = data.get("data", [])
 
-    except Exception as exc:
-        logger.error("get_holder_info failed for %s mint=%s: %s", wallet_address, mint, exc)
-        return None
+            for idx, holder in enumerate(holders):
+                if holder.get("owner") == wallet_address:
+                    rank      = page * _HOLDER_LIMIT + idx + 1
+                    raw_amt   = int(holder.get("amount", 0) or 0)
+                    ui_amount = raw_amt / (10 ** decimals) if decimals >= 0 else float(raw_amt)
+                    pct       = (raw_amt / total_supply * 100) if total_supply > 0 else 0.0
+                    return {
+                        "rank":       rank,
+                        "balance":    ui_amount,
+                        "pct_supply": pct,
+                    }
+
+    # Wallet not in top _HOLDER_MAX_RANK holders — omit the line
+    return None
 
 
 async def get_sol_balance(address: str) -> Optional[float]:
