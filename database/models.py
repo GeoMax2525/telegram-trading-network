@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
+# Log DB type immediately at import so Railway shows it on every boot
+_db_type = "PostgreSQL" if DATABASE_URL.startswith("postgresql") else "SQLite"
+logger.info("🗄  Database engine: %s", _db_type)
+
 
 class Base(DeclarativeBase):
     pass
@@ -125,12 +129,13 @@ _NEW_SCAN_COLS = [
 
 async def init_db() -> None:
     """Creates all tables if they don't already exist, then adds any missing columns."""
+    is_postgres = DATABASE_URL.startswith("postgresql")
+    logger.info("init_db: using %s", "PostgreSQL" if is_postgres else "SQLite")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     # Migrate existing scans table — add new columns if absent.
     # PostgreSQL supports IF NOT EXISTS; SQLite needs try/except.
-    is_postgres = DATABASE_URL.startswith("postgresql")
     async with engine.begin() as conn:
         for col_name, col_def in _NEW_SCAN_COLS:
             if is_postgres:

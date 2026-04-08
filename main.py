@@ -17,7 +17,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from bot.config import BOT_TOKEN
+from bot.config import BOT_TOKEN, DATABASE_URL
 from bot.handlers import router
 from bot.keybot import router as keybot_router, position_monitor_loop
 from bot.scanner import fetch_live_data
@@ -84,7 +84,8 @@ async def main() -> None:
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is not set. Check your .env file.")
 
-    logger.info("Initialising database…")
+    db_type = "PostgreSQL" if DATABASE_URL.startswith("postgresql") else "SQLite"
+    logger.info("Using %s (%s)", db_type, DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else DATABASE_URL)
     await init_db()
 
     bot = Bot(
