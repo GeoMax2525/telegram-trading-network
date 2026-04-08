@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone, timedelta
@@ -7,12 +8,14 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 
 from bot.config import MAIN_GROUP_ID, ADMIN_IDS
-from bot.scanner import scan_token, fetch_current_market_cap, fetch_live_data
+from bot.scanner import scan_token, fetch_current_market_cap, fetch_live_data, fetch_sol_price_usd
 from bot.keyboards import trade_card_keyboard, pnl_keyboard, top_calls_keyboard
+from bot.wallet import get_wallet_address, get_token_holding
 from database.models import (
     log_scan, get_leaderboard, get_break_evens_count, add_caller,
     get_open_scans, update_scan_pnl, get_scan_by_address, close_old_scans,
     get_signal_leaders, get_top_calls, get_top_calls_stats,
+    get_any_open_position_by_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,6 +94,38 @@ def build_trade_card(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _build_position_section(
+    holding: dict,
+    price_usd: float,
+    sol_price_usd: float,
+    current_mc: float,
+    pos,                 # Position ORM object or None
+) -> str:
+    """Returns the YOUR POSITION block to append to a Trade Card, or '' if nothing to show."""
+    balance     = holding["balance"]
+    pct_supply  = holding["pct_supply"]
+    value_usd   = balance * price_usd if price_usd else 0.0
+    value_sol   = value_usd / sol_price_usd if sol_price_usd else 0.0
+
+    lines = [
+        f"{'─' * 34}",
+        f"💼 *YOUR POSITION*",
+        f"🪙 Hold: `{balance:,.0f} tokens ({pct_supply:.3f}% supply)`",
+        f"💵 Value: `{_format_usd(value_usd)}` / `{value_sol:.4f} SOL`",
+    ]
+
+    if pos and pos.entry_mc and pos.entry_mc > 0 and current_mc > 0:
+        pct_change = (current_mc - pos.entry_mc) / pos.entry_mc * 100
+        sign       = "+" if pct_change >= 0 else ""
+        lines.append(
+            f"📈 Avg Entry: `{_format_usd(pos.entry_mc)} MC`"
+            f" | Now: `{_format_usd(current_mc)} MC`"
+            f" | `{sign}{pct_change:.1f}%`"
+        )
+
+    return "\n".join(lines)
+
+
 async def _do_scan(message: Message, address: str) -> None:
     loading_msg = await message.reply("🔍 Scanning token… please wait.")
 
@@ -104,6 +139,26 @@ async def _do_scan(message: Message, address: str) -> None:
         return
 
     card_text = build_trade_card(data)
+
+    # Check if the server wallet holds this token — append position section if so
+    wallet_address = get_wallet_address()
+    if wallet_address:
+        holding, sol_price_usd, pos = await asyncio.gather(
+            get_token_holding(wallet_address, address),
+            fetch_sol_price_usd(),
+            get_any_open_position_by_token(address),
+            return_exceptions=True,
+        )
+        if isinstance(holding, dict) and holding.get("balance", 0) > 0:
+            price_usd    = data.get("price_usd", 0) or 0
+            current_mc   = data.get("market_cap", 0) or 0
+            sol_price    = sol_price_usd if isinstance(sol_price_usd, float) else 0.0
+            pos_obj      = pos if not isinstance(pos, Exception) else None
+            position_block = _build_position_section(
+                holding, price_usd, sol_price, current_mc, pos_obj
+            )
+            card_text = card_text + "\n" + position_block
+
     keyboard = trade_card_keyboard(
         dex_url=data.get("dex_url", ""),
         contract_address=address,

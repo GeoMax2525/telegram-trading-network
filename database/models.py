@@ -592,6 +592,22 @@ async def get_open_position_by_token(user_id: int, token_address: str) -> "Posit
         return result.scalar_one_or_none()
 
 
+async def get_any_open_position_by_token(token_address: str) -> "Position | None":
+    """Returns the most recent open position for a token across all users, or None.
+    Used to find server-wallet entry data when building Trade Cards."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Position)
+            .where(
+                Position.token_address == token_address,
+                Position.status == "open",
+            )
+            .order_by(Position.opened_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
 async def get_recent_scans(limit: int = 20) -> list["Scan"]:
     async with AsyncSessionLocal() as session:
         result = await session.execute(
