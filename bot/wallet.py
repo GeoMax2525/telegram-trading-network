@@ -144,6 +144,62 @@ async def get_holder_info(wallet_address: str, mint: str) -> Optional[dict]:
         return None
 
 
+async def get_token_holding(wallet_address: str, mint: str) -> Optional[dict]:
+    """
+    Returns our token balance (UI amount) and % of total supply via Helius RPC.
+    Batches getTokenAccountsByOwner + getTokenSupply in one request.
+
+    Returns:
+      {"balance": float, "pct_supply": float}
+    Returns None on failure or if the wallet holds 0 tokens.
+    """
+    payload = [
+        {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [wallet_address, {"mint": mint}, {"encoding": "jsonParsed"}],
+        },
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "method": "getTokenSupply",
+            "params": [mint],
+        },
+    ]
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+            async with session.post(
+                HELIUS_RPC_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                results = await resp.json()
+
+        by_id = {r["id"]: r for r in results}
+
+        our_accounts = ((by_id.get(1) or {}).get("result") or {}).get("value", [])
+        if not our_accounts:
+            return None
+
+        token_info  = our_accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
+        our_raw     = int(token_info["amount"])
+        our_balance = float(token_info.get("uiAmount") or 0)
+
+        if our_raw == 0:
+            return None
+
+        supply_val   = ((by_id.get(2) or {}).get("result") or {}).get("value", {})
+        total_supply = int(supply_val.get("amount", 0))
+        pct_supply   = (our_raw / total_supply * 100) if total_supply > 0 else 0.0
+
+        return {"balance": our_balance, "pct_supply": pct_supply}
+
+    except Exception as exc:
+        logger.error("get_token_holding failed for %s mint=%s: %s", wallet_address, mint, exc)
+        return None
+
+
 async def get_sol_balance(address: str) -> Optional[float]:
     """
     Fetches the SOL balance for *address* via Solana mainnet RPC.

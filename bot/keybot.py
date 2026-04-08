@@ -20,7 +20,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bot.config import CALLER_GROUP_ID, SCAN_TOPIC_ID
 from bot.scanner import fetch_live_data, fetch_sol_price_usd
 from bot.trading import SOL_MINT, get_ultra_order, get_token_balance, execute_ultra_order
-from bot.wallet import get_keypair, get_wallet_address, get_sol_balance
+from bot.wallet import get_keypair, get_wallet_address, get_sol_balance, get_token_holding
 from database.models import (
     get_keybot_settings, upsert_keybot_settings,
     open_position, close_position,
@@ -159,7 +159,7 @@ def _confirm_remove_keyboard() -> InlineKeyboardMarkup:
 def _menu_text(
     s,
     balance:       float | None = None,
-    pos_live_data: list         = None,   # [(Position, live_dict | None), ...]
+    pos_live_data: list         = None,   # [(Position, live_dict | None, holding | None), ...]
     sol_price_usd: float        = 0.0,
 ) -> str:
     sol = s.buy_amount_sol
@@ -189,7 +189,7 @@ def _menu_text(
     lines.append("\n📂 OPEN POSITIONS")
     total_pos_sol = 0.0
 
-    for i, (pos, live) in enumerate(pos_live_data, 1):
+    for i, (pos, live, holding) in enumerate(pos_live_data, 1):
         current_mc  = (live or {}).get("market_cap", 0) or 0
         price_usd   = (live or {}).get("price_usd",  0) or 0
         symbol      = (live or {}).get("symbol", pos.token_name or "???")
@@ -212,9 +212,18 @@ def _menu_text(
         mc_str    = _fmt_mc(current_mc)   if current_mc else "N/A"
         price_str = _fmt_price(price_usd) if price_usd  else "N/A"
 
+        if holding:
+            hold_line = (
+                f"Hold: {holding['balance']:,.0f} tokens "
+                f"({holding['pct_supply']:.3f}% supply)\n"
+            )
+        else:
+            hold_line = ""
+
         lines.append(
             f"/{i} ${symbol}\n"
             f"Profit: {p_sign}{profit_pct:.2f}% / {profit_sol:.4f} SOL\n"
+            f"{hold_line}"
             f"Value: ${current_val_usd:.2f} / {current_val_sol:.4f} SOL\n"
             f"Mcap: {mc_str} @ {price_str}\n"
             f"5m: {_fmt_pct(pc.get('m5', 0))}, "
@@ -272,21 +281,31 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
 
     logger.info("_build_menu: user_id=%s found %d open position(s) in DB", user_id, len(positions))
 
-    # Fetch live data for every position + SOL price concurrently.
+    # Fetch live data + token holding for every position + SOL price concurrently.
+    # Task order per position: live, holding — then sol_price at the end.
     pos_live_data: list = []
     sol_price_usd: float = 0.0
     if positions:
-        fetch_tasks = [fetch_live_data(pos.token_address) for pos in positions]
+        fetch_tasks = []
+        for pos in positions:
+            fetch_tasks.append(fetch_live_data(pos.token_address))
+            fetch_tasks.append(
+                get_token_holding(s.wallet_address, pos.token_address)
+                if s.wallet_address else asyncio.sleep(0)
+            )
         fetch_tasks.append(fetch_sol_price_usd())
         all_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
         sol_result    = all_results[-1]
         sol_price_usd = sol_result if isinstance(sol_result, float) else 0.0
-        live_results  = all_results[:-1]
+        paired        = all_results[:-1]  # [live_0, holding_0, live_1, holding_1, ...]
 
-        for pos, live in zip(positions, live_results):
-            live_dict = live if isinstance(live, dict) else None
-            pos_live_data.append((pos, live_dict))
+        for i, pos in enumerate(positions):
+            live         = paired[i * 2]
+            holding      = paired[i * 2 + 1]
+            live_dict    = live    if isinstance(live,    dict) else None
+            holding_dict = holding if isinstance(holding, dict) else None
+            pos_live_data.append((pos, live_dict, holding_dict))
             logger.info(
                 "_build_menu: pos id=%d %r entry_mc=%s current_mc=%s sol_price=%.2f",
                 pos.id, pos.token_name,
