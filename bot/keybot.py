@@ -38,6 +38,7 @@ router = Router()
 class KeyBotStates(StatesGroup):
     waiting_for_wallet     = State()
     waiting_for_buy_amount = State()
+    waiting_for_sell_pct   = State()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -670,6 +671,123 @@ async def cb_keybot_sell(callback: CallbackQuery):
 
     except Exception as exc:
         logger.error("Sell failed for %s: %s", address, exc)
+        await status_msg.edit_text(
+            f"❌ *Sell Failed*\n\n`{str(exc)[:300]}`",
+            parse_mode="Markdown",
+        )
+
+
+# ── ✂️ Custom Sell — step 1: ask for percentage ──────────────────────────────
+
+@router.callback_query(lambda c: c.data and c.data.startswith("kbcustomsell:"))
+async def cb_keybot_custom_sell(callback: CallbackQuery, state: FSMContext):
+    address = callback.data.split(":", 1)[1]
+
+    keypair = get_keypair()
+    if keypair is None:
+        await callback.answer(
+            "❌ WALLET_PRIVATE_KEY not configured on the server.", show_alert=True
+        )
+        return
+
+    # Parse token name from Trade Card
+    token_name = address[:8] + "…"
+    if callback.message and callback.message.text:
+        for line in callback.message.text.splitlines():
+            if line.startswith("🪙"):
+                parts = line.split("*")
+                if len(parts) >= 3:
+                    token_name = f"{parts[1]} {parts[2].strip()}".strip()
+                elif len(parts) >= 2:
+                    token_name = parts[1]
+                break
+
+    await state.set_state(KeyBotStates.waiting_for_sell_pct)
+    await state.update_data(sell_address=address, sell_token_name=token_name)
+    await callback.answer()
+    await callback.message.reply(
+        f"✂️ Custom Sell — {token_name}\n\nType the percentage to sell (1–100):",
+        parse_mode="HTML",
+    )
+
+
+# ── ✂️ Custom Sell — step 2: execute partial sell ─────────────────────────────
+
+@router.message(KeyBotStates.waiting_for_sell_pct)
+async def handle_sell_pct_input(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    # Validate input
+    try:
+        pct = float(message.text.strip().rstrip("%"))
+        if not (1 <= pct <= 100):
+            raise ValueError
+    except ValueError:
+        await message.reply("❌ Enter a number between 1 and 100 (e.g. 50 or 25.5).")
+        return
+
+    data        = await state.get_data()
+    address     = data.get("sell_address", "")
+    token_name  = data.get("sell_token_name", address[:8] + "…")
+    await state.clear()
+
+    keypair = get_keypair()
+    if keypair is None:
+        await message.reply("❌ WALLET_PRIVATE_KEY not configured.")
+        return
+
+    wallet_address = str(keypair.pubkey())
+    status_msg     = await message.reply("⏳ Checking token balance…")
+
+    try:
+        full_balance = await get_token_balance(wallet_address, address)
+        if full_balance == 0:
+            await status_msg.edit_text(
+                f"📭 *No tokens to sell*\n\nWallet holds 0 of `{token_name}`.",
+                parse_mode="Markdown",
+            )
+            return
+
+        sell_amount = max(1, int(full_balance * pct / 100))
+        is_full     = sell_amount >= full_balance
+
+        await status_msg.edit_text("⏳ Getting Jupiter sell quote…")
+        order = await get_ultra_order(
+            output_mint=SOL_MINT,
+            amount=sell_amount,
+            wallet_address=wallet_address,
+            input_mint=address,
+        )
+        price_impact = float(order.get("priceImpactPct", 0))
+        out_lamports = int(order.get("outAmount", 0))
+        sol_received = round(out_lamports / 1_000_000_000, 4)
+
+        await status_msg.edit_text("⏳ Signing and sending transaction…")
+        signature = await execute_ultra_order(order, keypair)
+
+        # Close position only on a full sell
+        pnl_str = ""
+        if is_full:
+            pos = await get_open_position_by_token(user_id, address)
+            if pos:
+                pnl_sol = round(sol_received - pos.amount_sol_spent, 4)
+                await close_position(pos.id, "manual", pnl_sol)
+                pnl_str = f"\n💹 PnL:            `{pnl_sol:+.4f} SOL`"
+
+        await status_msg.edit_text(
+            f"✅ *Custom Sell Executed!*\n\n"
+            f"🪙 Token:          `{token_name}`\n"
+            f"✂️ Sold:           `{pct:.1f}% of holdings`\n"
+            f"💰 SOL Received:   `~{sol_received} SOL`\n"
+            f"📊 Price Impact:   `{price_impact:.2f}%`"
+            f"{pnl_str}\n\n"
+            f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+    except Exception as exc:
+        logger.error("Custom sell failed for %s: %s", address, exc)
         await status_msg.edit_text(
             f"❌ *Sell Failed*\n\n`{str(exc)[:300]}`",
             parse_mode="Markdown",

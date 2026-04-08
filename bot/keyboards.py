@@ -58,6 +58,10 @@ def trade_card_keyboard(
             text="🔫 Full Clip",
             callback_data=f"kbsell:{contract_address}",
         ),
+        InlineKeyboardButton(
+            text="✂️ Custom Sell",
+            callback_data=f"kbcustomsell:{contract_address}",
+        ),
     )
 
     return builder.as_markup()
