@@ -20,7 +20,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bot.config import CALLER_GROUP_ID, SCAN_TOPIC_ID
 from bot.scanner import fetch_live_data, fetch_sol_price_usd
 from bot.trading import SOL_MINT, get_ultra_order, get_token_balance, execute_ultra_order
-from bot.wallet import get_keypair, get_wallet_address, get_sol_balance, get_holder_info
+from bot.wallet import get_keypair, get_wallet_address, get_sol_balance
 from database.models import (
     get_keybot_settings, upsert_keybot_settings,
     open_position, close_position,
@@ -159,7 +159,7 @@ def _confirm_remove_keyboard() -> InlineKeyboardMarkup:
 def _menu_text(
     s,
     balance:       float | None = None,
-    pos_live_data: list         = None,   # [(Position, live_dict | None, holder_dict | None), ...]
+    pos_live_data: list         = None,   # [(Position, live_dict | None), ...]
     sol_price_usd: float        = 0.0,
 ) -> str:
     sol = s.buy_amount_sol
@@ -189,7 +189,7 @@ def _menu_text(
     lines.append("\n📂 OPEN POSITIONS")
     total_pos_sol = 0.0
 
-    for i, (pos, live, holder) in enumerate(pos_live_data, 1):
+    for i, (pos, live) in enumerate(pos_live_data, 1):
         current_mc  = (live or {}).get("market_cap", 0) or 0
         price_usd   = (live or {}).get("price_usd",  0) or 0
         symbol      = (live or {}).get("symbol", pos.token_name or "???")
@@ -212,18 +212,8 @@ def _menu_text(
         mc_str    = _fmt_mc(current_mc)   if current_mc else "N/A"
         price_str = _fmt_price(price_usd) if price_usd  else "N/A"
 
-        # Holder rank line — always shown, N/A if Helius call failed
-        if holder:
-            rank_str = f"#{holder['rank']}" if holder.get("rank") else ">20"
-            bal_fmt  = f"{holder['balance']:,.0f}"
-            pct_fmt  = f"{holder['pct_supply']:.3f}"
-            holder_line = f"Holder Rank: {rank_str} | Hold: {bal_fmt} ({pct_fmt}% supply)\n"
-        else:
-            holder_line = "Holder Rank: N/A\n"
-
         lines.append(
             f"/{i} ${symbol}\n"
-            f"{holder_line}"
             f"Profit: {p_sign}{profit_pct:.2f}% / {profit_sol:.4f} SOL\n"
             f"Value: ${current_val_usd:.2f} / {current_val_sol:.4f} SOL\n"
             f"Mcap: {mc_str} @ {price_str}\n"
@@ -282,37 +272,27 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
 
     logger.info("_build_menu: user_id=%s found %d open position(s) in DB", user_id, len(positions))
 
-    # Fetch live data + holder info for every position + SOL price concurrently.
-    # Task order: live_0, holder_0, live_1, holder_1, ..., sol_price
+    # Fetch live data for every position + SOL price concurrently.
     pos_live_data: list = []
     sol_price_usd: float = 0.0
     if positions:
-        fetch_tasks = []
-        for pos in positions:
-            fetch_tasks.append(fetch_live_data(pos.token_address))
-            fetch_tasks.append(
-                get_holder_info(s.wallet_address, pos.token_address)
-                if s.wallet_address else asyncio.sleep(0)
-            )
+        fetch_tasks = [fetch_live_data(pos.token_address) for pos in positions]
         fetch_tasks.append(fetch_sol_price_usd())
         all_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
         sol_result    = all_results[-1]
         sol_price_usd = sol_result if isinstance(sol_result, float) else 0.0
-        paired        = all_results[:-1]   # [live_0, holder_0, live_1, holder_1, ...]
+        live_results  = all_results[:-1]
 
-        for i, pos in enumerate(positions):
-            live        = paired[i * 2]
-            holder      = paired[i * 2 + 1]
-            live_dict   = live   if isinstance(live,   dict) else None
-            holder_dict = holder if isinstance(holder, dict) else None
-            pos_live_data.append((pos, live_dict, holder_dict))
+        for pos, live in zip(positions, live_results):
+            live_dict = live if isinstance(live, dict) else None
+            pos_live_data.append((pos, live_dict))
             logger.info(
-                "_build_menu: pos id=%d %r entry_mc=%s current_mc=%s rank=%s",
+                "_build_menu: pos id=%d %r entry_mc=%s current_mc=%s sol_price=%.2f",
                 pos.id, pos.token_name,
                 f"{pos.entry_mc:.0f}" if pos.entry_mc else "None",
                 f"{live_dict['market_cap']:.0f}" if live_dict else "None",
-                holder_dict.get("rank") if holder_dict else "N/A",
+                sol_price_usd,
             )
 
     return _menu_text(s, balance, pos_live_data, sol_price_usd), _main_keyboard(s, positions)

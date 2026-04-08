@@ -240,15 +240,18 @@ async def fetch_live_data(address: str) -> Optional[dict]:
 
 
 async def fetch_sol_price_usd() -> float:
-    """Returns current SOL/USD price from Jupiter price API, or 0 on failure."""
-    url = "https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112"
+    """Returns current SOL/USD price from DexScreener, or 0 on failure."""
+    url = "https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112"
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             async with session.get(url) as resp:
                 data = await resp.json()
-                return float(
-                    data["data"]["So11111111111111111111111111111111111111112"]["price"]
-                )
+        pairs = data.get("pairs") or []
+        if not pairs:
+            return 0.0
+        # Use the pair with the highest liquidity for the most accurate price
+        pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
+        return float(pairs[0].get("priceUsd") or 0)
     except Exception:
         return 0.0
 
