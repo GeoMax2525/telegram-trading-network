@@ -100,55 +100,60 @@ async def get_holder_info(wallet_address: str, mint: str) -> Optional[dict]:
         f"?tokenAddress={mint}&limit={_HOLDER_LIMIT}&offset=0"
     )
 
-    timeout = aiohttp.ClientTimeout(total=15)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        # Page 0 and token meta in parallel
-        meta_data, page0_data = await asyncio.gather(
-            _solscan_get(session, meta_url),
-            _solscan_get(session, page0_url),
-        )
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # Page 0 and token meta in parallel
+            meta_data, page0_data = await asyncio.gather(
+                _solscan_get(session, meta_url),
+                _solscan_get(session, page0_url),
+            )
 
-        if not page0_data:
-            return None
+            if not page0_data:
+                return None
 
-        # Token decimals + total supply (raw integer string)
-        decimals     = int((meta_data or {}).get("decimals", 0))
-        supply_raw   = int((meta_data or {}).get("supply", 0) or 0)
-        total_supply = supply_raw  # raw units
+            # Token decimals + total supply (raw integer string)
+            decimals     = int((meta_data or {}).get("decimals", 0))
+            supply_raw   = int((meta_data or {}).get("supply", 0) or 0)
+            total_supply = supply_raw  # raw units
 
-        holders      = page0_data.get("data", [])
-        total_listed = page0_data.get("total", 0)
-        pages_needed = min(
-            (_HOLDER_MAX_RANK + _HOLDER_LIMIT - 1) // _HOLDER_LIMIT,
-            (total_listed  + _HOLDER_LIMIT - 1) // _HOLDER_LIMIT,
-        )
+            holders      = page0_data.get("data", [])
+            total_listed = page0_data.get("total", 0)
+            pages_needed = min(
+                (_HOLDER_MAX_RANK + _HOLDER_LIMIT - 1) // _HOLDER_LIMIT,
+                (total_listed  + _HOLDER_LIMIT - 1) // _HOLDER_LIMIT,
+            )
 
-        for page in range(pages_needed):
-            if page > 0:
-                offset = page * _HOLDER_LIMIT
-                url    = (
-                    f"{_SOLSCAN_BASE}/token/holders"
-                    f"?tokenAddress={mint}&limit={_HOLDER_LIMIT}&offset={offset}"
-                )
-                data = await _solscan_get(session, url)
-                if not data:
-                    break
-                holders = data.get("data", [])
+            for page in range(pages_needed):
+                if page > 0:
+                    offset = page * _HOLDER_LIMIT
+                    url    = (
+                        f"{_SOLSCAN_BASE}/token/holders"
+                        f"?tokenAddress={mint}&limit={_HOLDER_LIMIT}&offset={offset}"
+                    )
+                    data = await _solscan_get(session, url)
+                    if not data:
+                        break
+                    holders = data.get("data", [])
 
-            for idx, holder in enumerate(holders):
-                if holder.get("owner") == wallet_address:
-                    rank      = page * _HOLDER_LIMIT + idx + 1
-                    raw_amt   = int(holder.get("amount", 0) or 0)
-                    ui_amount = raw_amt / (10 ** decimals) if decimals >= 0 else float(raw_amt)
-                    pct       = (raw_amt / total_supply * 100) if total_supply > 0 else 0.0
-                    return {
-                        "rank":       rank,
-                        "balance":    ui_amount,
-                        "pct_supply": pct,
-                    }
+                for idx, holder in enumerate(holders):
+                    if holder.get("owner") == wallet_address:
+                        rank      = page * _HOLDER_LIMIT + idx + 1
+                        raw_amt   = int(holder.get("amount", 0) or 0)
+                        ui_amount = raw_amt / (10 ** decimals) if decimals >= 0 else float(raw_amt)
+                        pct       = (raw_amt / total_supply * 100) if total_supply > 0 else 0.0
+                        return {
+                            "rank":       rank,
+                            "balance":    ui_amount,
+                            "pct_supply": pct,
+                        }
 
-    # Wallet not in top _HOLDER_MAX_RANK holders — omit the line
-    return None
+        # Wallet not in top _HOLDER_MAX_RANK holders
+        return None
+
+    except Exception as exc:
+        logger.error("get_holder_info failed for %s mint=%s: %s", wallet_address, mint, exc)
+        return None
 
 
 async def get_sol_balance(address: str) -> Optional[float]:

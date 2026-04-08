@@ -211,14 +211,14 @@ def _menu_text(
         mc_str    = _fmt_mc(current_mc)   if current_mc else "N/A"
         price_str = _fmt_price(price_usd) if price_usd  else "N/A"
 
-        # Holder rank line (omit if data unavailable)
+        # Holder rank line — always shown, N/A if Solscan unavailable
         if holder:
-            rank_str = f"#{holder['rank']}" if holder["rank"] else ">20"
+            rank_str = f"#{holder['rank']}" if holder.get("rank") else ">500"
             bal_fmt  = f"{holder['balance']:,.0f}"
             pct_fmt  = f"{holder['pct_supply']:.3f}"
             holder_line = f"Holder Rank: {rank_str} | Hold: {bal_fmt} ({pct_fmt}% supply)\n"
         else:
-            holder_line = ""
+            holder_line = "Holder Rank: N/A\n"
 
         lines.append(
             f"/{i} ${symbol}\n"
