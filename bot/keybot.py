@@ -26,7 +26,7 @@ from database.models import (
     get_keybot_settings, upsert_keybot_settings,
     open_position, close_position,
     get_open_positions, get_position_by_id, get_open_position_by_token,
-    update_position_entry_mc, debug_all_positions,
+    update_position_entry_mc, debug_all_positions, count_open_positions,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,9 +36,10 @@ router = Router()
 # ── FSM states ────────────────────────────────────────────────────────────────
 
 class KeyBotStates(StatesGroup):
-    waiting_for_wallet     = State()
-    waiting_for_buy_amount = State()
-    waiting_for_sell_pct   = State()
+    waiting_for_wallet          = State()
+    waiting_for_buy_amount      = State()
+    waiting_for_sell_pct        = State()
+    waiting_for_max_positions   = State()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -76,6 +77,7 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
     sol     = s.buy_amount_sol
     tp      = s.take_profit_x
     sl      = s.stop_loss_pct
+    mp      = getattr(s, "max_positions", 5)
     w       = s.wallet_address
     w_label = f"👛 Wallet: {w[:6]}…{w[-4:]}" if w else "👛 Wallet Address: Not set"
 
@@ -88,6 +90,9 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
     ))
     builder.row(InlineKeyboardButton(
         text=f"🛑 Stop Loss: {sl}%", callback_data="kb:stop_loss"
+    ))
+    builder.row(InlineKeyboardButton(
+        text=f"📊 Max Positions: {mp}", callback_data="kb:max_positions"
     ))
     builder.row(InlineKeyboardButton(
         text=w_label, callback_data="kb:wallet"
@@ -130,6 +135,16 @@ def _stop_loss_keyboard() -> InlineKeyboardMarkup:
         builder.button(text=f"{pct}%", callback_data=f"kb:set_sl:{pct}")
     builder.adjust(4)
     builder.row(InlineKeyboardButton(text="⬅️ Back", callback_data="kb:menu"))
+    return builder.as_markup()
+
+
+def _max_positions_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for n in (3, 5, 10, 15):
+        builder.button(text=str(n), callback_data=f"kb:set_mp:{n}")
+    builder.adjust(4)
+    builder.row(InlineKeyboardButton(text="✏️ Custom", callback_data="kb:custom_mp"))
+    builder.row(InlineKeyboardButton(text="⬅️ Back",   callback_data="kb:menu"))
     return builder.as_markup()
 
 
@@ -176,11 +191,14 @@ def _menu_text(
     else:
         w_str = "Not set"
 
+    mp = getattr(s, "max_positions", 5)
+
     lines = [
         "🔑 KEY BOT\n",
         f"💰 Buy Amount:  {sol} SOL",
         f"🎯 Take Profit: {tp}x",
         f"🛑 Stop Loss:   {sl}%",
+        f"📊 Max Positions: {mp}",
         f"👛 Wallet:      {w_str}",
     ]
 
@@ -436,6 +454,29 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer(f"✅ Stop loss set to {val}%")
 
+    elif action == "max_positions":
+        await callback.message.edit_text(
+            "📊 *Max Positions*\nMaximum number of trades open at the same time:",
+            parse_mode="Markdown", reply_markup=_max_positions_keyboard(),
+        )
+        await callback.answer()
+
+    elif action == "custom_mp":
+        await state.set_state(KeyBotStates.waiting_for_max_positions)
+        await callback.message.edit_text(
+            "✏️ *Custom Max Positions*\n\nType a number between 1 and 50:",
+            parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),
+        )
+        await callback.answer()
+
+    elif action.startswith("set_mp:"):
+        val = int(action.split(":", 1)[1])
+        await upsert_keybot_settings(user_id, max_positions=val)
+        text, keyboard = await _build_menu(user_id)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.answer(f"✅ Max positions set to {val}")
+
     else:
         await callback.answer()
 
@@ -495,6 +536,36 @@ async def receive_buy_amount(message: Message, state: FSMContext):
     )
 
 
+# ── FSM: custom max positions input ──────────────────────────────────────────
+
+@router.message(KeyBotStates.waiting_for_max_positions)
+async def receive_max_positions(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if raw.startswith("/"):
+        await state.clear()
+        return
+    try:
+        val = int(raw)
+        if not (1 <= val <= 50):
+            raise ValueError
+    except ValueError:
+        await message.reply(
+            "⚠️ Please enter a whole number between 1 and 50.",
+            parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),
+        )
+        return
+
+    await upsert_keybot_settings(message.from_user.id, max_positions=val)
+    await state.clear()
+    text, keyboard = await _build_menu(message.from_user.id)
+    await message.reply(
+        f"✅ Max positions set to {val}\n\n" + text,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+
+
 # ── ⚡ KeyBot Buy callback (on Trade Cards) ───────────────────────────────────
 
 @router.callback_query(lambda c: c.data and c.data.startswith("kbbuy:"))
@@ -506,6 +577,17 @@ async def cb_keybot_buy(callback: CallbackQuery):
     s = await get_keybot_settings(user_id)
     if s is None or not s.buy_amount_sol:
         await callback.answer("⚙️ Set up KeyBot first with /keybot", show_alert=True)
+        return
+
+    # Enforce max positions limit
+    max_pos  = getattr(s, "max_positions", 5)
+    open_cnt = await count_open_positions(user_id)
+    if open_cnt >= max_pos:
+        await callback.answer(
+            f"⛔ Max positions reached ({open_cnt}/{max_pos}). "
+            "Close a position before opening a new one.",
+            show_alert=True,
+        )
         return
 
     keypair = get_keypair()

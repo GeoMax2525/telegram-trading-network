@@ -76,6 +76,7 @@ class KeyBotSettings(Base):
     buy_amount_sol = Column(Float,      nullable=False, default=0.5)
     take_profit_x  = Column(Float,      nullable=False, default=3.0)
     stop_loss_pct  = Column(Float,      nullable=False, default=30.0)
+    max_positions  = Column(Integer,    nullable=False, default=5)
     wallet_address = Column(String(64), nullable=True)
     created_at     = Column(DateTime,   default=datetime.utcnow, nullable=False)
     updated_at     = Column(DateTime,   default=datetime.utcnow, nullable=False)
@@ -135,6 +136,10 @@ _NEW_SCAN_COLS = [
     ("close_reason",     "TEXT"),
 ]
 
+_NEW_KEYBOT_COLS = [
+    ("max_positions", "INTEGER DEFAULT 5"),
+]
+
 async def init_db() -> None:
     """Creates all tables if they don't already exist, then adds any missing columns."""
     is_postgres = DATABASE_URL.startswith("postgresql")
@@ -145,7 +150,7 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # Migrate existing scans table — add new columns if absent.
+    # Migrate existing tables — add new columns if absent.
     # PostgreSQL supports IF NOT EXISTS; SQLite needs try/except.
     async with engine.begin() as conn:
         for col_name, col_def in _NEW_SCAN_COLS:
@@ -157,6 +162,19 @@ async def init_db() -> None:
                 try:
                     await conn.execute(
                         text(f"ALTER TABLE scans ADD COLUMN {col_name} {col_def}")
+                    )
+                except Exception:
+                    pass  # column already exists
+
+        for col_name, col_def in _NEW_KEYBOT_COLS:
+            if is_postgres:
+                await conn.execute(
+                    text(f"ALTER TABLE keybot_settings ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
+                )
+            else:
+                try:
+                    await conn.execute(
+                        text(f"ALTER TABLE keybot_settings ADD COLUMN {col_name} {col_def}")
                     )
                 except Exception:
                     pass  # column already exists
@@ -541,6 +559,18 @@ async def get_open_positions(user_id: int | None = None) -> list["Position"]:
 async def get_position_by_id(position_id: int) -> "Position | None":
     async with AsyncSessionLocal() as session:
         return await session.get(Position, position_id)
+
+
+async def count_open_positions(user_id: int) -> int:
+    """Returns the number of currently open positions for a user."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(Position.id)).where(
+                Position.user_id == user_id,
+                Position.status == "open",
+            )
+        )
+        return result.scalar() or 0
 
 
 async def debug_all_positions() -> None:
