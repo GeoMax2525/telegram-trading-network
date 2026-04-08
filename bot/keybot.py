@@ -7,6 +7,7 @@ Phase 1: UI + preset storage only (no real on-chain trading).
 import asyncio
 import html
 import logging
+from datetime import datetime, timezone
 
 from aiogram import Bot, Router
 from aiogram.filters import Command
@@ -43,6 +44,7 @@ class KeyBotStates(StatesGroup):
     waiting_for_max_positions   = State()
     waiting_for_sol_limit       = State()
     waiting_for_pct_limit       = State()
+    waiting_for_cooldown        = State()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -95,6 +97,9 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
     else:
         dl_label = "🛡️ Daily Loss Limit: Off"
 
+    cd      = getattr(s, "cooldown_minutes", 0) or 0
+    cd_label = f"⏱️ Cooldown: {cd} min" if cd > 0 else "⏱️ Cooldown: Off"
+
     builder = InlineKeyboardBuilder()
     # Row 1
     builder.row(
@@ -109,6 +114,10 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
     # Row 3
     builder.row(
         InlineKeyboardButton(text=dl_label,  callback_data="kb:daily_loss"),
+        InlineKeyboardButton(text=cd_label,  callback_data="kb:cooldown"),
+    )
+    # Row 4
+    builder.row(
         InlineKeyboardButton(text=w_label,   callback_data="kb:wallet"),
     )
     # One Close button per open position
@@ -228,6 +237,9 @@ def _menu_text(
     if dl_today > 0:
         dl_str += f"  (today: -{dl_today:.4f} SOL)"
 
+    cd     = getattr(s, "cooldown_minutes", 0) or 0
+    cd_str = f"{cd} min" if cd > 0 else "Disabled"
+
     lines = [
         "🔑 KEY BOT\n",
         f"💰 Buy Amount:  {sol} SOL",
@@ -235,6 +247,7 @@ def _menu_text(
         f"🛑 Stop Loss:   {sl}%",
         f"📊 Max Positions: {mp}",
         f"🛡️ Daily Loss Limit: {dl_str}",
+        f"⏱️ Cooldown: {cd_str}",
         f"👛 Wallet:      {w_str}",
     ]
 
@@ -556,6 +569,17 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer("🚫 Daily loss limit disabled")
 
+    elif action == "cooldown":
+        await state.set_state(KeyBotStates.waiting_for_cooldown)
+        await callback.message.edit_text(
+            "⏱️ *Cooldown Period*\n\n"
+            "Type the number of minutes to wait between buys.\n"
+            "_(Send `0` to disable)_",
+            parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),
+        )
+        await callback.answer()
+
     else:
         await callback.answer()
 
@@ -703,6 +727,36 @@ async def receive_pct_limit(message: Message, state: FSMContext):
     )
 
 
+# ── FSM: cooldown minutes input ───────────────────────────────────────────────
+
+@router.message(KeyBotStates.waiting_for_cooldown)
+async def receive_cooldown(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if raw.startswith("/"):
+        await state.clear()
+        return
+    try:
+        val = int(raw)
+        if val < 0:
+            raise ValueError
+    except ValueError:
+        await message.reply(
+            "⚠️ Enter a whole number of minutes (0 to disable, e.g. `5`).",
+            parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),
+        )
+        return
+    await upsert_keybot_settings(message.from_user.id, cooldown_minutes=val)
+    await state.clear()
+    text, keyboard = await _build_menu(message.from_user.id)
+    label = f"{val} min" if val > 0 else "disabled"
+    await message.reply(
+        f"✅ Cooldown set to {label}\n\n" + text,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+
+
 # ── ⚡ KeyBot Buy callback (on Trade Cards) ───────────────────────────────────
 
 @router.callback_query(lambda c: c.data and c.data.startswith("kbbuy:"))
@@ -746,6 +800,22 @@ async def cb_keybot_buy(callback: CallbackQuery):
             await callback.answer(
                 f"⛔ Daily loss limit reached ({dl_pct:.0f}%). "
                 "Trading paused until midnight.",
+                show_alert=True,
+            )
+            return
+
+    # Enforce cooldown period
+    cd_minutes   = getattr(s, "cooldown_minutes", 0) or 0
+    last_trade   = getattr(s, "last_trade_at", None)
+    if cd_minutes > 0 and last_trade is not None:
+        elapsed = (datetime.utcnow() - last_trade).total_seconds() / 60
+        remaining = cd_minutes - elapsed
+        if remaining > 0:
+            mins = int(remaining)
+            secs = int((remaining - mins) * 60)
+            time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+            await callback.answer(
+                f"⏱️ Cooldown active. {time_str} remaining before next trade.",
                 show_alert=True,
             )
             return
@@ -807,6 +877,12 @@ async def cb_keybot_buy(callback: CallbackQuery):
             parse_mode="Markdown",
         )
         return
+
+    # Stamp last_trade_at so cooldown is enforced for next buy
+    try:
+        await upsert_keybot_settings(user_id, last_trade_at=datetime.utcnow())
+    except Exception as exc:
+        logger.warning("Failed to update last_trade_at for user %d: %s", user_id, exc)
 
     # Save position separately — DB failure must not hide a successful swap
     try:
