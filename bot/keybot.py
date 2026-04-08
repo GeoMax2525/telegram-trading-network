@@ -705,10 +705,24 @@ async def cb_keybot_custom_sell(callback: CallbackQuery, state: FSMContext):
     await state.set_state(KeyBotStates.waiting_for_sell_pct)
     await state.update_data(sell_address=address, sell_token_name=token_name)
     await callback.answer()
+
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Cancel", callback_data="kbcustomsell_cancel"),
+    ]])
     await callback.message.reply(
         f"✂️ Custom Sell — {token_name}\n\nType the percentage to sell (1–100):",
         parse_mode="HTML",
+        reply_markup=cancel_kb,
     )
+
+
+# ── ✂️ Custom Sell — cancel ──────────────────────────────────────────────────
+
+@router.callback_query(lambda c: c.data == "kbcustomsell_cancel")
+async def cb_custom_sell_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.answer()
+    await callback.message.edit_text("❌ Custom sell cancelled.")
 
 
 # ── ✂️ Custom Sell — step 2: execute partial sell ─────────────────────────────
