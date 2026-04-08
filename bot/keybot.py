@@ -96,24 +96,21 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
         dl_label = "🛡️ Daily Loss Limit: Off"
 
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(
-        text=f"💰 Buy Amount: {sol} SOL", callback_data="kb:buy_amount"
-    ))
-    builder.row(InlineKeyboardButton(
-        text=f"🎯 Take Profit: {tp}x", callback_data="kb:take_profit"
-    ))
-    builder.row(InlineKeyboardButton(
-        text=f"🛑 Stop Loss: {sl}%", callback_data="kb:stop_loss"
-    ))
-    builder.row(InlineKeyboardButton(
-        text=f"📊 Max Positions: {mp}", callback_data="kb:max_positions"
-    ))
-    builder.row(InlineKeyboardButton(
-        text=dl_label, callback_data="kb:daily_loss"
-    ))
-    builder.row(InlineKeyboardButton(
-        text=w_label, callback_data="kb:wallet"
-    ))
+    # Row 1
+    builder.row(
+        InlineKeyboardButton(text=f"💰 Buy Amount: {sol} SOL", callback_data="kb:buy_amount"),
+        InlineKeyboardButton(text=f"🎯 Take Profit: {tp}x",   callback_data="kb:take_profit"),
+    )
+    # Row 2
+    builder.row(
+        InlineKeyboardButton(text=f"🛑 Stop Loss: {sl}%",      callback_data="kb:stop_loss"),
+        InlineKeyboardButton(text=f"📊 Max Positions: {mp}",   callback_data="kb:max_positions"),
+    )
+    # Row 3
+    builder.row(
+        InlineKeyboardButton(text=dl_label,  callback_data="kb:daily_loss"),
+        InlineKeyboardButton(text=w_label,   callback_data="kb:wallet"),
+    )
     # One Close button per open position
     for pos in (positions or []):
         label = pos.token_name[:20] if pos.token_name else pos.token_address[:10]
@@ -121,9 +118,8 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
             text=f"🔫 Close {label}",
             callback_data=f"kbclose:{pos.id}",
         ))
-    builder.row(InlineKeyboardButton(
-        text="❌ Close", callback_data="kb:close"
-    ))
+    # Row last
+    builder.row(InlineKeyboardButton(text="❌ Close", callback_data="kb:close"))
     return builder.as_markup()
 
 
