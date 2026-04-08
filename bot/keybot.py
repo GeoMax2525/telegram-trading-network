@@ -27,6 +27,7 @@ from database.models import (
     open_position, close_position,
     get_open_positions, get_position_by_id, get_open_position_by_token,
     update_position_entry_mc, debug_all_positions, count_open_positions,
+    add_daily_loss,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ class KeyBotStates(StatesGroup):
     waiting_for_buy_amount      = State()
     waiting_for_sell_pct        = State()
     waiting_for_max_positions   = State()
+    waiting_for_sol_limit       = State()
+    waiting_for_pct_limit       = State()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -81,6 +84,17 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
     w       = s.wallet_address
     w_label = f"👛 Wallet: {w[:6]}…{w[-4:]}" if w else "👛 Wallet Address: Not set"
 
+    dl_sol = getattr(s, "daily_loss_limit_sol", 0.0) or 0.0
+    dl_pct = getattr(s, "daily_loss_limit_pct", 0.0) or 0.0
+    if dl_sol > 0 and dl_pct > 0:
+        dl_label = f"🛡️ Daily Loss: {dl_sol} SOL / {dl_pct:.0f}%"
+    elif dl_sol > 0:
+        dl_label = f"🛡️ Daily Loss: {dl_sol} SOL"
+    elif dl_pct > 0:
+        dl_label = f"🛡️ Daily Loss: {dl_pct:.0f}%"
+    else:
+        dl_label = "🛡️ Daily Loss Limit: Off"
+
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
         text=f"💰 Buy Amount: {sol} SOL", callback_data="kb:buy_amount"
@@ -93,6 +107,9 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
     ))
     builder.row(InlineKeyboardButton(
         text=f"📊 Max Positions: {mp}", callback_data="kb:max_positions"
+    ))
+    builder.row(InlineKeyboardButton(
+        text=dl_label, callback_data="kb:daily_loss"
     ))
     builder.row(InlineKeyboardButton(
         text=w_label, callback_data="kb:wallet"
@@ -148,6 +165,15 @@ def _max_positions_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def _daily_loss_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="💰 Set SOL Limit", callback_data="kb:sol_limit_input"))
+    builder.row(InlineKeyboardButton(text="📊 Set % Limit",   callback_data="kb:pct_limit_input"))
+    builder.row(InlineKeyboardButton(text="🚫 Disable",       callback_data="kb:disable_loss_limit"))
+    builder.row(InlineKeyboardButton(text="⬅️ Back",          callback_data="kb:menu"))
+    return builder.as_markup()
+
+
 def _wallet_input_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="⬅️ Back", callback_data="kb:menu"))
@@ -191,7 +217,20 @@ def _menu_text(
     else:
         w_str = "Not set"
 
-    mp = getattr(s, "max_positions", 5)
+    mp     = getattr(s, "max_positions", 5)
+    dl_sol = getattr(s, "daily_loss_limit_sol", 0.0) or 0.0
+    dl_pct = getattr(s, "daily_loss_limit_pct", 0.0) or 0.0
+    dl_today = getattr(s, "daily_loss_today_sol", 0.0) or 0.0
+    if dl_sol > 0 and dl_pct > 0:
+        dl_str = f"{dl_sol} SOL / {dl_pct:.0f}%"
+    elif dl_sol > 0:
+        dl_str = f"{dl_sol} SOL"
+    elif dl_pct > 0:
+        dl_str = f"{dl_pct:.0f}%"
+    else:
+        dl_str = "Disabled"
+    if dl_today > 0:
+        dl_str += f"  (today: -{dl_today:.4f} SOL)"
 
     lines = [
         "🔑 KEY BOT\n",
@@ -199,6 +238,7 @@ def _menu_text(
         f"🎯 Take Profit: {tp}x",
         f"🛑 Stop Loss:   {sl}%",
         f"📊 Max Positions: {mp}",
+        f"🛡️ Daily Loss Limit: {dl_str}",
         f"👛 Wallet:      {w_str}",
     ]
 
@@ -477,6 +517,49 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer(f"✅ Max positions set to {val}")
 
+    elif action == "daily_loss":
+        s      = await get_keybot_settings(user_id)
+        dl_sol = getattr(s, "daily_loss_limit_sol", 0.0) or 0.0 if s else 0.0
+        dl_pct = getattr(s, "daily_loss_limit_pct", 0.0) or 0.0 if s else 0.0
+        if dl_sol > 0 and dl_pct > 0:
+            current = f"{dl_sol} SOL / {dl_pct:.0f}%"
+        elif dl_sol > 0:
+            current = f"{dl_sol} SOL"
+        elif dl_pct > 0:
+            current = f"{dl_pct:.0f}%"
+        else:
+            current = "Disabled"
+        await callback.message.edit_text(
+            f"🛡️ *Daily Loss Limit*\nCurrent: {current}\n\nStop trading if daily losses exceed:",
+            parse_mode="Markdown",
+            reply_markup=_daily_loss_keyboard(),
+        )
+        await callback.answer()
+
+    elif action == "sol_limit_input":
+        await state.set_state(KeyBotStates.waiting_for_sol_limit)
+        await callback.message.edit_text(
+            "💰 *Set SOL Loss Limit*\n\nType the maximum SOL you can lose per day _(e.g. `0.5`)_:",
+            parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),
+        )
+        await callback.answer()
+
+    elif action == "pct_limit_input":
+        await state.set_state(KeyBotStates.waiting_for_pct_limit)
+        await callback.message.edit_text(
+            "📊 *Set % Loss Limit*\n\nType the maximum % of wallet balance to lose per day _(e.g. `10`)_:",
+            parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),
+        )
+        await callback.answer()
+
+    elif action == "disable_loss_limit":
+        await upsert_keybot_settings(user_id, daily_loss_limit_sol=0.0, daily_loss_limit_pct=0.0)
+        text, keyboard = await _build_menu(user_id)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.answer("🚫 Daily loss limit disabled")
+
     else:
         await callback.answer()
 
@@ -566,6 +649,64 @@ async def receive_max_positions(message: Message, state: FSMContext):
     )
 
 
+# ── FSM: custom SOL loss limit input ─────────────────────────────────────────
+
+@router.message(KeyBotStates.waiting_for_sol_limit)
+async def receive_sol_limit(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if raw.startswith("/"):
+        await state.clear()
+        return
+    try:
+        val = float(raw.replace(",", "."))
+        if val <= 0:
+            raise ValueError
+    except ValueError:
+        await message.reply(
+            "⚠️ Enter a valid SOL amount greater than 0 (e.g. `0.5`).",
+            parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),
+        )
+        return
+    await upsert_keybot_settings(message.from_user.id, daily_loss_limit_sol=val)
+    await state.clear()
+    text, keyboard = await _build_menu(message.from_user.id)
+    await message.reply(
+        f"✅ SOL loss limit set to {val} SOL\n\n" + text,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+
+
+# ── FSM: custom % loss limit input ────────────────────────────────────────────
+
+@router.message(KeyBotStates.waiting_for_pct_limit)
+async def receive_pct_limit(message: Message, state: FSMContext):
+    raw = (message.text or "").strip().rstrip("%")
+    if raw.startswith("/"):
+        await state.clear()
+        return
+    try:
+        val = float(raw.replace(",", "."))
+        if not (0 < val <= 100):
+            raise ValueError
+    except ValueError:
+        await message.reply(
+            "⚠️ Enter a percentage between 1 and 100 (e.g. `10`).",
+            parse_mode="Markdown",
+            reply_markup=_wallet_input_keyboard(),
+        )
+        return
+    await upsert_keybot_settings(message.from_user.id, daily_loss_limit_pct=val)
+    await state.clear()
+    text, keyboard = await _build_menu(message.from_user.id)
+    await message.reply(
+        f"✅ % loss limit set to {val}%\n\n" + text,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+
+
 # ── ⚡ KeyBot Buy callback (on Trade Cards) ───────────────────────────────────
 
 @router.callback_query(lambda c: c.data and c.data.startswith("kbbuy:"))
@@ -589,6 +730,29 @@ async def cb_keybot_buy(callback: CallbackQuery):
             show_alert=True,
         )
         return
+
+    # Enforce daily loss limits
+    dl_sol   = getattr(s, "daily_loss_limit_sol", 0.0) or 0.0
+    dl_pct   = getattr(s, "daily_loss_limit_pct", 0.0) or 0.0
+    dl_today = getattr(s, "daily_loss_today_sol", 0.0) or 0.0
+
+    if dl_sol > 0 and dl_today >= dl_sol:
+        await callback.answer(
+            f"⛔ Daily SOL loss limit reached ({dl_today:.4f}/{dl_sol} SOL). "
+            "Trading paused until midnight.",
+            show_alert=True,
+        )
+        return
+
+    if dl_pct > 0 and s.wallet_address:
+        bal = await get_sol_balance(s.wallet_address)
+        if bal and bal > 0 and (dl_today / bal * 100) >= dl_pct:
+            await callback.answer(
+                f"⛔ Daily loss limit reached ({dl_pct:.0f}%). "
+                "Trading paused until midnight.",
+                show_alert=True,
+            )
+            return
 
     keypair = get_keypair()
     if keypair is None:
@@ -737,6 +901,8 @@ async def cb_keybot_sell(callback: CallbackQuery):
         if pos:
             pnl_sol = round(sol_received - pos.amount_sol_spent, 4)
             await close_position(pos.id, "manual", pnl_sol)
+            if pnl_sol < 0:
+                await add_daily_loss(user_id, abs(pnl_sol))
 
         pnl_str = f"\n💹 PnL:            `{pnl_sol:+.4f} SOL`" if pnl_sol is not None else ""
         await status_msg.edit_text(
@@ -868,6 +1034,8 @@ async def handle_sell_pct_input(message: Message, state: FSMContext):
             if pos:
                 pnl_sol = round(sol_received - pos.amount_sol_spent, 4)
                 await close_position(pos.id, "manual", pnl_sol)
+                if pnl_sol < 0:
+                    await add_daily_loss(user_id, abs(pnl_sol))
                 pnl_str = f"\n💹 PnL:            `{pnl_sol:+.4f} SOL`"
 
         await status_msg.edit_text(
@@ -938,6 +1106,8 @@ async def cb_close_position(callback: CallbackQuery):
 
         pnl_sol = round(sol_received - pos.amount_sol_spent, 4)
         await close_position(pos.id, "manual", pnl_sol)
+        if pnl_sol < 0:
+            await add_daily_loss(user_id, abs(pnl_sol))
 
         pnl_emoji = "🟢" if pnl_sol >= 0 else "🔴"
         await status_msg.edit_text(
@@ -1037,6 +1207,8 @@ async def position_monitor_loop(bot: Bot) -> None:
                             signature    = await execute_ultra_order(order, keypair)
                             pnl_sol      = round(sol_received - pos.amount_sol_spent, 4)
                             await close_position(pos.id, reason, pnl_sol)
+                            if pnl_sol < 0:
+                                await add_daily_loss(pos.user_id, abs(pnl_sol))
 
                             pnl_sign = "+" if pnl_sol >= 0 else ""
                             await bot.send_message(

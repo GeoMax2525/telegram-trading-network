@@ -76,7 +76,10 @@ class KeyBotSettings(Base):
     buy_amount_sol = Column(Float,      nullable=False, default=0.5)
     take_profit_x  = Column(Float,      nullable=False, default=3.0)
     stop_loss_pct  = Column(Float,      nullable=False, default=30.0)
-    max_positions  = Column(Integer,    nullable=False, default=5)
+    max_positions         = Column(Integer, nullable=False, default=5)
+    daily_loss_limit_sol  = Column(Float,   nullable=False, default=0.0)
+    daily_loss_limit_pct  = Column(Float,   nullable=False, default=0.0)
+    daily_loss_today_sol  = Column(Float,   nullable=False, default=0.0)
     wallet_address = Column(String(64), nullable=True)
     created_at     = Column(DateTime,   default=datetime.utcnow, nullable=False)
     updated_at     = Column(DateTime,   default=datetime.utcnow, nullable=False)
@@ -137,7 +140,10 @@ _NEW_SCAN_COLS = [
 ]
 
 _NEW_KEYBOT_COLS = [
-    ("max_positions", "INTEGER DEFAULT 5"),
+    ("max_positions",        "INTEGER DEFAULT 5"),
+    ("daily_loss_limit_sol", "REAL DEFAULT 0"),
+    ("daily_loss_limit_pct", "REAL DEFAULT 0"),
+    ("daily_loss_today_sol", "REAL DEFAULT 0"),
 ]
 
 async def init_db() -> None:
@@ -571,6 +577,34 @@ async def count_open_positions(user_id: int) -> int:
             )
         )
         return result.scalar() or 0
+
+
+async def add_daily_loss(user_id: int, loss_sol: float) -> None:
+    """Adds loss_sol to daily_loss_today_sol for a user (only call with positive values)."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(KeyBotSettings).where(KeyBotSettings.admin_id == user_id)
+        )
+        settings = result.scalar_one_or_none()
+        if settings:
+            settings.daily_loss_today_sol = (settings.daily_loss_today_sol or 0.0) + loss_sol
+            await session.commit()
+            logger.info("Daily loss updated for user %d: +%.4f SOL (total today: %.4f SOL)",
+                        user_id, loss_sol, settings.daily_loss_today_sol)
+
+
+async def reset_all_daily_losses() -> int:
+    """Resets daily_loss_today_sol to 0 for all users. Returns number of rows updated."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(KeyBotSettings).where(KeyBotSettings.daily_loss_today_sol > 0)
+        )
+        rows = list(result.scalars().all())
+        for r in rows:
+            r.daily_loss_today_sol = 0.0
+        await session.commit()
+    logger.info("Midnight reset: cleared daily losses for %d user(s)", len(rows))
+    return len(rows)
 
 
 async def debug_all_positions() -> None:

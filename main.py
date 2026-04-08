@@ -11,6 +11,7 @@ Startup sequence:
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
@@ -21,7 +22,7 @@ from bot.config import BOT_TOKEN, DATABASE_URL
 from bot.handlers import router
 from bot.keybot import router as keybot_router, position_monitor_loop
 from bot.scanner import fetch_live_data
-from database.models import init_db, get_open_scans, update_scan_pnl, close_old_scans
+from database.models import init_db, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -78,6 +79,25 @@ async def peak_tracker_loop() -> None:
         await asyncio.sleep(300)   # 5 minutes
 
 
+# ── Midnight daily-loss reset ─────────────────────────────────────────────────
+
+async def daily_loss_reset_loop() -> None:
+    """Sleeps until midnight UTC, then resets daily_loss_today_sol for all users."""
+    while True:
+        now            = datetime.utcnow()
+        next_midnight  = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        sleep_secs = (next_midnight - now).total_seconds()
+        logger.info("Daily loss reset: sleeping %.0f s until midnight UTC", sleep_secs)
+        await asyncio.sleep(sleep_secs)
+        try:
+            count = await reset_all_daily_losses()
+            logger.info("Daily loss reset: cleared losses for %d user(s)", count)
+        except Exception as exc:
+            logger.error("Daily loss reset failed: %s", exc)
+
+
 # ── Main coroutine ────────────────────────────────────────────────────────────
 
 async def main() -> None:
@@ -100,6 +120,7 @@ async def main() -> None:
     # Start background tasks
     asyncio.create_task(peak_tracker_loop())
     asyncio.create_task(position_monitor_loop(bot))
+    asyncio.create_task(daily_loss_reset_loop())
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     try:
