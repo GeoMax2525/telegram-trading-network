@@ -5,6 +5,7 @@ Phase 1: UI + preset storage only (no real on-chain trading).
 """
 
 import asyncio
+import html
 import logging
 
 from aiogram import Bot, Router
@@ -220,8 +221,10 @@ def _menu_text(
         else:
             hold_line = ""
 
+        safe_symbol = html.escape(symbol)
+        dex_url     = f"https://dexscreener.com/solana/{pos.token_address}"
         lines.append(
-            f"/{i} ${symbol}\n"
+            f'/{i} <a href="{dex_url}">${safe_symbol}</a>\n'
             f"Profit: {p_sign}{profit_pct:.2f}% / {profit_sol:.4f} SOL\n"
             f"{hold_line}"
             f"Value: ${current_val_usd:.2f} / {current_val_sol:.4f} SOL\n"
@@ -324,7 +327,7 @@ async def cmd_keybot(message: Message, state: FSMContext):
     await state.clear()
     await debug_all_positions()   # dump full positions table to Railway logs
     text, keyboard = await _build_menu(message.from_user.id)
-    await message.reply(text, reply_markup=keyboard, parse_mode=None)
+    await message.reply(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 # ── Settings callbacks ────────────────────────────────────────────────────────
@@ -337,7 +340,7 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
     if action == "menu":
         await state.clear()
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=None)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer()
 
     elif action == "buy_amount":
@@ -403,7 +406,7 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
     elif action == "remove_wallet":
         await upsert_keybot_settings(user_id, wallet_address=None)
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=None)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer("🗑️ Wallet removed")
 
     elif action == "close":
@@ -415,21 +418,21 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         val = float(action.split(":", 1)[1])
         await upsert_keybot_settings(user_id, buy_amount_sol=val)
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=None)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer(f"✅ Buy amount set to {val} SOL")
 
     elif action.startswith("set_tp:"):
         val = float(action.split(":", 1)[1])
         await upsert_keybot_settings(user_id, take_profit_x=val)
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=None)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer(f"✅ Take profit set to {val}x")
 
     elif action.startswith("set_sl:"):
         val = float(action.split(":", 1)[1])
         await upsert_keybot_settings(user_id, stop_loss_pct=val)
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=None)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer(f"✅ Stop loss set to {val}%")
 
     else:
@@ -457,7 +460,7 @@ async def receive_wallet(message: Message, state: FSMContext):
     await message.reply(
         "✅ Wallet saved!\n\n" + text,
         reply_markup=keyboard,
-        parse_mode=None,
+        parse_mode="HTML",
     )
 
 
@@ -487,7 +490,7 @@ async def receive_buy_amount(message: Message, state: FSMContext):
     await message.reply(
         f"✅ Buy amount set to {val} SOL\n\n" + text,
         reply_markup=keyboard,
-        parse_mode=None,
+        parse_mode="HTML",
     )
 
 
@@ -735,7 +738,7 @@ async def cb_close_position(callback: CallbackQuery):
 
         # Refresh the main menu (positions now shown inline)
         text, keyboard = await _build_menu(user_id)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=None)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     except Exception as exc:
         logger.error("Close position %d failed: %s", position_id, exc)
