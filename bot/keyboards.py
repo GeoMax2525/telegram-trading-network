@@ -28,11 +28,15 @@ def trade_card_keyboard(
     """
     builder = InlineKeyboardBuilder()
 
-    # Row 1 — chart link
+    # Row 1 — chart link + refresh
     builder.row(
         InlineKeyboardButton(
             text="📊 Chart",
             url=dex_url if dex_url else f"https://dexscreener.com/solana/{contract_address}",
+        ),
+        InlineKeyboardButton(
+            text="🔄 Refresh",
+            callback_data=f"refresh:{contract_address}",
         ),
     )
 

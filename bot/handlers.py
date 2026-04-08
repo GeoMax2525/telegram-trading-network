@@ -126,21 +126,18 @@ def _build_position_section(
     return "\n".join(lines)
 
 
-async def _do_scan(message: Message, address: str) -> None:
-    loading_msg = await message.reply("🔍 Scanning token… please wait.")
-
+async def _build_card_text(address: str) -> tuple[str | None, dict | None]:
+    """
+    Fetches live token data + wallet position concurrently.
+    Returns (card_text, data) where card_text includes the position block if held,
+    or (None, None) if the token could not be fetched.
+    """
     data = await scan_token(address)
-
     if data is None:
-        await loading_msg.edit_text(
-            "❌ Could not find token data for that address.\n"
-            "Make sure it's a valid Solana token listed on DexScreener."
-        )
-        return
+        return None, None
 
     card_text = build_trade_card(data)
 
-    # Check if the server wallet holds this token — append position section if so
     wallet_address = get_wallet_address()
     if wallet_address:
         holding, sol_price_usd, pos = await asyncio.gather(
@@ -150,14 +147,28 @@ async def _do_scan(message: Message, address: str) -> None:
             return_exceptions=True,
         )
         if isinstance(holding, dict) and holding.get("balance", 0) > 0:
-            price_usd    = data.get("price_usd", 0) or 0
-            current_mc   = data.get("market_cap", 0) or 0
-            sol_price    = sol_price_usd if isinstance(sol_price_usd, float) else 0.0
-            pos_obj      = pos if not isinstance(pos, Exception) else None
-            position_block = _build_position_section(
+            price_usd  = data.get("price_usd", 0) or 0
+            current_mc = data.get("market_cap", 0) or 0
+            sol_price  = sol_price_usd if isinstance(sol_price_usd, float) else 0.0
+            pos_obj    = pos if not isinstance(pos, Exception) else None
+            card_text  = card_text + "\n" + _build_position_section(
                 holding, price_usd, sol_price, current_mc, pos_obj
             )
-            card_text = card_text + "\n" + position_block
+
+    return card_text, data
+
+
+async def _do_scan(message: Message, address: str) -> None:
+    loading_msg = await message.reply("🔍 Scanning token… please wait.")
+
+    card_text, data = await _build_card_text(address)
+
+    if data is None:
+        await loading_msg.edit_text(
+            "❌ Could not find token data for that address.\n"
+            "Make sure it's a valid Solana token listed on DexScreener."
+        )
+        return
 
     keyboard = trade_card_keyboard(
         dex_url=data.get("dex_url", ""),
@@ -467,6 +478,29 @@ async def cb_flag_risky(callback: CallbackQuery):
         f"🚩 Token {address[:8]}… flagged as risky. Thanks for the heads-up!",
         show_alert=True,
     )
+
+
+# ── Callback: Refresh Trade Card ─────────────────────────────────────────────
+
+@router.callback_query(lambda c: c.data and c.data.startswith("refresh:"))
+async def cb_refresh_trade_card(callback: CallbackQuery):
+    address = callback.data.split(":", 1)[1]
+    await callback.answer("🔄 Refreshing…")
+
+    card_text, data = await _build_card_text(address)
+    if data is None:
+        await callback.answer("❌ Could not fetch token data.", show_alert=True)
+        return
+
+    keyboard = trade_card_keyboard(
+        dex_url=data.get("dex_url", ""),
+        contract_address=address,
+    )
+    try:
+        await callback.message.edit_text(card_text, parse_mode="Markdown", reply_markup=keyboard)
+    except Exception:
+        # Message content unchanged — silently ignore
+        pass
 
 
 # ── Auto-scan (bare address) — MUST be last so it doesn't shadow commands ─────
