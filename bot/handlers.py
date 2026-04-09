@@ -254,15 +254,13 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     at_status = "ON 🟢" if autotrade else "OFF 🔴"
 
-    # Scanner (Agent 4) line
-    if not autotrade:
-        scanner_line = "🔧 Scanner — autotrade OFF"
-    elif state.scanner_last_run is None:
-        scanner_line = "✅ Scanner — waiting for first run..."
+    # Scanner (Agent 4) line — always running
+    if state.scanner_last_run is None:
+        scanner_line = "✅ Scanner — always on | waiting for first run..."
     else:
         elapsed_s = int((datetime.utcnow() - state.scanner_last_run).total_seconds())
         scanner_line = (
-            f"✅ Scanner — {state.scanner_candidates_today} candidates today "
+            f"✅ Scanner — always on | {state.scanner_candidates_today} logged today "
             f"| last scan {elapsed_s}s ago"
         )
 
@@ -293,6 +291,7 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     ce_icon = "✅" if autotrade else "🔧"
     ce_line = f"{ce_icon} Confidence Engine — {trades_today} auto-trades today"
+    exec_status = "ON 🟢" if autotrade else "OFF 🔴"
 
     lines = [
         "🔑 *LOWKEY ALPHA HUB*",
@@ -306,7 +305,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         ce_line,
         "🔧 Learning Loop — _Building..._",
         "🔧 Chart Detector — _Building..._",
-        f"⚡ Autotrade: *{at_status}*",
+        f"⚡ Auto-execute: *{exec_status}*",
         "",
         "📊 *PERFORMANCE*",
         f"Today: `{today_pnl:+.4f} SOL` | All Time: `{alltime_pnl:+.4f} SOL`",
@@ -478,9 +477,9 @@ async def cmd_autotrade(message: Message):
     state.autotrade_enabled = new_state
     status = "ON 🟢" if new_state else "OFF 🔴"
     await message.reply(
-        f"⚡ Autotrade turned *{status}*\n"
-        + ("_Scanner Agent will start scanning for candidates._" if new_state
-           else "_Scanner Agent is paused._"),
+        f"⚡ Auto-execute turned *{status}*\n"
+        + ("_Scanner always running. Buys will execute automatically._" if new_state
+           else "_Scanner always running. Logging candidates silently._"),
         parse_mode="Markdown",
     )
     logger.info(

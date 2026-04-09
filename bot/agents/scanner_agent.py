@@ -1,7 +1,9 @@
 """
 scanner_agent.py — Agent 4: The Scanner
 
-Runs every 30 seconds. Only active when autotrade is enabled.
+Runs every 30 seconds ALWAYS, regardless of autotrade status.
+Silent learning mode: logs all candidates to database for Agent 6.
+Autotrade toggle only controls whether Agent 5 can execute buys.
 
 Sources:
   1. New Launches    — DexScreener profiles filtered by age < 4h,
@@ -24,6 +26,7 @@ Outputs:
   - Appends to state.pending_candidates
   - Updates state.scanner_last_run, state.scanner_candidates_today
   - Logs each run to AgentLogs
+  - Stores all candidates in database silently (no Telegram alerts)
 """
 
 import asyncio
@@ -473,12 +476,9 @@ async def _evaluate_candidate(
 
 async def run_once() -> tuple[int, int]:
     """
-    Single scanner tick.
+    Single scanner tick — runs ALWAYS regardless of autotrade status.
     Returns (candidates_found, candidates_queued).
     """
-    if not state.autotrade_enabled:
-        return 0, 0
-
     state.scanner_status = "running"
     pattern = await get_pattern_by_type("winner_2x")
 
@@ -579,16 +579,13 @@ async def run_once() -> tuple[int, int]:
 # ── Background loop ───────────────────────────────────────────────────────────
 
 async def scanner_agent_loop() -> None:
-    """Runs the scanner every 30 seconds. Skips ticks when autotrade is disabled."""
+    """Runs the scanner every 30 seconds ALWAYS — autotrade only controls execution."""
     await asyncio.sleep(STARTUP_DELAY)
-    logger.info("Scanner agent started — polling every %ds", POLL_INTERVAL)
+    logger.info("Scanner agent started — polling every %ds (always-on mode)", POLL_INTERVAL)
     while True:
-        if state.autotrade_enabled:
-            try:
-                await run_once()
-            except Exception as exc:
-                logger.error("Scanner loop error: %s", exc)
-                state.scanner_status = "idle"
-        else:
-            state.scanner_status = "disabled"
+        try:
+            await run_once()
+        except Exception as exc:
+            logger.error("Scanner loop error: %s", exc)
+            state.scanner_status = "idle"
         await asyncio.sleep(POLL_INTERVAL)
