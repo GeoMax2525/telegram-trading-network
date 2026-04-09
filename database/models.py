@@ -12,6 +12,7 @@ Tables:
   agent_logs       — one row per agent run (tokens_found, tokens_saved, run_at).
   candidates       — every candidate scored by Agent 5 (Confidence Engine).
   agent_weights    — learned confidence weights from Agent 6 (Learning Loop).
+  ai_trade_params  — learned TP/SL/position size per pattern type (Agent 6).
 """
 
 import logging
@@ -138,6 +139,7 @@ class Candidate(Base):
     rug_score         = Column(Float,       nullable=True)
     caller_score      = Column(Float,       nullable=True)
     market_score      = Column(Float,       nullable=True)
+    source            = Column(String(32),  nullable=True)   # new_launch / insider_wallet / volume_spike
     decision          = Column(String(16),  nullable=False, default="discard")  # execute_full / execute_half / monitor / discard
     executed          = Column(Boolean,     nullable=False, default=False)
     created_at        = Column(DateTime,    default=datetime.utcnow, nullable=False)
@@ -158,6 +160,23 @@ class AgentWeights(Base):
     trades_analyzed      = Column(Integer,     nullable=False, default=0)
     notes                = Column(String(512), nullable=True)
     updated_at           = Column(DateTime,    default=datetime.utcnow, nullable=False)
+
+
+# ── AI Trade Params table (Agent 6 — learned TP/SL/size) ────────────────────
+
+class AITradeParams(Base):
+    __tablename__ = "ai_trade_params"
+
+    id                    = Column(Integer,    primary_key=True, autoincrement=True)
+    pattern_type          = Column(String(32), nullable=False, unique=True, index=True)  # new_launch / insider_wallet / volume_spike
+    optimal_tp_x          = Column(Float,      nullable=False, default=3.0)
+    optimal_sl_pct        = Column(Float,      nullable=False, default=30.0)
+    optimal_position_pct  = Column(Float,      nullable=False, default=10.0)   # % of wallet
+    sample_size           = Column(Integer,    nullable=False, default=0)
+    win_rate              = Column(Float,      nullable=False, default=0.0)
+    avg_multiple          = Column(Float,      nullable=False, default=1.0)
+    confidence            = Column(Float,      nullable=False, default=0.0)    # 0-100
+    updated_at            = Column(DateTime,   default=datetime.utcnow, nullable=False)
 
 
 # ── Positions table ───────────────────────────────────────────────────────────
@@ -266,6 +285,10 @@ _NEW_KEYBOT_COLS = [
     ("last_trade_at",        "TIMESTAMP"),
 ]
 
+_NEW_CANDIDATE_COLS = [
+    ("source", "TEXT"),
+]
+
 async def init_db() -> None:
     """Creates all tables if they don't already exist, then adds any missing columns."""
     is_postgres = DATABASE_URL.startswith("postgresql")
@@ -304,6 +327,19 @@ async def init_db() -> None:
                     )
                 except Exception:
                     pass  # column already exists
+
+        for col_name, col_def in _NEW_CANDIDATE_COLS:
+            if is_postgres:
+                await conn.execute(
+                    text(f"ALTER TABLE candidates ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
+                )
+            else:
+                try:
+                    await conn.execute(
+                        text(f"ALTER TABLE candidates ADD COLUMN {col_name} {col_def}")
+                    )
+                except Exception:
+                    pass
 
     logger.info("Database initialised (%s).", "PostgreSQL" if is_postgres else "SQLite")
 
@@ -1208,6 +1244,7 @@ async def save_candidate(
     market_score: float,
     decision: str,
     executed: bool = False,
+    source: str | None = None,
 ) -> "Candidate":
     async with AsyncSessionLocal() as session:
         candidate = Candidate(
@@ -1220,6 +1257,7 @@ async def save_candidate(
             rug_score=rug_score,
             caller_score=caller_score,
             market_score=market_score,
+            source=source,
             decision=decision,
             executed=executed,
         )
@@ -1397,3 +1435,84 @@ async def get_weekly_performance() -> dict:
         "total_pnl": float(total_pnl),
         "avg_pnl": avg_pnl,
     }
+
+
+# ── AI Trade Params helpers (Agent 6) ────────────────────────────────────────
+
+async def get_trade_params(pattern_type: str) -> "AITradeParams | None":
+    """Returns learned trade params for a pattern type, or None."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AITradeParams).where(AITradeParams.pattern_type == pattern_type)
+        )
+        return result.scalar_one_or_none()
+
+
+async def get_all_trade_params() -> list["AITradeParams"]:
+    """Returns all AI trade param rows."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AITradeParams).order_by(AITradeParams.sample_size.desc())
+        )
+        return list(result.scalars().all())
+
+
+async def upsert_trade_params(
+    pattern_type: str,
+    optimal_tp_x: float,
+    optimal_sl_pct: float,
+    optimal_position_pct: float,
+    sample_size: int,
+    win_rate: float,
+    avg_multiple: float,
+    confidence: float,
+) -> "AITradeParams":
+    """Creates or updates trade params for a pattern type."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AITradeParams).where(AITradeParams.pattern_type == pattern_type)
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            row.optimal_tp_x = optimal_tp_x
+            row.optimal_sl_pct = optimal_sl_pct
+            row.optimal_position_pct = optimal_position_pct
+            row.sample_size = sample_size
+            row.win_rate = win_rate
+            row.avg_multiple = avg_multiple
+            row.confidence = confidence
+            row.updated_at = datetime.utcnow()
+        else:
+            row = AITradeParams(
+                pattern_type=pattern_type,
+                optimal_tp_x=optimal_tp_x,
+                optimal_sl_pct=optimal_sl_pct,
+                optimal_position_pct=optimal_position_pct,
+                sample_size=sample_size,
+                win_rate=win_rate,
+                avg_multiple=avg_multiple,
+                confidence=confidence,
+            )
+            session.add(row)
+        await session.commit()
+        await session.refresh(row)
+        return row
+
+
+async def get_closed_positions_by_source(source: str) -> list["Position"]:
+    """Returns closed positions whose token was originally detected via the given source."""
+    async with AsyncSessionLocal() as session:
+        # Join positions with candidates to find the source
+        result = await session.execute(
+            select(Position)
+            .where(
+                Position.status == "closed",
+                Position.pnl_sol.is_not(None),
+                Position.token_address.in_(
+                    select(Candidate.token_address).where(Candidate.source == source)
+                ),
+            )
+            .order_by(Position.closed_at.desc())
+            .limit(200)
+        )
+        return list(result.scalars().all())

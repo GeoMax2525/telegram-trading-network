@@ -21,7 +21,7 @@ from database.models import (
     get_open_scans, update_scan_pnl, get_scan_by_address, close_old_scans,
     get_signal_leaders, get_top_calls, get_top_calls_stats,
     get_any_open_position_by_token, get_hub_stats, get_top_wallets,
-    get_candidate_stats_today,
+    get_candidate_stats_today, get_all_trade_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -232,7 +232,7 @@ def _pattern_engine_line(last_run, total: int, winners: int, rugs: int) -> str:
     )
 
 
-def _learning_loop_line() -> str:
+async def _learning_loop_line() -> str:
     remaining = max(0, 50 - (state.learning_loop_total_closed - state.learning_loop_last_analyzed))
     w = state.learning_loop_weights
 
@@ -250,8 +250,17 @@ def _learning_loop_line() -> str:
 
     # Show current weights compactly
     w_str = " ".join(f"{k[:3]}={v:.0%}" for k, v in sorted(w.items(), key=lambda x: -x[1]))
+
+    # Show AI params summary
+    params = await get_all_trade_params()
+    if params:
+        ai_count = sum(1 for p in params if p.sample_size >= 10)
+        params_str = f" | {ai_count}/{len(params)} AI params active"
+    else:
+        params_str = ""
+
     return (
-        f"✅ Learning Loop — last run {age} | next in {remaining} trades\n"
+        f"✅ Learning Loop — last run {age} | next in {remaining} trades{params_str}\n"
         f"     Weights: {w_str}"
     )
 
@@ -334,7 +343,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         analyst_line,
         _pattern_engine_line(last_pattern_engine, pattern_total, pattern_winners, pattern_rugs),
         ce_line,
-        _learning_loop_line(),
+        await _learning_loop_line(),
         "🔧 Chart Detector — _Building..._",
         f"⚡ Auto-execute: *{exec_status}*",
         "",
@@ -518,6 +527,47 @@ async def cmd_autotrade(message: Message):
         "enabled" if new_state else "disabled",
         message.from_user.username or message.from_user.id,
     )
+
+
+# ── /patterns ─────────────────────────────────────────────────────────────────
+
+_PATTERN_LABELS = {
+    "new_launch":     "NEW LAUNCH",
+    "insider_wallet": "INSIDER BUY",
+    "volume_spike":   "VOLUME SPIKE",
+}
+
+
+@router.message(Command("patterns"))
+async def cmd_patterns(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        await message.reply("⛔ `/patterns` is only available in Callers HQ.")
+        return
+
+    params = await get_all_trade_params()
+    if not params:
+        await message.reply(
+            "🎯 *AI TRADE PATTERNS*\n━━━━━━━━━━━━━━━━━━━━\n\n"
+            "_No patterns learned yet — need more closed trades._",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = ["🎯 *AI TRADE PATTERNS*", "━━━━━━━━━━━━━━━━━━━━", ""]
+
+    for p in params:
+        label = _PATTERN_LABELS.get(p.pattern_type, p.pattern_type.upper())
+        using = "AI learned" if p.sample_size >= 10 else "Manual presets (need 10+ trades)"
+        lines += [
+            f"🎯 *{label}*",
+            f"TP: `{p.optimal_tp_x:.1f}x` | SL: `{p.optimal_sl_pct:.0f}%` | Size: `{p.optimal_position_pct:.0f}%` wallet",
+            f"Win rate: `{p.win_rate * 100:.0f}%` | Avg: `{p.avg_multiple:.1f}x` | Sample: `{p.sample_size}` trades",
+            f"Using: _{using}_",
+            "",
+        ]
+
+    lines.append(f"_Updated: {datetime.utcnow().strftime('%H:%M:%S')} UTC_")
+    await message.reply("\n".join(lines), parse_mode="Markdown")
 
 
 # ── /start ────────────────────────────────────────────────────────────────────

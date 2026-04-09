@@ -35,6 +35,9 @@ from database.models import (
     update_wallet_tier,
     get_tier_wallets,
     get_weekly_performance,
+    get_closed_positions_by_source,
+    upsert_trade_params,
+    get_all_trade_params,
     Wallet,
     AsyncSessionLocal,
     select,
@@ -142,6 +145,112 @@ async def _adjust_wallet_tiers() -> tuple[int, int]:
     return promoted, demoted
 
 
+# ── Trade params optimization ────────────────────────────────────────────────
+
+PATTERN_TYPES = ["new_launch", "insider_wallet", "volume_spike"]
+
+# Defaults to start from
+DEFAULT_TP_X          = 3.0
+DEFAULT_SL_PCT        = 30.0
+DEFAULT_POSITION_PCT  = 10.0
+
+
+async def _optimize_trade_params() -> int:
+    """
+    For each pattern type, analyzes closed positions to find optimal TP/SL/size.
+    Returns count of pattern types updated.
+    """
+    updated = 0
+
+    for ptype in PATTERN_TYPES:
+        positions = await get_closed_positions_by_source(ptype)
+        if not positions:
+            continue
+
+        sample_size = len(positions)
+        wins = [p for p in positions if p.pnl_sol and p.pnl_sol > 0]
+        losses = [p for p in positions if p.pnl_sol and p.pnl_sol <= 0]
+        win_rate = len(wins) / sample_size if sample_size > 0 else 0.0
+
+        # Compute average multiple from winners
+        multiples = []
+        for p in positions:
+            if p.entry_mc and p.entry_mc > 0 and p.pnl_sol is not None:
+                # Approximate peak multiplier from PnL
+                if p.close_reason == "tp_hit" and p.take_profit_x:
+                    multiples.append(p.take_profit_x)
+                elif p.pnl_sol > 0 and p.amount_sol_spent > 0:
+                    multiples.append(1.0 + p.pnl_sol / p.amount_sol_spent)
+                else:
+                    multiples.append(max(0.1, 1.0 + p.pnl_sol / max(p.amount_sol_spent, 0.01)))
+
+        avg_multiple = sum(multiples) / len(multiples) if multiples else 1.0
+
+        # Optimal TP: analyze winners — what TP would have captured the most value?
+        # Use the 75th percentile of winner multiples as optimal TP
+        winner_multiples = sorted([m for m in multiples if m > 1.0])
+        if len(winner_multiples) >= 3:
+            idx_75 = int(len(winner_multiples) * 0.75)
+            optimal_tp = round(winner_multiples[idx_75], 1)
+        else:
+            optimal_tp = DEFAULT_TP_X
+
+        # Clamp TP to reasonable range
+        optimal_tp = max(1.5, min(10.0, optimal_tp))
+
+        # Optimal SL: analyze losers — what SL would have prevented the worst losses?
+        loss_pcts = []
+        for p in losses:
+            if p.amount_sol_spent and p.amount_sol_spent > 0 and p.pnl_sol:
+                loss_pct = abs(p.pnl_sol / p.amount_sol_spent) * 100
+                loss_pcts.append(loss_pct)
+
+        if len(loss_pcts) >= 3:
+            # Use 25th percentile — tighter SL on pattern types with sharp drops
+            sorted_losses = sorted(loss_pcts)
+            idx_25 = int(len(sorted_losses) * 0.25)
+            optimal_sl = round(sorted_losses[idx_25], 0)
+        else:
+            optimal_sl = DEFAULT_SL_PCT
+
+        # Clamp SL to reasonable range
+        optimal_sl = max(10.0, min(50.0, optimal_sl))
+
+        # Optimal position size: higher win rate → larger position
+        if win_rate >= 0.70:
+            optimal_pos = 15.0
+        elif win_rate >= 0.55:
+            optimal_pos = 12.0
+        elif win_rate >= 0.40:
+            optimal_pos = 10.0
+        else:
+            optimal_pos = 7.0
+
+        # Confidence: based on sample size (0-100)
+        confidence = min(100.0, sample_size * 2.0)
+
+        await upsert_trade_params(
+            pattern_type=ptype,
+            optimal_tp_x=optimal_tp,
+            optimal_sl_pct=optimal_sl,
+            optimal_position_pct=optimal_pos,
+            sample_size=sample_size,
+            win_rate=round(win_rate, 4),
+            avg_multiple=round(avg_multiple, 2),
+            confidence=round(confidence, 1),
+        )
+
+        logger.info(
+            "Agent6: %s params — tp=%.1fx sl=%.0f%% size=%.0f%% "
+            "wr=%.0f%% avg=%.2fx samples=%d",
+            ptype, optimal_tp, optimal_sl, optimal_pos,
+            win_rate * 100, avg_multiple, sample_size,
+        )
+        updated += 1
+
+    return updated
+
+
 # ── Main run ─────────────────────────────────────────────────────────────────
 
 async def run_once() -> bool:
@@ -239,6 +348,9 @@ async def run_once() -> bool:
     # Adjust wallet tiers
     promoted, demoted = await _adjust_wallet_tiers()
 
+    # Optimize TP/SL/position params per pattern type
+    params_updated = await _optimize_trade_params()
+
     # Update state
     state.learning_loop_last_analyzed = new_analyzed
     state.learning_loop_total_closed = total_closed
@@ -249,12 +361,12 @@ async def run_once() -> bool:
         "learning_loop",
         tokens_found=len(batch),
         tokens_saved=len(winners),
-        notes=f"{notes} | wallets: +{promoted}/-{demoted}",
+        notes=f"{notes} | wallets: +{promoted}/-{demoted} | params: {params_updated} types",
     )
 
     logger.info(
-        "Agent6: done — analyzed=%d winners=%d losers=%d promoted=%d demoted=%d",
-        len(batch), len(winners), len(losers), promoted, demoted,
+        "Agent6: done — analyzed=%d winners=%d losers=%d promoted=%d demoted=%d params=%d",
+        len(batch), len(winners), len(losers), promoted, demoted, params_updated,
     )
 
     return True

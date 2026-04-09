@@ -37,6 +37,7 @@ from database.models import (
     save_candidate,
     log_agent_run,
     get_current_weights,
+    get_trade_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -218,6 +219,23 @@ async def score_candidate(candidate: dict) -> dict:
         and decision in ("execute_full", "execute_half")
     )
 
+    # Look up AI-learned trade params for this source/pattern type
+    source = candidate.get("source", "unknown")
+    ai_params = await get_trade_params(source)
+
+    if ai_params and ai_params.sample_size >= 10:
+        # Enough data — use AI-learned params
+        trade_tp_x = ai_params.optimal_tp_x
+        trade_sl_pct = ai_params.optimal_sl_pct
+        trade_position_pct = ai_params.optimal_position_pct
+        params_source = "ai_learned"
+    else:
+        # Not enough data — use keybot defaults
+        trade_tp_x = 3.0
+        trade_sl_pct = 30.0
+        trade_position_pct = 10.0
+        params_source = "keybot_default"
+
     # Save to database silently — no Telegram messages
     await save_candidate(
         token_address=candidate.get("mint", ""),
@@ -231,14 +249,15 @@ async def score_candidate(candidate: dict) -> dict:
         market_score=market,
         decision=decision,
         executed=executed,
+        source=source,
     )
 
     logger.info(
         "Agent5: %s (%s) confidence=%.1f decision=%s executed=%s "
-        "[fp=%.0f ins=%.0f chart=%.0f rug=%.0f call=%.0f mkt=%.0f]",
+        "params=%s [tp=%.1fx sl=%.0f%% size=%.0f%%]",
         candidate.get("name", "?"), candidate.get("mint", "?")[:12],
         confidence, decision, executed,
-        fingerprint, insider, chart, rug, caller, market,
+        params_source, trade_tp_x, trade_sl_pct, trade_position_pct,
     )
 
     return {
@@ -252,4 +271,8 @@ async def score_candidate(candidate: dict) -> dict:
         "market_score":      market,
         "decision":          decision,
         "executed":          executed,
+        "trade_tp_x":        trade_tp_x,
+        "trade_sl_pct":      trade_sl_pct,
+        "trade_position_pct": trade_position_pct,
+        "params_source":     params_source,
     }
