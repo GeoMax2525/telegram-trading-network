@@ -19,7 +19,7 @@ from database.models import (
     log_scan, get_leaderboard, get_break_evens_count, add_caller,
     get_open_scans, update_scan_pnl, get_scan_by_address, close_old_scans,
     get_signal_leaders, get_top_calls, get_top_calls_stats,
-    get_any_open_position_by_token, get_hub_stats,
+    get_any_open_position_by_token, get_hub_stats, get_top_wallets,
 )
 
 logger = logging.getLogger(__name__)
@@ -228,8 +228,12 @@ async def _build_hub_text(autotrade: bool) -> str:
     win_rate     = stats["win_rate"]
     total_closed = stats["total_closed"]
     recent       = stats["recent_trades"]
-    token_count  = stats["token_count"]
-    last_harvest = stats["last_harvest"]
+    token_count   = stats["token_count"]
+    last_harvest  = stats["last_harvest"]
+    wallet_total  = stats["wallet_total"]
+    wallet_tier1  = stats["wallet_tier1"]
+    wallet_tier2  = stats["wallet_tier2"]
+    last_analyst  = stats["last_analyst"]
 
     at_status = "ON 🟢" if autotrade else "OFF 🔴"
 
@@ -245,6 +249,19 @@ async def _build_hub_text(autotrade: bool) -> str:
             f"| last run {elapsed_min}min ago"
         )
 
+    # Wallet Analyst last-run label
+    if last_analyst is None:
+        analyst_line = "✅ Wallet Analyst — waiting for first run..."
+    else:
+        elapsed_min = int(
+            (datetime.utcnow() - last_analyst.run_at).total_seconds() / 60
+        )
+        analyst_line = (
+            f"✅ Wallet Analyst — {wallet_total} wallets scored "
+            f"({wallet_tier1} T1 / {wallet_tier2} T2) "
+            f"| last run {elapsed_min}min ago"
+        )
+
     ce_icon = "✅" if autotrade else "🔧"
     ce_line = f"{ce_icon} Confidence Engine — {trades_today} auto-trades today"
 
@@ -255,7 +272,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         "🤖 *AGENTS*",
         f"✅ Scanner — {scans_today} candidates today",
         harvest_line,
-        "🔧 Wallet Analyst — _Building..._",
+        analyst_line,
         "🔧 Pattern Engine — _Building..._",
         ce_line,
         "🔧 Learning Loop — _Building..._",
@@ -267,7 +284,20 @@ async def _build_hub_text(autotrade: bool) -> str:
         f"Win Rate: `{win_rate}%` | Closed Trades: `{total_closed}`",
         "",
         "🔥 *TOP WALLETS*",
-        "_🔧 Wallet tracking not built yet_",
+    ]
+
+    top_wallets = await get_top_wallets(limit=3)
+    if not top_wallets:
+        lines.append("_No wallets scored yet — Agent 2 is analyzing..._")
+    else:
+        for i, w in enumerate(top_wallets, 1):
+            short = f"{w.address[:4]}...{w.address[-4:]}"
+            lines.append(
+                f"#{i} `{short}` | Score: {w.score:.0f} | "
+                f"{w.wins}W {w.losses}L | Tier {w.tier} | Avg: {w.avg_multiple:.1f}x"
+            )
+
+    lines += [
         "",
         "📈 *RECENT AUTO-TRADES*",
     ]
@@ -338,9 +368,21 @@ async def cb_hub(callback: CallbackQuery):
         )
 
     elif action == "wallets":
-        await callback.answer(
-            "🔧 Top Wallets: wallet tracking not built yet.", show_alert=True
-        )
+        wallets = await get_top_wallets(limit=10)
+        if not wallets:
+            await callback.answer(
+                "No wallets scored yet — Agent 2 is still running.", show_alert=True
+            )
+        else:
+            lines = ["👛 *TOP WALLETS*\n"]
+            for i, w in enumerate(wallets, 1):
+                short = f"{w.address[:4]}...{w.address[-4:]}"
+                lines.append(
+                    f"#{i} `{short}` | Score: {w.score:.0f} | "
+                    f"{w.wins}W {w.losses}L | Tier {w.tier} | Avg: {w.avg_multiple:.1f}x"
+                )
+            await callback.answer()
+            await callback.message.reply("\n".join(lines), parse_mode="Markdown")
 
     elif action == "history":
         await callback.answer(
@@ -354,6 +396,33 @@ async def cb_hub(callback: CallbackQuery):
 
     else:
         await callback.answer()
+
+
+# ── /wallets — Top Scored Wallets ─────────────────────────────────────────────
+
+@router.message(Command("wallets"))
+async def cmd_wallets(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        await message.reply("⛔ `/wallets` is only available in Callers HQ.")
+        return
+
+    wallets = await get_top_wallets(limit=10)
+    if not wallets:
+        await message.reply(
+            "🔧 No wallets scored yet — Agent 2 is still analyzing winning tokens.\n"
+            "_Check back after the next hourly run._",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = ["👛 *TOP WALLETS*\n"]
+    for i, w in enumerate(wallets, 1):
+        short = f"{w.address[:4]}...{w.address[-4:]}"
+        lines.append(
+            f"#{i} `{short}` | Score: {w.score:.0f} | "
+            f"{w.wins}W {w.losses}L | Tier {w.tier} | Avg: {w.avg_multiple:.1f}x"
+        )
+    await message.reply("\n".join(lines), parse_mode="Markdown")
 
 
 # ── /start ────────────────────────────────────────────────────────────────────

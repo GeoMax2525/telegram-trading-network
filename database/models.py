@@ -64,6 +64,24 @@ class Token(Base):
     last_updated_at = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
 
+# ── Wallets table (Agent 2 — Wallet Analyst) ─────────────────────────────────
+
+class Wallet(Base):
+    __tablename__ = "wallets"
+
+    address         = Column(String(64), primary_key=True)
+    score           = Column(Float,      nullable=False, default=0.0)
+    tier            = Column(Integer,    nullable=False, default=0)   # 1/2/3, 0=ignored
+    win_rate        = Column(Float,      nullable=False, default=0.0)
+    avg_multiple    = Column(Float,      nullable=False, default=1.0)
+    wins            = Column(Integer,    nullable=False, default=0)
+    losses          = Column(Integer,    nullable=False, default=0)
+    total_trades    = Column(Integer,    nullable=False, default=0)
+    avg_entry_mcap  = Column(Float,      nullable=True)
+    first_seen_at   = Column(DateTime,   default=datetime.utcnow, nullable=False)
+    last_updated_at = Column(DateTime,   default=datetime.utcnow, nullable=False)
+
+
 # ── Agent logs table ──────────────────────────────────────────────────────────
 
 class AgentLog(Base):
@@ -794,6 +812,81 @@ async def get_last_agent_run(agent_name: str) -> "AgentLog | None":
         return result.scalar_one_or_none()
 
 
+# ── Wallet helpers (Agent 2) ──────────────────────────────────────────────────
+
+async def upsert_wallet(
+    address: str,
+    score: float,
+    tier: int,
+    win_rate: float,
+    avg_multiple: float,
+    wins: int,
+    losses: int,
+    total_trades: int,
+    avg_entry_mcap: float | None,
+) -> "Wallet":
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Wallet).where(Wallet.address == address)
+        )
+        w = result.scalar_one_or_none()
+        if w is None:
+            w = Wallet(
+                address=address, score=score, tier=tier,
+                win_rate=win_rate, avg_multiple=avg_multiple,
+                wins=wins, losses=losses, total_trades=total_trades,
+                avg_entry_mcap=avg_entry_mcap,
+            )
+            session.add(w)
+        else:
+            w.score         = score
+            w.tier          = tier
+            w.win_rate      = win_rate
+            w.avg_multiple  = avg_multiple
+            w.wins          = wins
+            w.losses        = losses
+            w.total_trades  = total_trades
+            w.avg_entry_mcap = avg_entry_mcap
+            w.last_updated_at = datetime.utcnow()
+        await session.commit()
+        await session.refresh(w)
+        return w
+
+
+async def get_top_wallets(limit: int = 10) -> list["Wallet"]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Wallet)
+            .where(Wallet.tier > 0)
+            .order_by(Wallet.score.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+
+async def get_wallet_counts() -> dict:
+    """Returns total wallet count and per-tier counts."""
+    async with AsyncSessionLocal() as session:
+        total  = (await session.execute(select(func.count(Wallet.address)).where(Wallet.tier > 0))).scalar() or 0
+        tier1  = (await session.execute(select(func.count(Wallet.address)).where(Wallet.tier == 1))).scalar() or 0
+        tier2  = (await session.execute(select(func.count(Wallet.address)).where(Wallet.tier == 2))).scalar() or 0
+        tier3  = (await session.execute(select(func.count(Wallet.address)).where(Wallet.tier == 3))).scalar() or 0
+    return {"total": total, "tier1": tier1, "tier2": tier2, "tier3": tier3}
+
+
+async def get_winning_scans(since: "datetime | None" = None) -> list["Scan"]:
+    """Returns scans with peak_multiplier >= 2 and a known entry MC."""
+    async with AsyncSessionLocal() as session:
+        q = select(Scan).where(
+            Scan.peak_multiplier >= 2,
+            Scan.entry_price.is_not(None),
+        )
+        if since is not None:
+            q = q.where(Scan.scanned_at > since)
+        result = await session.execute(q.order_by(Scan.scanned_at.asc()))
+        return list(result.scalars().all())
+
+
 async def get_hub_stats() -> dict:
     """Returns aggregated stats for the /hub dashboard."""
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -845,14 +938,37 @@ async def get_hub_stats() -> dict:
             .limit(1)
         )).scalar_one_or_none()
 
+        wallet_total = (await session.execute(
+            select(func.count(Wallet.address)).where(Wallet.tier > 0)
+        )).scalar() or 0
+
+        wallet_tier1 = (await session.execute(
+            select(func.count(Wallet.address)).where(Wallet.tier == 1)
+        )).scalar() or 0
+
+        wallet_tier2 = (await session.execute(
+            select(func.count(Wallet.address)).where(Wallet.tier == 2)
+        )).scalar() or 0
+
+        last_analyst = (await session.execute(
+            select(AgentLog)
+            .where(AgentLog.agent_name == "wallet_analyst")
+            .order_by(AgentLog.run_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+
     return {
-        "scans_today":   scans_today,
-        "trades_today":  trades_today,
-        "today_pnl":     float(today_pnl),
-        "alltime_pnl":   float(alltime_pnl),
-        "win_rate":      win_rate,
-        "total_closed":  total_closed,
-        "recent_trades": recent,
-        "token_count":   token_count,
-        "last_harvest":  last_harvest,
+        "scans_today":    scans_today,
+        "trades_today":   trades_today,
+        "today_pnl":      float(today_pnl),
+        "alltime_pnl":    float(alltime_pnl),
+        "win_rate":       win_rate,
+        "total_closed":   total_closed,
+        "recent_trades":  recent,
+        "token_count":    token_count,
+        "last_harvest":   last_harvest,
+        "wallet_total":   wallet_total,
+        "wallet_tier1":   wallet_tier1,
+        "wallet_tier2":   wallet_tier2,
+        "last_analyst":   last_analyst,
     }

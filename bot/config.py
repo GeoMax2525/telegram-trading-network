@@ -57,6 +57,11 @@ HELIUS_RPC_URL: str = os.getenv(
     "https://mainnet.helius-rpc.com/?api-key=demo",
 )
 
+# API key extracted from HELIUS_RPC_URL (used for Helius enhanced transaction API)
+from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+_parsed_rpc = _urlparse(HELIUS_RPC_URL)
+HELIUS_API_KEY: str = _parse_qs(_parsed_rpc.query).get("api-key", ["demo"])[0]
+
 # ── Database ──────────────────────────────────────────────────────────────────
 # Railway injects DATABASE_URL as postgres:// or postgresql://.
 # asyncpg (SQLAlchemy async driver) requires the postgresql+asyncpg:// scheme.

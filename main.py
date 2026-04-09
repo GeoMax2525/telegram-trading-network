@@ -23,6 +23,7 @@ from bot.handlers import router
 from bot.keybot import router as keybot_router, position_monitor_loop
 from bot.scanner import fetch_live_data
 from bot.agents.harvester import harvester_loop
+from bot.agents.wallet_analyst import wallet_analyst_loop
 from database.models import init_db, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -123,6 +124,7 @@ async def main() -> None:
     asyncio.create_task(position_monitor_loop(bot))
     asyncio.create_task(daily_loss_reset_loop())
     asyncio.create_task(harvester_loop())
+    asyncio.create_task(wallet_analyst_loop())
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     try:
