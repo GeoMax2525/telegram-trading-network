@@ -377,7 +377,7 @@ async def _build_hub_text(autotrade: bool) -> str:
             short = f"{w.address[:4]}...{w.address[-4:]}"
             lines.append(
                 f"#{i} `{short}` | Score: {w.score:.0f} | "
-                f"{w.wins}W {w.losses}L | Tier {w.tier} | Avg: {w.avg_multiple:.1f}x"
+                f"Win: {w.win_rate * 100:.0f}% | Avg: {w.avg_multiple:.1f}x | Tier {w.tier}"
             )
 
     lines += [
