@@ -1,14 +1,13 @@
 """
 harvester.py — Agent 1: Token Harvester
 
-Primary: Pump.fun WebSocket for real-time new token detection.
-Fallback: HTTP polling every 60 seconds if WebSocket disconnects.
-Also polls DexScreener every 60 seconds for established tokens.
+WebSocket cascade for real-time new token detection:
+  1. pumpdev.io (primary)
+  2. PumpPortal (fallback 1)
+  3. Helius Enhanced WS (fallback 2)
+  4. HTTP polling (final fallback)
 
-Sources:
-  - Pump.fun WebSocket (wss://frontend-api.pump.fun/socket.io/) — instant
-  - Pump.fun REST API — fallback polling
-  - DexScreener profiles — established tokens
+Also polls DexScreener every 60 seconds for established tokens.
 
 Logs every run to AgentLogs: tokens_found, tokens_saved, run_at.
 """
@@ -21,19 +20,26 @@ import time
 import aiohttp
 
 from bot import state
+from bot.config import HELIUS_RPC_URL
 from bot.scanner import fetch_token_data, parse_token_metrics
 from database.models import token_exists, save_token, log_agent_run
 
 logger = logging.getLogger(__name__)
 
-PROFILES_URL   = "https://api.dexscreener.com/token-profiles/latest/v1"
-PUMPFUN_URL    = "https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC&includeNsfw=false"
-PUMPFUN_DETAIL = "https://frontend-api.pump.fun/coins/{mint}"
-PUMPFUN_WS_URL = "wss://frontend-api.pump.fun/socket.io/?EIO=4&transport=websocket"
-RUGCHECK_URL   = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
-POLL_INTERVAL  = 60   # seconds
-STARTUP_DELAY  = 20   # seconds after bot start
-WS_RECONNECT   = 30   # seconds before reconnect attempt
+PROFILES_URL     = "https://api.dexscreener.com/token-profiles/latest/v1"
+PUMPFUN_URL      = "https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC&includeNsfw=false"
+PUMPFUN_DETAIL   = "https://frontend-api.pump.fun/coins/{mint}"
+RUGCHECK_URL     = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
+
+# WebSocket endpoints — tried in order
+PUMPDEV_WS       = "wss://pumpdev.io/ws"
+PUMPPORTAL_WS    = "wss://pumpportal.fun/api/data"
+PUMP_PROGRAM_ID  = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+
+POLL_INTERVAL    = 60   # seconds
+STARTUP_DELAY    = 20   # seconds after bot start
+WS_RECONNECT     = 30   # seconds before reconnect attempt
+WS_CONNECT_TIMEOUT = 10  # seconds to try each WS source
 
 
 # ── Shared helpers ───────────────────────────────────────────────────────────
@@ -131,88 +137,212 @@ async def _save_pumpfun_token(token: dict, via: str) -> bool:
     return True
 
 
-# ── Pump.fun WebSocket ───────────────────────────────────────────────────────
+# ── WebSocket source 1: pumpdev.io ───────────────────────────────────────────
 
-async def _pumpfun_websocket_loop() -> None:
+async def _ws_pumpdev(session: aiohttp.ClientSession) -> None:
     """
-    Connects to Pump.fun WebSocket for real-time new token events.
-    Socket.IO over WebSocket (EIO=4 protocol):
-      - Server sends "0{...}" on connect (open)
-      - Client sends "40" to connect to default namespace
-      - Server sends "40{...}" to confirm namespace
-      - Server sends "2" as ping, client replies "3" as pong
-      - Events come as "42[event_name, data]"
-      - We subscribe to "newToken" events
-    Auto-reconnects on disconnect.
+    pumpdev.io — plain WebSocket, sends JSON messages with new token data.
     """
-    while True:
-        state.harvester_ws_connected = False
-        try:
-            async with aiohttp.ClientSession() as session:
-                logger.info("Harvester WS: connecting to Pump.fun...")
-                async with session.ws_connect(
-                    PUMPFUN_WS_URL,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                    heartbeat=25,
-                ) as ws:
-                    state.harvester_ws_connected = True
-                    logger.info("Harvester WS: connected to Pump.fun")
+    logger.info("Harvester WS: trying pumpdev.io...")
+    async with session.ws_connect(
+        PUMPDEV_WS,
+        timeout=aiohttp.ClientTimeout(total=WS_CONNECT_TIMEOUT),
+        heartbeat=25,
+    ) as ws:
+        state.harvester_ws_connected = True
+        state.harvester_ws_source = "pumpdev"
+        logger.info("Harvester WS: connected to pumpdev.io")
 
-                    # Wait for EIO open packet ("0{...}")
-                    # Then send Socket.IO connect to default namespace
-                    namespace_connected = False
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    if isinstance(data, dict) and data.get("mint"):
+                        saved = await _save_pumpfun_token(data, via="pumpdev")
+                        if saved:
+                            state.harvester_ws_tokens_today += 1
+                    elif isinstance(data, list):
+                        for item in data:
+                            if isinstance(item, dict) and item.get("mint"):
+                                saved = await _save_pumpfun_token(item, via="pumpdev")
+                                if saved:
+                                    state.harvester_ws_tokens_today += 1
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                break
 
-                    async for msg in ws:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            data = msg.data
 
-                            # EIO open packet
-                            if data.startswith("0"):
-                                await ws.send_str("40")
-                                continue
+# ── WebSocket source 2: PumpPortal ──────────────────────────────────────────
 
-                            # Namespace connect confirmation
-                            if data.startswith("40"):
-                                namespace_connected = True
-                                logger.info("Harvester WS: namespace connected, subscribing...")
-                                # Subscribe to new token events
-                                await ws.send_str('42["subscribeNewToken"]')
-                                continue
+async def _ws_pumpportal(session: aiohttp.ClientSession) -> None:
+    """
+    PumpPortal — JSON WebSocket, requires subscription message.
+    """
+    logger.info("Harvester WS: trying PumpPortal...")
+    async with session.ws_connect(
+        PUMPPORTAL_WS,
+        timeout=aiohttp.ClientTimeout(total=WS_CONNECT_TIMEOUT),
+        heartbeat=25,
+    ) as ws:
+        # Subscribe to new token events
+        await ws.send_json({"method": "subscribeNewToken"})
 
-                            # Ping from server — respond with pong
-                            if data == "2":
-                                await ws.send_str("3")
-                                continue
+        state.harvester_ws_connected = True
+        state.harvester_ws_source = "pumpportal"
+        logger.info("Harvester WS: connected to PumpPortal")
 
-                            # Event message: "42[event_name, data]"
-                            if data.startswith("42"):
-                                try:
-                                    payload = json.loads(data[2:])
-                                    if isinstance(payload, list) and len(payload) >= 2:
-                                        event_name = payload[0]
-                                        event_data = payload[1]
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    if isinstance(data, dict):
+                        # PumpPortal sends token data directly or wrapped
+                        token_data = data
+                        if "mint" not in token_data and "token" in token_data:
+                            token_data = token_data["token"]
+                        if token_data.get("mint"):
+                            saved = await _save_pumpfun_token(token_data, via="pumpportal")
+                            if saved:
+                                state.harvester_ws_tokens_today += 1
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                break
 
-                                        if event_name == "newToken" and isinstance(event_data, dict):
-                                            saved = await _save_pumpfun_token(event_data, via="ws")
-                                            if saved:
-                                                state.harvester_ws_tokens_today += 1
-                                except (json.JSONDecodeError, IndexError, TypeError) as exc:
-                                    logger.debug("Harvester WS: parse error: %s", exc)
-                                continue
 
-                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
-                            logger.warning("Harvester WS: connection closed/error")
+# ── WebSocket source 3: Helius Enhanced WS ──────────────────────────────────
+
+def _helius_ws_url() -> str:
+    """Convert HELIUS_RPC_URL (https) to wss for WebSocket."""
+    url = HELIUS_RPC_URL.replace("https://", "wss://").replace("http://", "ws://")
+    return url
+
+
+async def _ws_helius(session: aiohttp.ClientSession) -> None:
+    """
+    Helius Enhanced WebSocket — subscribe to pump.fun program logs
+    to detect new token mints in real time.
+    """
+    ws_url = _helius_ws_url()
+    logger.info("Harvester WS: trying Helius at %s...", ws_url[:40])
+
+    async with session.ws_connect(
+        ws_url,
+        timeout=aiohttp.ClientTimeout(total=WS_CONNECT_TIMEOUT),
+        heartbeat=30,
+    ) as ws:
+        # Subscribe to pump.fun program logs
+        subscribe_msg = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "logsSubscribe",
+            "params": [
+                {"mentions": [PUMP_PROGRAM_ID]},
+                {"commitment": "confirmed"},
+            ],
+        }
+        await ws.send_json(subscribe_msg)
+
+        state.harvester_ws_connected = True
+        state.harvester_ws_source = "helius"
+        logger.info("Harvester WS: connected to Helius (pump.fun program logs)")
+
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    result = data.get("params", {}).get("result", {})
+                    value = result.get("value", {})
+                    logs = value.get("logs") or []
+                    signature = value.get("signature")
+
+                    if not logs or not signature:
+                        continue
+
+                    # Look for "InitializeMint" or token creation logs
+                    is_new_token = any(
+                        "InitializeMint" in log or "create" in log.lower()
+                        for log in logs
+                    )
+                    if not is_new_token:
+                        continue
+
+                    # Extract mint address from logs
+                    # Logs typically contain the mint address after "Program log: "
+                    mint = None
+                    for log in logs:
+                        # Look for base58 addresses in program logs
+                        if "Program log: " in log:
+                            parts = log.split()
+                            for part in parts:
+                                # Solana addresses are 32-44 chars, base58
+                                if 32 <= len(part) <= 44 and part.isalnum():
+                                    mint = part
+                                    break
+                        if mint:
                             break
 
-        except asyncio.CancelledError:
-            logger.info("Harvester WS: cancelled")
-            state.harvester_ws_connected = False
-            return
-        except Exception as exc:
-            logger.warning("Harvester WS: error — %s", exc)
+                    if mint and not await token_exists(mint):
+                        # Fetch token details from pump.fun REST
+                        try:
+                            detail_url = PUMPFUN_DETAIL.format(mint=mint)
+                            async with aiohttp.ClientSession(
+                                timeout=aiohttp.ClientTimeout(total=5)
+                            ) as detail_session:
+                                async with detail_session.get(detail_url) as resp:
+                                    if resp.status == 200:
+                                        token_data = await resp.json(content_type=None)
+                                        if token_data and token_data.get("mint"):
+                                            saved = await _save_pumpfun_token(token_data, via="helius")
+                                            if saved:
+                                                state.harvester_ws_tokens_today += 1
+                        except Exception as exc:
+                            logger.debug("Harvester WS[helius]: detail fetch failed for %s: %s",
+                                         mint[:12], exc)
 
-        state.harvester_ws_connected = False
-        logger.info("Harvester WS: reconnecting in %ds...", WS_RECONNECT)
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    pass
+            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                break
+
+
+# ── WebSocket cascade ────────────────────────────────────────────────────────
+
+WS_SOURCES = [
+    ("pumpdev",    _ws_pumpdev),
+    ("pumpportal", _ws_pumpportal),
+    ("helius",     _ws_helius),
+]
+
+
+async def _websocket_loop() -> None:
+    """
+    Tries WebSocket sources in cascade order.
+    If one fails, tries the next. After all fail, waits and restarts.
+    """
+    while True:
+        for source_name, ws_func in WS_SOURCES:
+            state.harvester_ws_connected = False
+            state.harvester_ws_source = "none"
+            try:
+                async with aiohttp.ClientSession() as session:
+                    await ws_func(session)
+            except asyncio.CancelledError:
+                state.harvester_ws_connected = False
+                state.harvester_ws_source = "none"
+                return
+            except Exception as exc:
+                logger.warning("Harvester WS[%s]: failed — %s", source_name, exc)
+
+            state.harvester_ws_connected = False
+            state.harvester_ws_source = "none"
+
+            # Brief pause before trying next source
+            await asyncio.sleep(3)
+
+        # All sources failed — wait before full retry
+        logger.info("Harvester WS: all sources failed, retrying in %ds...", WS_RECONNECT)
         await asyncio.sleep(WS_RECONNECT)
 
 
@@ -378,15 +508,14 @@ async def _polling_loop() -> None:
 
 async def harvester_loop() -> None:
     """
-    Starts both the WebSocket listener and the polling loop concurrently.
-    WebSocket handles real-time Pump.fun tokens.
-    Polling handles DexScreener and acts as Pump.fun fallback.
+    Starts both the WebSocket cascade and the polling loop concurrently.
+    WebSocket cascade: pumpdev.io → PumpPortal → Helius (auto-failover).
+    Polling: DexScreener always + Pump.fun REST when WS is down.
     """
-    logger.info("Harvester agent starting — WebSocket + polling mode")
+    logger.info("Harvester agent starting — WebSocket cascade + polling mode")
 
-    # Run both concurrently — if one crashes, the other keeps going
     await asyncio.gather(
-        _pumpfun_websocket_loop(),
+        _websocket_loop(),
         _polling_loop(),
         return_exceptions=True,
     )

@@ -314,18 +314,20 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     # Harvester last-run label
     pump_today = await get_pumpfun_count_today()
-    ws_icon = "🟢" if state.harvester_ws_connected else "🔴"
-    ws_mode = "WebSocket" if state.harvester_ws_connected else "Polling"
+    ws_connected = state.harvester_ws_connected
+    ws_source = state.harvester_ws_source
+    ws_icon = "🟢" if ws_connected else "🔴"
+    ws_label = ws_source if ws_connected else "Polling"
     ws_count = state.harvester_ws_tokens_today
     poll_count = state.harvester_poll_tokens_today
     if last_harvest is None:
-        harvest_line = f"✅ Harvester — {ws_icon} {ws_mode} | waiting for first run..."
+        harvest_line = f"✅ Harvester — {ws_icon} {ws_label} | waiting for first run..."
     else:
         elapsed_min = int(
             (datetime.utcnow() - last_harvest.run_at).total_seconds() / 60
         )
         harvest_line = (
-            f"✅ Harvester — {ws_icon} {ws_mode} | {token_count} tokens | "
+            f"✅ Harvester — {ws_icon} {ws_label} | {token_count} tokens | "
             f"pump: {ws_count} ws / {poll_count} poll | last {elapsed_min}min ago"
         )
 
