@@ -19,3 +19,9 @@ scanner_status:           str             = "idle"   # "running" | "idle"
 # ── Pending candidates queued for Agent 5 ────────────────────────────────────
 # Each entry: {mint, name, symbol, source, ai_score, match_score, mcap, liquidity}
 pending_candidates:       list[dict]      = []
+
+# ── Learning Loop Agent 6 live stats ────────────────────────────────────────
+learning_loop_last_run:      datetime | None = None
+learning_loop_last_analyzed: int             = 0
+learning_loop_total_closed:  int             = 0
+learning_loop_weights:       dict            = {}

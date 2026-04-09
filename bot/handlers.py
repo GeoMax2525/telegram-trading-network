@@ -232,6 +232,30 @@ def _pattern_engine_line(last_run, total: int, winners: int, rugs: int) -> str:
     )
 
 
+def _learning_loop_line() -> str:
+    remaining = max(0, 50 - (state.learning_loop_total_closed - state.learning_loop_last_analyzed))
+    w = state.learning_loop_weights
+
+    if state.learning_loop_last_run is None and not w:
+        return "✅ Learning Loop — waiting for 50 closed trades..."
+
+    if state.learning_loop_last_run is None:
+        return f"✅ Learning Loop — {remaining} trades until next run"
+
+    elapsed_min = int((datetime.utcnow() - state.learning_loop_last_run).total_seconds() / 60)
+    if elapsed_min < 60:
+        age = f"{elapsed_min}min ago"
+    else:
+        age = f"{elapsed_min // 60}h ago"
+
+    # Show current weights compactly
+    w_str = " ".join(f"{k[:3]}={v:.0%}" for k, v in sorted(w.items(), key=lambda x: -x[1]))
+    return (
+        f"✅ Learning Loop — last run {age} | next in {remaining} trades\n"
+        f"     Weights: {w_str}"
+    )
+
+
 async def _build_hub_text(autotrade: bool) -> str:
     stats = await get_hub_stats()
 
@@ -310,7 +334,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         analyst_line,
         _pattern_engine_line(last_pattern_engine, pattern_total, pattern_winners, pattern_rugs),
         ce_line,
-        "🔧 Learning Loop — _Building..._",
+        _learning_loop_line(),
         "🔧 Chart Detector — _Building..._",
         f"⚡ Auto-execute: *{exec_status}*",
         "",

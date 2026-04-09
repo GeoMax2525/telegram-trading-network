@@ -26,6 +26,7 @@ from bot.agents.harvester import harvester_loop
 from bot.agents.wallet_analyst import wallet_analyst_loop
 from bot.agents.pattern_engine import pattern_engine_loop
 from bot.agents.scanner_agent import scanner_agent_loop
+from bot.agents.learning_loop import learning_loop
 from database.models import init_db, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -129,6 +130,7 @@ async def main() -> None:
     asyncio.create_task(wallet_analyst_loop())
     asyncio.create_task(pattern_engine_loop())
     asyncio.create_task(scanner_agent_loop())
+    asyncio.create_task(learning_loop(bot))
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     try:

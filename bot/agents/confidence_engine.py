@@ -36,17 +36,20 @@ from database.models import (
     has_caller_scanned,
     save_candidate,
     log_agent_run,
+    get_current_weights,
 )
 
 logger = logging.getLogger(__name__)
 
-# Weights for each scoring component
-W_FINGERPRINT = 0.25
-W_INSIDER     = 0.25
-W_CHART       = 0.20
-W_RUG         = 0.15
-W_CALLER      = 0.10
-W_MARKET      = 0.05
+# Default weights (used when no learned weights exist in DB)
+DEFAULT_WEIGHTS = {
+    "fingerprint": 0.25,
+    "insider":     0.25,
+    "chart":       0.20,
+    "rug":         0.15,
+    "caller":      0.10,
+    "market":      0.05,
+}
 
 
 # ── Component scorers ────────────────────────────────────────────────────────
@@ -153,6 +156,21 @@ def _score_market() -> float:
 
 # ── Main scoring function ────────────────────────────────────────────────────
 
+async def _load_weights() -> dict[str, float]:
+    """Load learned weights from DB, fall back to defaults."""
+    row = await get_current_weights()
+    if row:
+        return {
+            "fingerprint": row.fingerprint_weight,
+            "insider":     row.insider_weight,
+            "chart":       row.chart_weight,
+            "rug":         row.rug_weight,
+            "caller":      row.caller_weight,
+            "market":      row.market_weight,
+        }
+    return dict(DEFAULT_WEIGHTS)
+
+
 async def score_candidate(candidate: dict) -> dict:
     """
     Score a single candidate from Agent 4.
@@ -160,6 +178,7 @@ async def score_candidate(candidate: dict) -> dict:
     All candidates are saved to the database silently.
     """
     pattern = await get_pattern_by_type("winner_2x")
+    weights = await _load_weights()
 
     # Compute all 6 component scores
     fingerprint = _score_fingerprint(candidate, pattern)
@@ -169,14 +188,14 @@ async def score_candidate(candidate: dict) -> dict:
     caller      = await _score_caller(candidate)
     market      = _score_market()
 
-    # Weighted confidence score
+    # Weighted confidence score using learned weights
     confidence = round(
-        fingerprint * W_FINGERPRINT
-        + insider   * W_INSIDER
-        + chart     * W_CHART
-        + rug       * W_RUG
-        + caller    * W_CALLER
-        + market    * W_MARKET,
+        fingerprint * weights["fingerprint"]
+        + insider   * weights["insider"]
+        + chart     * weights["chart"]
+        + rug       * weights["rug"]
+        + caller    * weights["caller"]
+        + market    * weights["market"],
         1,
     )
 

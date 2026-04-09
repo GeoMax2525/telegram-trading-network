@@ -11,6 +11,7 @@ Tables:
   tokens           — every Solana token harvested by Agent 1.
   agent_logs       — one row per agent run (tokens_found, tokens_saved, run_at).
   candidates       — every candidate scored by Agent 5 (Confidence Engine).
+  agent_weights    — learned confidence weights from Agent 6 (Learning Loop).
 """
 
 import logging
@@ -140,6 +141,23 @@ class Candidate(Base):
     decision          = Column(String(16),  nullable=False, default="discard")  # execute_full / execute_half / monitor / discard
     executed          = Column(Boolean,     nullable=False, default=False)
     created_at        = Column(DateTime,    default=datetime.utcnow, nullable=False)
+
+
+# ── Agent Weights table (Agent 6 — Learning Loop) ───────────────────────────
+
+class AgentWeights(Base):
+    __tablename__ = "agent_weights"
+
+    id                   = Column(Integer,     primary_key=True, autoincrement=True)
+    fingerprint_weight   = Column(Float,       nullable=False, default=0.25)
+    insider_weight       = Column(Float,       nullable=False, default=0.25)
+    chart_weight         = Column(Float,       nullable=False, default=0.20)
+    rug_weight           = Column(Float,       nullable=False, default=0.15)
+    caller_weight        = Column(Float,       nullable=False, default=0.10)
+    market_weight        = Column(Float,       nullable=False, default=0.05)
+    trades_analyzed      = Column(Integer,     nullable=False, default=0)
+    notes                = Column(String(512), nullable=True)
+    updated_at           = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
 
 # ── Positions table ───────────────────────────────────────────────────────────
@@ -1247,3 +1265,135 @@ async def has_caller_scanned(token_address: str) -> bool:
             select(func.count(Scan.id)).where(Scan.contract_address == token_address)
         )
         return (result.scalar() or 0) > 0
+
+
+# ── Agent Weights helpers (Agent 6 — Learning Loop) ─────────────────────────
+
+async def get_current_weights() -> "AgentWeights | None":
+    """Returns the most recent weights row, or None if no weights exist yet."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AgentWeights).order_by(AgentWeights.id.desc()).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
+async def save_weights(
+    fingerprint: float,
+    insider: float,
+    chart: float,
+    rug: float,
+    caller: float,
+    market: float,
+    trades_analyzed: int,
+    notes: str | None = None,
+) -> "AgentWeights":
+    """Appends a new weights row (history is preserved)."""
+    async with AsyncSessionLocal() as session:
+        row = AgentWeights(
+            fingerprint_weight=fingerprint,
+            insider_weight=insider,
+            chart_weight=chart,
+            rug_weight=rug,
+            caller_weight=caller,
+            market_weight=market,
+            trades_analyzed=trades_analyzed,
+            notes=notes,
+        )
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+        return row
+
+
+async def get_closed_positions_since(since_id: int, limit: int = 200) -> list["Position"]:
+    """Returns closed positions with id > since_id, oldest first."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Position)
+            .where(
+                Position.status == "closed",
+                Position.pnl_sol.is_not(None),
+                Position.id > since_id,
+            )
+            .order_by(Position.id.asc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+
+async def get_total_closed_count() -> int:
+    """Returns total number of closed positions with PnL."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(Position.id)).where(
+                Position.status == "closed",
+                Position.pnl_sol.is_not(None),
+            )
+        )
+        return result.scalar() or 0
+
+
+async def get_candidate_by_token(token_address: str) -> "Candidate | None":
+    """Returns the most recent candidate row for a token, or None."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Candidate)
+            .where(Candidate.token_address == token_address)
+            .order_by(Candidate.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
+async def update_wallet_tier(address: str, new_tier: int) -> None:
+    """Updates a wallet's tier (clamped 0–3)."""
+    new_tier = max(0, min(3, new_tier))
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Wallet).where(Wallet.address == address)
+        )
+        wallet = result.scalar_one_or_none()
+        if wallet:
+            wallet.tier = new_tier
+            wallet.last_updated_at = datetime.utcnow()
+            await session.commit()
+
+
+async def get_weekly_performance() -> dict:
+    """Returns performance stats for the last 7 days."""
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    async with AsyncSessionLocal() as session:
+        closed = (await session.execute(
+            select(func.count(Position.id)).where(
+                Position.status == "closed",
+                Position.closed_at >= cutoff,
+                Position.pnl_sol.is_not(None),
+            )
+        )).scalar() or 0
+
+        wins = (await session.execute(
+            select(func.count(Position.id)).where(
+                Position.status == "closed",
+                Position.closed_at >= cutoff,
+                Position.pnl_sol > 0,
+            )
+        )).scalar() or 0
+
+        total_pnl = (await session.execute(
+            select(func.coalesce(func.sum(Position.pnl_sol), 0.0)).where(
+                Position.status == "closed",
+                Position.closed_at >= cutoff,
+                Position.pnl_sol.is_not(None),
+            )
+        )).scalar() or 0.0
+
+    win_rate = round(wins / closed * 100) if closed > 0 else 0
+    avg_pnl = round(total_pnl / closed, 4) if closed > 0 else 0.0
+    return {
+        "trades": closed,
+        "wins": wins,
+        "win_rate": win_rate,
+        "total_pnl": float(total_pnl),
+        "avg_pnl": avg_pnl,
+    }
