@@ -25,3 +25,8 @@ learning_loop_last_run:      datetime | None = None
 learning_loop_last_analyzed: int             = 0
 learning_loop_total_closed:  int             = 0
 learning_loop_weights:       dict            = {}
+
+# ── Harvester Agent 1 live stats ────────────────────────────────────────────
+harvester_ws_connected:      bool            = False
+harvester_ws_tokens_today:   int             = 0
+harvester_poll_tokens_today: int             = 0

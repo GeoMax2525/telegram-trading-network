@@ -314,15 +314,19 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     # Harvester last-run label
     pump_today = await get_pumpfun_count_today()
+    ws_icon = "🟢" if state.harvester_ws_connected else "🔴"
+    ws_mode = "WebSocket" if state.harvester_ws_connected else "Polling"
+    ws_count = state.harvester_ws_tokens_today
+    poll_count = state.harvester_poll_tokens_today
     if last_harvest is None:
-        harvest_line = "✅ Harvester — waiting for first run..."
+        harvest_line = f"✅ Harvester — {ws_icon} {ws_mode} | waiting for first run..."
     else:
         elapsed_min = int(
             (datetime.utcnow() - last_harvest.run_at).total_seconds() / 60
         )
         harvest_line = (
-            f"✅ Harvester — {token_count} tokens | "
-            f"{pump_today} pump.fun today | last run {elapsed_min}min ago"
+            f"✅ Harvester — {ws_icon} {ws_mode} | {token_count} tokens | "
+            f"pump: {ws_count} ws / {poll_count} poll | last {elapsed_min}min ago"
         )
 
     # Wallet Analyst last-run label
