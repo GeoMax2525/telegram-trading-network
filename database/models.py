@@ -63,6 +63,11 @@ class Token(Base):
     volume_24h      = Column(Float,       nullable=True)
     rugcheck_score  = Column(Integer,     nullable=True)   # 0-1000, higher = safer
     rugcheck_risks  = Column(String(512), nullable=True)   # JSON list of risk names
+    source          = Column(String(16),  nullable=True)   # pumpfun / dexscreener
+    bonding_curve   = Column(Float,       nullable=True)   # 0-100 bonding curve progress
+    social_links    = Column(String(256), nullable=True)   # JSON: {"twitter": bool, "telegram": bool, "website": bool}
+    graduated       = Column(Boolean,     nullable=True)   # graduated to Raydium
+    reply_count     = Column(Integer,     nullable=True)   # pump.fun social activity
     first_seen_at   = Column(DateTime,    default=datetime.utcnow, nullable=False)
     last_updated_at = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
@@ -291,6 +296,14 @@ _NEW_CANDIDATE_COLS = [
     ("chart_pattern", "TEXT"),
 ]
 
+_NEW_TOKEN_COLS = [
+    ("source",          "TEXT"),
+    ("bonding_curve",   "REAL"),
+    ("social_links",    "TEXT"),
+    ("graduated",       "BOOLEAN"),
+    ("reply_count",     "INTEGER"),
+]
+
 async def init_db() -> None:
     """Creates all tables if they don't already exist, then adds any missing columns."""
     is_postgres = DATABASE_URL.startswith("postgresql")
@@ -339,6 +352,19 @@ async def init_db() -> None:
                 try:
                     await conn.execute(
                         text(f"ALTER TABLE candidates ADD COLUMN {col_name} {col_def}")
+                    )
+                except Exception:
+                    pass
+
+        for col_name, col_def in _NEW_TOKEN_COLS:
+            if is_postgres:
+                await conn.execute(
+                    text(f"ALTER TABLE tokens ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
+                )
+            else:
+                try:
+                    await conn.execute(
+                        text(f"ALTER TABLE tokens ADD COLUMN {col_name} {col_def}")
                     )
                 except Exception:
                     pass
@@ -856,6 +882,11 @@ async def save_token(
     volume_24h: float | None,
     rugcheck_score: int | None = None,
     rugcheck_risks: str | None = None,
+    source: str | None = None,
+    bonding_curve: float | None = None,
+    social_links: str | None = None,
+    graduated: bool | None = None,
+    reply_count: int | None = None,
 ) -> "Token":
     async with AsyncSessionLocal() as session:
         tok = Token(
@@ -868,6 +899,11 @@ async def save_token(
             volume_24h=volume_24h,
             rugcheck_score=rugcheck_score,
             rugcheck_risks=rugcheck_risks,
+            source=source,
+            bonding_curve=bonding_curve,
+            social_links=social_links,
+            graduated=graduated,
+            reply_count=reply_count,
         )
         session.add(tok)
         try:
@@ -881,6 +917,28 @@ async def get_token_count() -> int:
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(func.count(Token.mint)))
         return result.scalar() or 0
+
+
+async def get_pumpfun_count_today() -> int:
+    """Returns number of pump.fun tokens harvested today."""
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(Token.mint)).where(
+                Token.source == "pumpfun",
+                Token.first_seen_at >= today,
+            )
+        )
+        return result.scalar() or 0
+
+
+async def get_token_by_mint(mint: str) -> "Token | None":
+    """Returns a Token row by mint address, or None."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Token).where(Token.mint == mint)
+        )
+        return result.scalar_one_or_none()
 
 
 # ── Agent log helpers ─────────────────────────────────────────────────────────

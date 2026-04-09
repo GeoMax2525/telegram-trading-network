@@ -40,6 +40,7 @@ from database.models import (
     log_agent_run,
     get_current_weights,
     get_trade_params,
+    get_token_by_mint,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,49 +58,70 @@ DEFAULT_WEIGHTS = {
 
 # ── Component scorers ────────────────────────────────────────────────────────
 
-def _score_fingerprint(candidate: dict, pattern) -> float:
-    """Score 0–100 based on how well metrics match the winner_2x pattern."""
+async def _score_fingerprint(candidate: dict, pattern) -> float:
+    """Score 0–100 based on how well metrics match the winner_2x pattern.
+    Includes pump.fun bonuses for social links and bonding curve."""
     if pattern is None:
-        return 50.0  # no pattern data — neutral
+        base = 50.0  # no pattern data — neutral
+    else:
+        score = 0.0
+        checks = 0
 
-    score = 0.0
-    checks = 0
+        mcap = candidate.get("mcap", 0)
+        liquidity = candidate.get("liquidity", 0)
+        ai_score = candidate.get("ai_score", 0)
 
-    mcap = candidate.get("mcap", 0)
-    liquidity = candidate.get("liquidity", 0)
-    ai_score = candidate.get("ai_score", 0)
+        # MC range
+        if pattern.mcap_range_low and pattern.mcap_range_high:
+            checks += 1
+            low = pattern.mcap_range_low * 0.5
+            high = pattern.mcap_range_high * 2.0
+            if low <= mcap <= high:
+                score += 100.0
+            elif mcap < low:
+                score += 30.0
+            else:
+                score += 10.0
 
-    # MC range
-    if pattern.mcap_range_low and pattern.mcap_range_high:
-        checks += 1
-        low = pattern.mcap_range_low * 0.5
-        high = pattern.mcap_range_high * 2.0
-        if low <= mcap <= high:
-            score += 100.0
-        elif mcap < low:
-            score += 30.0
+        # Liquidity
+        if pattern.avg_liquidity and pattern.avg_liquidity > 0:
+            checks += 1
+            ratio = min(liquidity / pattern.avg_liquidity, 2.0)
+            score += ratio * 50.0
+
+        # AI score
+        if pattern.avg_ai_score and pattern.avg_ai_score > 0:
+            checks += 1
+            ratio = min(ai_score / pattern.avg_ai_score, 1.5)
+            score += ratio * 66.7
+
+        if checks == 0:
+            base = 50.0
         else:
-            score += 10.0
+            raw = score / checks
+            conf = pattern.confidence_score / 100.0
+            base = min(raw * conf + raw * (1 - conf * 0.3), 100)
 
-    # Liquidity
-    if pattern.avg_liquidity and pattern.avg_liquidity > 0:
-        checks += 1
-        ratio = min(liquidity / pattern.avg_liquidity, 2.0)
-        score += ratio * 50.0
+    # Pump.fun bonuses — look up token data
+    mint = candidate.get("mint", "")
+    if mint:
+        token = await get_token_by_mint(mint)
+        if token:
+            # Social links bonus: twitter + telegram = +5
+            if token.social_links:
+                import json as _json
+                try:
+                    links = _json.loads(token.social_links)
+                    if links.get("twitter") and links.get("telegram"):
+                        base += 5.0
+                except Exception:
+                    pass
 
-    # AI score
-    if pattern.avg_ai_score and pattern.avg_ai_score > 0:
-        checks += 1
-        ratio = min(ai_score / pattern.avg_ai_score, 1.5)
-        score += ratio * 66.7
+            # Bonding curve > 50% = +10
+            if token.bonding_curve and token.bonding_curve > 50:
+                base += 10.0
 
-    if checks == 0:
-        return 50.0
-
-    raw = score / checks
-    # Apply pattern confidence weighting
-    conf = pattern.confidence_score / 100.0
-    return round(min(raw * conf + raw * (1 - conf * 0.3), 100), 1)
+    return round(min(base, 100.0), 1)
 
 
 async def _score_insider(candidate: dict) -> float:
@@ -193,7 +215,7 @@ async def score_candidate(candidate: dict) -> dict:
     weights = await _load_weights()
 
     # Compute all 6 component scores
-    fingerprint = _score_fingerprint(candidate, pattern)
+    fingerprint = await _score_fingerprint(candidate, pattern)
     insider     = await _score_insider(candidate)
     chart, chart_pattern = await _score_chart(candidate)
     rug         = _score_rug(candidate)
