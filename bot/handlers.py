@@ -228,8 +228,22 @@ async def _build_hub_text(autotrade: bool) -> str:
     win_rate     = stats["win_rate"]
     total_closed = stats["total_closed"]
     recent       = stats["recent_trades"]
+    token_count  = stats["token_count"]
+    last_harvest = stats["last_harvest"]
 
     at_status = "ON 🟢" if autotrade else "OFF 🔴"
+
+    # Harvester last-run label
+    if last_harvest is None:
+        harvest_line = "✅ Harvester — waiting for first run..."
+    else:
+        elapsed_min = int(
+            (datetime.utcnow() - last_harvest.run_at).total_seconds() / 60
+        )
+        harvest_line = (
+            f"✅ Harvester — {token_count} tokens tracked "
+            f"| last run {elapsed_min}min ago"
+        )
 
     ce_icon = "✅" if autotrade else "🔧"
     ce_line = f"{ce_icon} Confidence Engine — {trades_today} auto-trades today"
@@ -240,7 +254,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         "",
         "🤖 *AGENTS*",
         f"✅ Scanner — {scans_today} candidates today",
-        "🔧 Harvester — _Building..._",
+        harvest_line,
         "🔧 Wallet Analyst — _Building..._",
         "🔧 Pattern Engine — _Building..._",
         ce_line,

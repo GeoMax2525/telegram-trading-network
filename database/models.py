@@ -8,6 +8,8 @@ Tables:
   scans            — logs every /scan command with token info, AI score, and caller details.
   callers          — approved caller Telegram user IDs (managed via /addcaller).
   keybot_settings  — per-user KeyBot trading presets.
+  tokens           — every Solana token harvested by Agent 1.
+  agent_logs       — one row per agent run (tokens_found, tokens_saved, run_at).
 """
 
 import logging
@@ -42,6 +44,37 @@ else:
 
 class Base(DeclarativeBase):
     pass
+
+
+# ── Tokens table (Agent 1 — Harvester) ───────────────────────────────────────
+
+class Token(Base):
+    __tablename__ = "tokens"
+
+    mint            = Column(String(64),  primary_key=True)
+    name            = Column(String(128), nullable=True)
+    symbol          = Column(String(32),  nullable=True)
+    price_usd       = Column(Float,       nullable=True)
+    market_cap      = Column(Float,       nullable=True)
+    liquidity_usd   = Column(Float,       nullable=True)
+    volume_24h      = Column(Float,       nullable=True)
+    rugcheck_score  = Column(Integer,     nullable=True)   # 0-1000, higher = safer
+    rugcheck_risks  = Column(String(512), nullable=True)   # JSON list of risk names
+    first_seen_at   = Column(DateTime,    default=datetime.utcnow, nullable=False)
+    last_updated_at = Column(DateTime,    default=datetime.utcnow, nullable=False)
+
+
+# ── Agent logs table ──────────────────────────────────────────────────────────
+
+class AgentLog(Base):
+    __tablename__ = "agent_logs"
+
+    id           = Column(Integer,     primary_key=True, autoincrement=True)
+    agent_name   = Column(String(64),  nullable=False, index=True)
+    run_at       = Column(DateTime,    default=datetime.utcnow, nullable=False)
+    tokens_found = Column(Integer,     nullable=False, default=0)
+    tokens_saved = Column(Integer,     nullable=False, default=0)
+    notes        = Column(String(256), nullable=True)
 
 
 # ── Positions table ───────────────────────────────────────────────────────────
@@ -684,6 +717,83 @@ async def get_recent_scans(limit: int = 20) -> list["Scan"]:
         return list(result.scalars().all())
 
 
+# ── Token helpers (Agent 1) ───────────────────────────────────────────────────
+
+async def token_exists(mint: str) -> bool:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Token.mint).where(Token.mint == mint))
+        return result.scalar_one_or_none() is not None
+
+
+async def save_token(
+    mint: str,
+    name: str | None,
+    symbol: str | None,
+    price_usd: float | None,
+    market_cap: float | None,
+    liquidity_usd: float | None,
+    volume_24h: float | None,
+    rugcheck_score: int | None = None,
+    rugcheck_risks: str | None = None,
+) -> "Token":
+    async with AsyncSessionLocal() as session:
+        tok = Token(
+            mint=mint,
+            name=name,
+            symbol=symbol,
+            price_usd=price_usd,
+            market_cap=market_cap,
+            liquidity_usd=liquidity_usd,
+            volume_24h=volume_24h,
+            rugcheck_score=rugcheck_score,
+            rugcheck_risks=rugcheck_risks,
+        )
+        session.add(tok)
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()  # duplicate key — already saved by another tick
+        return tok
+
+
+async def get_token_count() -> int:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(func.count(Token.mint)))
+        return result.scalar() or 0
+
+
+# ── Agent log helpers ─────────────────────────────────────────────────────────
+
+async def log_agent_run(
+    agent_name: str,
+    tokens_found: int,
+    tokens_saved: int,
+    notes: str | None = None,
+) -> "AgentLog":
+    async with AsyncSessionLocal() as session:
+        entry = AgentLog(
+            agent_name=agent_name,
+            tokens_found=tokens_found,
+            tokens_saved=tokens_saved,
+            notes=notes,
+        )
+        session.add(entry)
+        await session.commit()
+        await session.refresh(entry)
+        return entry
+
+
+async def get_last_agent_run(agent_name: str) -> "AgentLog | None":
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AgentLog)
+            .where(AgentLog.agent_name == agent_name)
+            .order_by(AgentLog.run_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
 async def get_hub_stats() -> dict:
     """Returns aggregated stats for the /hub dashboard."""
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -724,12 +834,25 @@ async def get_hub_stats() -> dict:
             .limit(5)
         )).scalars().all())
 
+        token_count = (await session.execute(
+            select(func.count(Token.mint))
+        )).scalar() or 0
+
+        last_harvest = (await session.execute(
+            select(AgentLog)
+            .where(AgentLog.agent_name == "harvester")
+            .order_by(AgentLog.run_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+
     return {
-        "scans_today":  scans_today,
-        "trades_today": trades_today,
-        "today_pnl":    float(today_pnl),
-        "alltime_pnl":  float(alltime_pnl),
-        "win_rate":     win_rate,
-        "total_closed": total_closed,
+        "scans_today":   scans_today,
+        "trades_today":  trades_today,
+        "today_pnl":     float(today_pnl),
+        "alltime_pnl":   float(alltime_pnl),
+        "win_rate":      win_rate,
+        "total_closed":  total_closed,
         "recent_trades": recent,
+        "token_count":   token_count,
+        "last_harvest":  last_harvest,
     }
