@@ -140,6 +140,7 @@ class Candidate(Base):
     caller_score      = Column(Float,       nullable=True)
     market_score      = Column(Float,       nullable=True)
     source            = Column(String(32),  nullable=True)   # new_launch / insider_wallet / volume_spike
+    chart_pattern     = Column(String(64),  nullable=True)   # pattern name detected by Agent 7
     decision          = Column(String(16),  nullable=False, default="discard")  # execute_full / execute_half / monitor / discard
     executed          = Column(Boolean,     nullable=False, default=False)
     created_at        = Column(DateTime,    default=datetime.utcnow, nullable=False)
@@ -287,6 +288,7 @@ _NEW_KEYBOT_COLS = [
 
 _NEW_CANDIDATE_COLS = [
     ("source", "TEXT"),
+    ("chart_pattern", "TEXT"),
 ]
 
 async def init_db() -> None:
@@ -1245,6 +1247,7 @@ async def save_candidate(
     decision: str,
     executed: bool = False,
     source: str | None = None,
+    chart_pattern: str | None = None,
 ) -> "Candidate":
     async with AsyncSessionLocal() as session:
         candidate = Candidate(
@@ -1258,6 +1261,7 @@ async def save_candidate(
             caller_score=caller_score,
             market_score=market_score,
             source=source,
+            chart_pattern=chart_pattern,
             decision=decision,
             executed=executed,
         )
@@ -1516,3 +1520,81 @@ async def get_closed_positions_by_source(source: str) -> list["Position"]:
             .limit(200)
         )
         return list(result.scalars().all())
+
+
+# ── Chart pattern stats helpers (Agent 7) ────────────────────────────────────
+
+async def get_chart_pattern_stats_today() -> dict:
+    """Returns chart detector stats for /hub display."""
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    async with AsyncSessionLocal() as session:
+        detected = (await session.execute(
+            select(func.count(Candidate.id)).where(
+                Candidate.created_at >= today,
+                Candidate.chart_pattern.is_not(None),
+                Candidate.chart_pattern != "none",
+            )
+        )).scalar() or 0
+
+        confirmed = (await session.execute(
+            select(func.count(Candidate.id)).where(
+                Candidate.created_at >= today,
+                Candidate.chart_score >= 50,
+                Candidate.chart_pattern.is_not(None),
+                Candidate.chart_pattern != "none",
+            )
+        )).scalar() or 0
+
+        rejected = detected - confirmed
+
+    return {"detected": detected, "confirmed": confirmed, "rejected": rejected}
+
+
+async def get_chart_pattern_win_rates() -> list[dict]:
+    """Returns win rates per chart pattern type for /patterns display."""
+    async with AsyncSessionLocal() as session:
+        # Get all distinct chart patterns that have been traded
+        patterns = (await session.execute(
+            select(Candidate.chart_pattern)
+            .where(
+                Candidate.chart_pattern.is_not(None),
+                Candidate.chart_pattern != "none",
+                Candidate.executed == True,
+            )
+            .distinct()
+        )).scalars().all()
+
+        results = []
+        for pname in patterns:
+            if not pname:
+                continue
+            # Get positions for tokens with this chart pattern
+            total = (await session.execute(
+                select(func.count(Position.id)).where(
+                    Position.status == "closed",
+                    Position.pnl_sol.is_not(None),
+                    Position.token_address.in_(
+                        select(Candidate.token_address).where(
+                            Candidate.chart_pattern == pname
+                        )
+                    ),
+                )
+            )).scalar() or 0
+
+            wins = (await session.execute(
+                select(func.count(Position.id)).where(
+                    Position.status == "closed",
+                    Position.pnl_sol > 0,
+                    Position.token_address.in_(
+                        select(Candidate.token_address).where(
+                            Candidate.chart_pattern == pname
+                        )
+                    ),
+                )
+            )).scalar() or 0
+
+            wr = round(wins / total * 100) if total > 0 else 0
+            results.append({"pattern": pname, "trades": total, "wins": wins, "win_rate": wr})
+
+        results.sort(key=lambda x: x["win_rate"], reverse=True)
+        return results

@@ -7,7 +7,7 @@ Produces a single confidence score (0–100) and a trade decision.
 Confidence score — 6 weighted components:
   token_fingerprint_score × 0.25  — compare metrics to winning patterns (Agent 3)
   insider_wallet_signal   × 0.25  — is any Tier 1/2 wallet buying this token?
-  chart_pattern_score     × 0.20  — placeholder 50 until Agent 7 is built
+  chart_pattern_score     × 0.20  — Agent 7 chart pattern analysis
   rug_safety_score        × 0.15  — rugcheck score + rug flags
   caller_reliability      × 0.10  — has any caller scanned this token?
   market_conditions       × 0.05  — placeholder 50 until SOL price feed added
@@ -20,6 +20,7 @@ Decision thresholds:
 
 Hard gates (before any execution):
   - rug_safety_score must be >= 50
+  - chart_score must be >= 50
   - token must be < 4 hours old (enforced by scanner)
   - liquidity must be > $5K (enforced by scanner)
 
@@ -30,6 +31,7 @@ No Telegram messages — silent logging only.
 import logging
 
 from bot import state
+from bot.agents.chart_detector import analyze_chart
 from database.models import (
     get_pattern_by_type,
     get_tier_wallets,
@@ -117,9 +119,18 @@ async def _score_insider(candidate: dict) -> float:
     return 30.0  # no insider signal
 
 
-def _score_chart() -> float:
-    """Placeholder until Agent 7 (Chart Detector) is built."""
-    return 50.0
+async def _score_chart(candidate: dict) -> tuple[float, str]:
+    """
+    Calls Agent 7 (Chart Detector) to analyze chart patterns.
+    Returns (score 0-100, pattern_name).
+    """
+    try:
+        result = await analyze_chart(candidate)
+        return result["chart_score"], result.get("pattern_name", "none")
+    except Exception as exc:
+        logger.warning("Agent5: chart analysis failed for %s: %s",
+                       candidate.get("mint", "?")[:12], exc)
+        return 40.0, "error"
 
 
 def _score_rug(candidate: dict) -> float:
@@ -184,7 +195,7 @@ async def score_candidate(candidate: dict) -> dict:
     # Compute all 6 component scores
     fingerprint = _score_fingerprint(candidate, pattern)
     insider     = await _score_insider(candidate)
-    chart       = _score_chart()
+    chart, chart_pattern = await _score_chart(candidate)
     rug         = _score_rug(candidate)
     caller      = await _score_caller(candidate)
     market      = _score_market()
@@ -200,13 +211,15 @@ async def score_candidate(candidate: dict) -> dict:
         1,
     )
 
-    # Hard gate: rug safety must be >= 50 for any execution
+    # Hard gates for execution
     rug_gate_pass = rug >= 50
+    chart_gate_pass = chart >= 50
+    gates_pass = rug_gate_pass and chart_gate_pass
 
     # Decision thresholds
-    if confidence >= 80 and rug_gate_pass:
+    if confidence >= 80 and gates_pass:
         decision = "execute_full"
-    elif confidence >= 70 and rug_gate_pass:
+    elif confidence >= 70 and gates_pass:
         decision = "execute_half"
     elif confidence >= 60:
         decision = "monitor"
@@ -250,13 +263,15 @@ async def score_candidate(candidate: dict) -> dict:
         decision=decision,
         executed=executed,
         source=source,
+        chart_pattern=chart_pattern,
     )
 
     logger.info(
         "Agent5: %s (%s) confidence=%.1f decision=%s executed=%s "
-        "params=%s [tp=%.1fx sl=%.0f%% size=%.0f%%]",
+        "chart=%s(%.0f) params=%s [tp=%.1fx sl=%.0f%% size=%.0f%%]",
         candidate.get("name", "?"), candidate.get("mint", "?")[:12],
         confidence, decision, executed,
+        chart_pattern, chart,
         params_source, trade_tp_x, trade_sl_pct, trade_position_pct,
     )
 
@@ -266,6 +281,7 @@ async def score_candidate(candidate: dict) -> dict:
         "fingerprint_score": fingerprint,
         "insider_score":     insider,
         "chart_score":       chart,
+        "chart_pattern":     chart_pattern,
         "rug_score":         rug,
         "caller_score":      caller,
         "market_score":      market,

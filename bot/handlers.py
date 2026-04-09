@@ -22,6 +22,7 @@ from database.models import (
     get_signal_leaders, get_top_calls, get_top_calls_stats,
     get_any_open_position_by_token, get_hub_stats, get_top_wallets,
     get_candidate_stats_today, get_all_trade_params,
+    get_chart_pattern_stats_today, get_chart_pattern_win_rates,
 )
 
 logger = logging.getLogger(__name__)
@@ -232,6 +233,18 @@ def _pattern_engine_line(last_run, total: int, winners: int, rugs: int) -> str:
     )
 
 
+async def _chart_detector_line() -> str:
+    cs = await get_chart_pattern_stats_today()
+    if cs["detected"] == 0:
+        return "✅ Chart Detector — waiting for candidates..."
+    return (
+        f"✅ Chart Detector — "
+        f"{cs['detected']} detected | "
+        f"{cs['confirmed']} confirmed | "
+        f"{cs['rejected']} rejected"
+    )
+
+
 async def _learning_loop_line() -> str:
     remaining = max(0, 50 - (state.learning_loop_total_closed - state.learning_loop_last_analyzed))
     w = state.learning_loop_weights
@@ -344,7 +357,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         _pattern_engine_line(last_pattern_engine, pattern_total, pattern_winners, pattern_rugs),
         ce_line,
         await _learning_loop_line(),
-        "🔧 Chart Detector — _Building..._",
+        await _chart_detector_line(),
         f"⚡ Auto-execute: *{exec_status}*",
         "",
         "📊 *PERFORMANCE*",
@@ -565,6 +578,17 @@ async def cmd_patterns(message: Message):
             f"Using: _{using}_",
             "",
         ]
+
+    # Chart pattern win rates
+    chart_wr = await get_chart_pattern_win_rates()
+    if chart_wr:
+        lines += ["📊 *CHART PATTERN WIN RATES*", ""]
+        for cw in chart_wr:
+            name = cw["pattern"].replace("_", " ").title()
+            lines.append(
+                f"  `{name}` — {cw['win_rate']}% WR | {cw['trades']} trades"
+            )
+        lines.append("")
 
     lines.append(f"_Updated: {datetime.utcnow().strftime('%H:%M:%S')} UTC_")
     await message.reply("\n".join(lines), parse_mode="Markdown")
