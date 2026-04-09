@@ -1018,6 +1018,33 @@ async def get_tokens_by_mints(mints: list[str]) -> "dict[str, Token]":
         return {t.mint: t for t in result.scalars().all()}
 
 
+async def get_token_by_mint(mint: str) -> "Token | None":
+    """Returns a single Token by its mint address, or None."""
+    async with AsyncSessionLocal() as session:
+        return await session.get(Token, mint)
+
+
+async def get_tier_wallets(max_tier: int = 2) -> list["Wallet"]:
+    """Returns wallets with tier 1..max_tier ordered by score desc (max 30)."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Wallet)
+            .where(Wallet.tier >= 1, Wallet.tier <= max_tier)
+            .order_by(Wallet.score.desc())
+            .limit(30)
+        )
+        return list(result.scalars().all())
+
+
+async def get_pattern_by_type(pattern_type: str) -> "Pattern | None":
+    """Returns a single Pattern row by pattern_type, or None."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Pattern).where(Pattern.pattern_type == pattern_type)
+        )
+        return result.scalar_one_or_none()
+
+
 async def get_hub_stats() -> dict:
     """Returns aggregated stats for the /hub dashboard."""
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)

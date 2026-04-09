@@ -12,6 +12,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.config import MAIN_GROUP_ID, ADMIN_IDS
+from bot import state
 from bot.scanner import scan_token, fetch_current_market_cap, fetch_live_data, fetch_sol_price_usd
 from bot.keyboards import trade_card_keyboard, pnl_keyboard, top_calls_keyboard
 from bot.wallet import get_wallet_address, get_token_holding
@@ -199,8 +200,6 @@ async def _do_scan(message: Message, address: str) -> None:
 
 # ── /hub — Live Dashboard ─────────────────────────────────────────────────────
 
-_autotrade_enabled: bool = False
-
 
 def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -255,6 +254,18 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     at_status = "ON 🟢" if autotrade else "OFF 🔴"
 
+    # Scanner (Agent 4) line
+    if not autotrade:
+        scanner_line = "🔧 Scanner — autotrade OFF"
+    elif state.scanner_last_run is None:
+        scanner_line = "✅ Scanner — waiting for first run..."
+    else:
+        elapsed_s = int((datetime.utcnow() - state.scanner_last_run).total_seconds())
+        scanner_line = (
+            f"✅ Scanner — {state.scanner_candidates_today} candidates today "
+            f"| last scan {elapsed_s}s ago"
+        )
+
     # Harvester last-run label
     if last_harvest is None:
         harvest_line = "✅ Harvester — waiting for first run..."
@@ -288,7 +299,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         "━━━━━━━━━━━━━━━━━━━━",
         "",
         "🤖 *AGENTS*",
-        f"✅ Scanner — {scans_today} candidates today",
+        scanner_line,
         harvest_line,
         analyst_line,
         _pattern_engine_line(last_pattern_engine, pattern_total, pattern_winners, pattern_rugs),
@@ -350,34 +361,33 @@ async def cmd_hub(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         await message.reply("⛔ `/hub` is only available in Callers HQ.")
         return
-    text = await _build_hub_text(_autotrade_enabled)
-    await message.reply(text, parse_mode="Markdown", reply_markup=_hub_keyboard(_autotrade_enabled))
+    text = await _build_hub_text(state.autotrade_enabled)
+    await message.reply(text, parse_mode="Markdown", reply_markup=_hub_keyboard(state.autotrade_enabled))
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("hub:"))
 async def cb_hub(callback: CallbackQuery):
-    global _autotrade_enabled
     action = callback.data.split(":", 1)[1]
 
     if action == "refresh":
         await callback.answer("🔄 Refreshing…")
-        text = await _build_hub_text(_autotrade_enabled)
+        text = await _build_hub_text(state.autotrade_enabled)
         try:
             await callback.message.edit_text(
                 text, parse_mode="Markdown",
-                reply_markup=_hub_keyboard(_autotrade_enabled),
+                reply_markup=_hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
             pass  # unchanged
 
     elif action == "autotrade":
-        _autotrade_enabled = not _autotrade_enabled
-        status = "ON 🟢" if _autotrade_enabled else "OFF 🔴"
+        state.autotrade_enabled = not state.autotrade_enabled
+        status = "ON 🟢" if state.autotrade_enabled else "OFF 🔴"
         await callback.answer(f"⚡ Autotrade {status}")
-        text = await _build_hub_text(_autotrade_enabled)
+        text = await _build_hub_text(state.autotrade_enabled)
         await callback.message.edit_text(
             text, parse_mode="Markdown",
-            reply_markup=_hub_keyboard(_autotrade_enabled),
+            reply_markup=_hub_keyboard(state.autotrade_enabled),
         )
 
     elif action == "agents":
@@ -441,6 +451,43 @@ async def cmd_wallets(message: Message):
             f"{w.wins}W {w.losses}L | Tier {w.tier} | Avg: {w.avg_multiple:.1f}x"
         )
     await message.reply("\n".join(lines), parse_mode="Markdown")
+
+
+# ── /autotrade on|off ────────────────────────────────────────────────────────
+
+@router.message(Command("autotrade"))
+async def cmd_autotrade(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        await message.reply("⛔ `/autotrade` is only available in Callers HQ.")
+        return
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply("⛔ Only admins can toggle autotrade.")
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
+        current = "ON 🟢" if state.autotrade_enabled else "OFF 🔴"
+        await message.reply(
+            f"⚡ Autotrade is currently *{current}*\n"
+            f"Usage: `/autotrade on` or `/autotrade off`",
+            parse_mode="Markdown",
+        )
+        return
+
+    new_state = parts[1].lower() == "on"
+    state.autotrade_enabled = new_state
+    status = "ON 🟢" if new_state else "OFF 🔴"
+    await message.reply(
+        f"⚡ Autotrade turned *{status}*\n"
+        + ("_Scanner Agent will start scanning for candidates._" if new_state
+           else "_Scanner Agent is paused._"),
+        parse_mode="Markdown",
+    )
+    logger.info(
+        "Autotrade %s by %s",
+        "enabled" if new_state else "disabled",
+        message.from_user.username or message.from_user.id,
+    )
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
