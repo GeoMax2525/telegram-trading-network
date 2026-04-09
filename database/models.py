@@ -10,6 +10,7 @@ Tables:
   keybot_settings  — per-user KeyBot trading presets.
   tokens           — every Solana token harvested by Agent 1.
   agent_logs       — one row per agent run (tokens_found, tokens_saved, run_at).
+  candidates       — every candidate scored by Agent 5 (Confidence Engine).
 """
 
 import logging
@@ -119,6 +120,26 @@ class AgentLog(Base):
     tokens_found = Column(Integer,     nullable=False, default=0)
     tokens_saved = Column(Integer,     nullable=False, default=0)
     notes        = Column(String(256), nullable=True)
+
+
+# ── Candidates table (Agent 5 — Confidence Engine) ──────────────────────────
+
+class Candidate(Base):
+    __tablename__ = "candidates"
+
+    id                = Column(Integer,     primary_key=True, autoincrement=True)
+    token_address     = Column(String(64),  nullable=False, index=True)
+    token_name        = Column(String(128), nullable=True)
+    confidence_score  = Column(Float,       nullable=False, default=0.0)
+    fingerprint_score = Column(Float,       nullable=True)
+    insider_score     = Column(Float,       nullable=True)
+    chart_score       = Column(Float,       nullable=True)
+    rug_score         = Column(Float,       nullable=True)
+    caller_score      = Column(Float,       nullable=True)
+    market_score      = Column(Float,       nullable=True)
+    decision          = Column(String(16),  nullable=False, default="discard")  # execute_full / execute_half / monitor / discard
+    executed          = Column(Boolean,     nullable=False, default=False)
+    created_at        = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
 
 # ── Positions table ───────────────────────────────────────────────────────────
@@ -1153,3 +1174,76 @@ async def get_hub_stats() -> dict:
         "pattern_rugs":       pattern_rugs,
         "last_pattern_engine": last_pattern_engine,
     }
+
+
+# ── Candidate helpers (Agent 5 — Confidence Engine) ─────────────────────────
+
+async def save_candidate(
+    token_address: str,
+    token_name: str | None,
+    confidence_score: float,
+    fingerprint_score: float,
+    insider_score: float,
+    chart_score: float,
+    rug_score: float,
+    caller_score: float,
+    market_score: float,
+    decision: str,
+    executed: bool = False,
+) -> "Candidate":
+    async with AsyncSessionLocal() as session:
+        candidate = Candidate(
+            token_address=token_address,
+            token_name=token_name,
+            confidence_score=confidence_score,
+            fingerprint_score=fingerprint_score,
+            insider_score=insider_score,
+            chart_score=chart_score,
+            rug_score=rug_score,
+            caller_score=caller_score,
+            market_score=market_score,
+            decision=decision,
+            executed=executed,
+        )
+        session.add(candidate)
+        await session.commit()
+        await session.refresh(candidate)
+        return candidate
+
+
+async def get_candidate_stats_today() -> dict:
+    """Returns candidate counts for /hub display."""
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    async with AsyncSessionLocal() as session:
+        scored_today = (await session.execute(
+            select(func.count(Candidate.id)).where(Candidate.created_at >= today)
+        )).scalar() or 0
+
+        high_conf = (await session.execute(
+            select(func.count(Candidate.id)).where(
+                Candidate.created_at >= today,
+                Candidate.confidence_score >= 80,
+            )
+        )).scalar() or 0
+
+        executed_today = (await session.execute(
+            select(func.count(Candidate.id)).where(
+                Candidate.created_at >= today,
+                Candidate.executed == True,
+            )
+        )).scalar() or 0
+
+    return {
+        "scored_today":   scored_today,
+        "high_conf":      high_conf,
+        "executed_today": executed_today,
+    }
+
+
+async def has_caller_scanned(token_address: str) -> bool:
+    """Returns True if any caller has scanned this token address."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(Scan.id)).where(Scan.contract_address == token_address)
+        )
+        return (result.scalar() or 0) > 0

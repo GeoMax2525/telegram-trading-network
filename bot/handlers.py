@@ -21,6 +21,7 @@ from database.models import (
     get_open_scans, update_scan_pnl, get_scan_by_address, close_old_scans,
     get_signal_leaders, get_top_calls, get_top_calls_stats,
     get_any_open_position_by_token, get_hub_stats, get_top_wallets,
+    get_candidate_stats_today,
 )
 
 logger = logging.getLogger(__name__)
@@ -289,8 +290,14 @@ async def _build_hub_text(autotrade: bool) -> str:
             f"| last run {elapsed_min}min ago"
         )
 
+    ce_stats = await get_candidate_stats_today()
     ce_icon = "✅" if autotrade else "🔧"
-    ce_line = f"{ce_icon} Confidence Engine — {trades_today} auto-trades today"
+    ce_line = (
+        f"{ce_icon} Confidence Engine — "
+        f"{ce_stats['scored_today']} scored | "
+        f"{ce_stats['high_conf']} high conf | "
+        f"{ce_stats['executed_today']} executed"
+    )
     exec_status = "ON 🟢" if autotrade else "OFF 🔴"
 
     lines = [

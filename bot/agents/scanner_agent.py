@@ -40,6 +40,7 @@ import aiohttp
 from bot import state
 from bot.config import HELIUS_RPC_URL, HELIUS_API_KEY
 from bot.scanner import fetch_token_data, parse_token_metrics, scan_token
+from bot.agents.confidence_engine import score_candidate
 from database.models import (
     log_agent_run,
     get_tier_wallets,
@@ -541,15 +542,21 @@ async def run_once() -> tuple[int, int]:
             )
             continue
 
-        state.pending_candidates.append(result)
+        # Pass every qualifying candidate to Agent 5 for confidence scoring
+        try:
+            scored = await score_candidate(result)
+            logger.info(
+                "Scanner→Agent5: %s (%s) confidence=%.0f decision=%s",
+                scored.get("name", "?"), scored.get("mint", "?")[:12],
+                scored.get("confidence_score", 0), scored.get("decision", "?"),
+            )
+        except Exception as exc:
+            logger.error("Scanner: Agent5 scoring failed for %s: %s", result["mint"][:12], exc)
+            scored = result  # fall back to unscored candidate
+
+        state.pending_candidates.append(scored)
         state.scanner_candidates_today += 1
         queued += 1
-
-        logger.info(
-            "Scanner: queued %s (%s) source=%s ai=%.0f match=%.0f",
-            result["name"], result["mint"][:12],
-            result["source"], result["ai_score"], result["match_score"],
-        )
 
         if queued >= MAX_CANDIDATES:
             break
