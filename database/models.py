@@ -82,6 +82,32 @@ class Wallet(Base):
     last_updated_at = Column(DateTime,   default=datetime.utcnow, nullable=False)
 
 
+# ── Patterns table (Agent 3 — Pattern Engine) ────────────────────────────────
+
+class Pattern(Base):
+    __tablename__ = "patterns"
+
+    id                      = Column(Integer,     primary_key=True, autoincrement=True)
+    pattern_type            = Column(String(32),  nullable=False, unique=True, index=True)
+    outcome_threshold       = Column(String(8),   nullable=True)   # "2x" / "5x" / "10x" / "rug"
+    sample_count            = Column(Integer,     nullable=False, default=0)
+    avg_entry_mcap          = Column(Float,       nullable=True)
+    mcap_range_low          = Column(Float,       nullable=True)
+    mcap_range_high         = Column(Float,       nullable=True)
+    avg_liquidity           = Column(Float,       nullable=True)
+    min_liquidity           = Column(Float,       nullable=True)
+    avg_ai_score            = Column(Float,       nullable=True)
+    avg_rugcheck_score      = Column(Float,       nullable=True)
+    max_dev_wallet_pct      = Column(Float,       nullable=True)   # reserved
+    max_top10_concentration = Column(Float,       nullable=True)   # reserved
+    min_holder_count        = Column(Integer,     nullable=True)   # reserved
+    best_hours              = Column(String(64),  nullable=True)   # JSON list e.g. "[14,15,16]"
+    best_days               = Column(String(64),  nullable=True)   # JSON list e.g. "[0,1,2]"
+    confidence_score        = Column(Float,       nullable=False, default=0.0)
+    created_at              = Column(DateTime,    default=datetime.utcnow, nullable=False)
+    updated_at              = Column(DateTime,    default=datetime.utcnow, nullable=False)
+
+
 # ── Agent logs table ──────────────────────────────────────────────────────────
 
 class AgentLog(Base):
@@ -887,6 +913,111 @@ async def get_winning_scans(since: "datetime | None" = None) -> list["Scan"]:
         return list(result.scalars().all())
 
 
+# ── Pattern helpers (Agent 3) ─────────────────────────────────────────────────
+
+async def upsert_pattern(
+    pattern_type: str,
+    outcome_threshold: str | None,
+    sample_count: int,
+    avg_entry_mcap: float | None,
+    mcap_range_low: float | None,
+    mcap_range_high: float | None,
+    avg_liquidity: float | None,
+    min_liquidity: float | None,
+    avg_ai_score: float | None,
+    avg_rugcheck_score: float | None,
+    best_hours: str | None,
+    best_days: str | None,
+    confidence_score: float,
+) -> "Pattern":
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Pattern).where(Pattern.pattern_type == pattern_type)
+        )
+        p = result.scalar_one_or_none()
+        now = datetime.utcnow()
+        if p is None:
+            p = Pattern(
+                pattern_type=pattern_type,
+                outcome_threshold=outcome_threshold,
+                sample_count=sample_count,
+                avg_entry_mcap=avg_entry_mcap,
+                mcap_range_low=mcap_range_low,
+                mcap_range_high=mcap_range_high,
+                avg_liquidity=avg_liquidity,
+                min_liquidity=min_liquidity,
+                avg_ai_score=avg_ai_score,
+                avg_rugcheck_score=avg_rugcheck_score,
+                best_hours=best_hours,
+                best_days=best_days,
+                confidence_score=confidence_score,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(p)
+        else:
+            p.outcome_threshold  = outcome_threshold
+            p.sample_count       = sample_count
+            p.avg_entry_mcap     = avg_entry_mcap
+            p.mcap_range_low     = mcap_range_low
+            p.mcap_range_high    = mcap_range_high
+            p.avg_liquidity      = avg_liquidity
+            p.min_liquidity      = min_liquidity
+            p.avg_ai_score       = avg_ai_score
+            p.avg_rugcheck_score = avg_rugcheck_score
+            p.best_hours         = best_hours
+            p.best_days          = best_days
+            p.confidence_score   = confidence_score
+            p.updated_at         = now
+        await session.commit()
+        await session.refresh(p)
+        return p
+
+
+async def get_active_patterns() -> list["Pattern"]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Pattern).order_by(Pattern.confidence_score.desc())
+        )
+        return list(result.scalars().all())
+
+
+async def get_pattern_counts() -> dict:
+    async with AsyncSessionLocal() as session:
+        total   = (await session.execute(select(func.count(Pattern.id)))).scalar() or 0
+        winners = (await session.execute(
+            select(func.count(Pattern.id)).where(Pattern.pattern_type.like("winner%"))
+        )).scalar() or 0
+        rugs = (await session.execute(
+            select(func.count(Pattern.id)).where(Pattern.pattern_type.like("rug%"))
+        )).scalar() or 0
+    return {"total": total, "winners": winners, "rugs": rugs}
+
+
+async def get_closed_scans_for_analysis() -> list["Scan"]:
+    """Returns all closed scans with entry data, suitable for pattern analysis."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Scan).where(
+                Scan.status.in_(["win", "break_even", "loss"]),
+                Scan.entry_price.is_not(None),
+                Scan.peak_multiplier.is_not(None),
+            ).order_by(Scan.scanned_at.asc())
+        )
+        return list(result.scalars().all())
+
+
+async def get_tokens_by_mints(mints: list[str]) -> "dict[str, Token]":
+    """Batch-fetch Token rows by mint address. Returns {mint: Token}."""
+    if not mints:
+        return {}
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Token).where(Token.mint.in_(mints))
+        )
+        return {t.mint: t for t in result.scalars().all()}
+
+
 async def get_hub_stats() -> dict:
     """Returns aggregated stats for the /hub dashboard."""
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -957,18 +1088,41 @@ async def get_hub_stats() -> dict:
             .limit(1)
         )).scalar_one_or_none()
 
+        pattern_total = (await session.execute(
+            select(func.count(Pattern.id))
+        )).scalar() or 0
+
+        pattern_winners = (await session.execute(
+            select(func.count(Pattern.id)).where(Pattern.pattern_type.like("winner%"))
+        )).scalar() or 0
+
+        pattern_rugs = (await session.execute(
+            select(func.count(Pattern.id)).where(Pattern.pattern_type.like("rug%"))
+        )).scalar() or 0
+
+        last_pattern_engine = (await session.execute(
+            select(AgentLog)
+            .where(AgentLog.agent_name == "pattern_engine")
+            .order_by(AgentLog.run_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+
     return {
-        "scans_today":    scans_today,
-        "trades_today":   trades_today,
-        "today_pnl":      float(today_pnl),
-        "alltime_pnl":    float(alltime_pnl),
-        "win_rate":       win_rate,
-        "total_closed":   total_closed,
-        "recent_trades":  recent,
-        "token_count":    token_count,
-        "last_harvest":   last_harvest,
-        "wallet_total":   wallet_total,
-        "wallet_tier1":   wallet_tier1,
-        "wallet_tier2":   wallet_tier2,
-        "last_analyst":   last_analyst,
+        "scans_today":        scans_today,
+        "trades_today":       trades_today,
+        "today_pnl":          float(today_pnl),
+        "alltime_pnl":        float(alltime_pnl),
+        "win_rate":           win_rate,
+        "total_closed":       total_closed,
+        "recent_trades":      recent,
+        "token_count":        token_count,
+        "last_harvest":       last_harvest,
+        "wallet_total":       wallet_total,
+        "wallet_tier1":       wallet_tier1,
+        "wallet_tier2":       wallet_tier2,
+        "last_analyst":       last_analyst,
+        "pattern_total":      pattern_total,
+        "pattern_winners":    pattern_winners,
+        "pattern_rugs":       pattern_rugs,
+        "last_pattern_engine": last_pattern_engine,
     }

@@ -218,6 +218,20 @@ def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def _pattern_engine_line(last_run, total: int, winners: int, rugs: int) -> str:
+    if last_run is None:
+        return "✅ Pattern Engine — waiting for first run..."
+    elapsed_min = int((datetime.utcnow() - last_run.run_at).total_seconds() / 60)
+    if elapsed_min < 60:
+        age = f"{elapsed_min}min ago"
+    else:
+        age = f"{elapsed_min // 60}h ago"
+    return (
+        f"✅ Pattern Engine — {total} active patterns "
+        f"({winners} winner / {rugs} rug) | last run {age}"
+    )
+
+
 async def _build_hub_text(autotrade: bool) -> str:
     stats = await get_hub_stats()
 
@@ -228,12 +242,16 @@ async def _build_hub_text(autotrade: bool) -> str:
     win_rate     = stats["win_rate"]
     total_closed = stats["total_closed"]
     recent       = stats["recent_trades"]
-    token_count   = stats["token_count"]
-    last_harvest  = stats["last_harvest"]
-    wallet_total  = stats["wallet_total"]
-    wallet_tier1  = stats["wallet_tier1"]
-    wallet_tier2  = stats["wallet_tier2"]
-    last_analyst  = stats["last_analyst"]
+    token_count         = stats["token_count"]
+    last_harvest        = stats["last_harvest"]
+    wallet_total        = stats["wallet_total"]
+    wallet_tier1        = stats["wallet_tier1"]
+    wallet_tier2        = stats["wallet_tier2"]
+    last_analyst        = stats["last_analyst"]
+    pattern_total       = stats["pattern_total"]
+    pattern_winners     = stats["pattern_winners"]
+    pattern_rugs        = stats["pattern_rugs"]
+    last_pattern_engine = stats["last_pattern_engine"]
 
     at_status = "ON 🟢" if autotrade else "OFF 🔴"
 
@@ -273,7 +291,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         f"✅ Scanner — {scans_today} candidates today",
         harvest_line,
         analyst_line,
-        "🔧 Pattern Engine — _Building..._",
+        _pattern_engine_line(last_pattern_engine, pattern_total, pattern_winners, pattern_rugs),
         ce_line,
         "🔧 Learning Loop — _Building..._",
         "🔧 Chart Detector — _Building..._",
