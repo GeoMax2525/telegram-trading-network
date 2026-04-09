@@ -5,7 +5,11 @@ from datetime import datetime, timezone, timedelta
 
 from aiogram import Router, Bot, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.config import MAIN_GROUP_ID, ADMIN_IDS
 from bot.scanner import scan_token, fetch_current_market_cap, fetch_live_data, fetch_sol_price_usd
@@ -15,7 +19,7 @@ from database.models import (
     log_scan, get_leaderboard, get_break_evens_count, add_caller,
     get_open_scans, update_scan_pnl, get_scan_by_address, close_old_scans,
     get_signal_leaders, get_top_calls, get_top_calls_stats,
-    get_any_open_position_by_token,
+    get_any_open_position_by_token, get_hub_stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -191,6 +195,149 @@ async def _do_scan(message: Message, address: str) -> None:
         entry_price=entry_mc,
         entry_liquidity=entry_liq,
     )
+
+
+# ── /hub — Live Dashboard ─────────────────────────────────────────────────────
+
+_autotrade_enabled: bool = False
+
+
+def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔄 Refresh",       callback_data="hub:refresh"),
+        InlineKeyboardButton(text="🤖 Agent Details", callback_data="hub:agents"),
+        InlineKeyboardButton(text="👛 Top Wallets",   callback_data="hub:wallets"),
+    )
+    at_label = "⚡ Autotrade ON" if autotrade else "⚡ Autotrade OFF"
+    builder.row(
+        InlineKeyboardButton(text="📈 Trade History", callback_data="hub:history"),
+        InlineKeyboardButton(text=at_label,           callback_data="hub:autotrade"),
+        InlineKeyboardButton(text="⚙️ Settings",      callback_data="hub:settings"),
+    )
+    return builder.as_markup()
+
+
+async def _build_hub_text(autotrade: bool) -> str:
+    stats = await get_hub_stats()
+
+    scans_today  = stats["scans_today"]
+    trades_today = stats["trades_today"]
+    today_pnl    = stats["today_pnl"]
+    alltime_pnl  = stats["alltime_pnl"]
+    win_rate     = stats["win_rate"]
+    total_closed = stats["total_closed"]
+    recent       = stats["recent_trades"]
+
+    at_status = "ON 🟢" if autotrade else "OFF 🔴"
+
+    lines = [
+        "🔑 *LOWKEY ALPHA HUB*",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "🤖 *AGENTS*",
+        f"✅ Scanner — {scans_today} candidates today",
+        f"🔧 Harvester — _Building\\.\\.\\._",
+        f"🔧 Wallet Analyst — _Building\\.\\.\\._",
+        f"🔧 Pattern Engine — _Building\\.\\.\\._",
+        f"{'✅' if autotrade else '🔧'} Confidence Engine — {trades_today} auto\\-trades today",
+        f"🔧 Learning Loop — _Building\\.\\.\\._",
+        f"🔧 Chart Detector — _Building\\.\\.\\._",
+        f"⚡ Autotrade: *{at_status}*",
+        "",
+        "📊 *PERFORMANCE*",
+        f"Today: `{today_pnl:+.4f} SOL` \\| All Time: `{alltime_pnl:+.4f} SOL`",
+        f"Win Rate: `{win_rate}%` \\| Closed Trades: `{total_closed}`",
+        "",
+        "🔥 *TOP WALLETS*",
+        "_🔧 Wallet tracking not built yet_",
+        "",
+        "📈 *RECENT AUTO\\-TRADES*",
+    ]
+
+    if not recent:
+        lines.append("_No trades yet_")
+    else:
+        for pos in recent:
+            raw_name = pos.token_name or "Unknown"
+            name = raw_name.replace("\\", "\\\\").replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+            if pos.status == "closed" and pos.pnl_sol is not None:
+                icon   = "✅" if pos.pnl_sol >= 0 else "❌"
+                reason = {
+                    "tp_hit": "TP hit",
+                    "sl_hit": "SL hit",
+                    "manual": "manual close",
+                }.get(pos.close_reason or "", pos.close_reason or "closed")
+                mc_str  = _format_usd(pos.entry_mc) if pos.entry_mc else "?"
+                pnl_str = f"{pos.pnl_sol:+.4f} SOL"
+                lines.append(f"{icon} `{name}` — {reason}, `{pnl_str}` @ {mc_str} MC")
+            else:
+                mc_str = _format_usd(pos.entry_mc) if pos.entry_mc else "?"
+                lines.append(f"🟡 `{name}` — open @ {mc_str} MC")
+
+    lines.append("")
+    lines.append(f"_Updated: {datetime.utcnow().strftime('%H:%M:%S')} UTC_")
+
+    return "\n".join(lines)
+
+
+@router.message(Command("hub"))
+async def cmd_hub(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        await message.reply("⛔ `/hub` is only available in Callers HQ.")
+        return
+    text = await _build_hub_text(_autotrade_enabled)
+    await message.reply(text, parse_mode="MarkdownV2", reply_markup=_hub_keyboard(_autotrade_enabled))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("hub:"))
+async def cb_hub(callback: CallbackQuery):
+    global _autotrade_enabled
+    action = callback.data.split(":", 1)[1]
+
+    if action == "refresh":
+        await callback.answer("🔄 Refreshing…")
+        text = await _build_hub_text(_autotrade_enabled)
+        try:
+            await callback.message.edit_text(
+                text, parse_mode="MarkdownV2",
+                reply_markup=_hub_keyboard(_autotrade_enabled),
+            )
+        except Exception:
+            pass  # unchanged
+
+    elif action == "autotrade":
+        _autotrade_enabled = not _autotrade_enabled
+        status = "ON 🟢" if _autotrade_enabled else "OFF 🔴"
+        await callback.answer(f"⚡ Autotrade {status}")
+        text = await _build_hub_text(_autotrade_enabled)
+        await callback.message.edit_text(
+            text, parse_mode="MarkdownV2",
+            reply_markup=_hub_keyboard(_autotrade_enabled),
+        )
+
+    elif action == "agents":
+        await callback.answer(
+            "🔧 Agent Details: most agents are still being built.", show_alert=True
+        )
+
+    elif action == "wallets":
+        await callback.answer(
+            "🔧 Top Wallets: wallet tracking not built yet.", show_alert=True
+        )
+
+    elif action == "history":
+        await callback.answer(
+            "🔧 Trade History: full history view coming soon.", show_alert=True
+        )
+
+    elif action == "settings":
+        await callback.answer(
+            "⚙️ Use /keybot to manage your trading settings.", show_alert=True
+        )
+
+    else:
+        await callback.answer()
 
 
 # ── /start ────────────────────────────────────────────────────────────────────

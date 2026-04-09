@@ -682,3 +682,54 @@ async def get_recent_scans(limit: int = 20) -> list["Scan"]:
             select(Scan).order_by(Scan.scanned_at.desc()).limit(limit)
         )
         return list(result.scalars().all())
+
+
+async def get_hub_stats() -> dict:
+    """Returns aggregated stats for the /hub dashboard."""
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    async with AsyncSessionLocal() as session:
+        scans_today = (await session.execute(
+            select(func.count(Scan.id)).where(Scan.scanned_at >= today)
+        )).scalar() or 0
+
+        trades_today = (await session.execute(
+            select(func.count(Position.id)).where(Position.opened_at >= today)
+        )).scalar() or 0
+
+        today_pnl = (await session.execute(
+            select(func.coalesce(func.sum(Position.pnl_sol), 0.0))
+            .where(Position.closed_at >= today, Position.pnl_sol.is_not(None))
+        )).scalar() or 0.0
+
+        alltime_pnl = (await session.execute(
+            select(func.coalesce(func.sum(Position.pnl_sol), 0.0))
+            .where(Position.pnl_sol.is_not(None))
+        )).scalar() or 0.0
+
+        total_closed = (await session.execute(
+            select(func.count(Position.id))
+            .where(Position.status == "closed", Position.pnl_sol.is_not(None))
+        )).scalar() or 0
+
+        wins = (await session.execute(
+            select(func.count(Position.id))
+            .where(Position.status == "closed", Position.pnl_sol > 0)
+        )).scalar() or 0
+
+        win_rate = round(wins / total_closed * 100) if total_closed > 0 else 0
+
+        recent = list((await session.execute(
+            select(Position)
+            .order_by(Position.opened_at.desc())
+            .limit(5)
+        )).scalars().all())
+
+    return {
+        "scans_today":  scans_today,
+        "trades_today": trades_today,
+        "today_pnl":    float(today_pnl),
+        "alltime_pnl":  float(alltime_pnl),
+        "win_rate":     win_rate,
+        "total_closed": total_closed,
+        "recent_trades": recent,
+    }
