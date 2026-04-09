@@ -231,36 +231,38 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     at_status = "ON 🟢" if autotrade else "OFF 🔴"
 
+    ce_icon = "✅" if autotrade else "🔧"
+    ce_line = f"{ce_icon} Confidence Engine — {trades_today} auto-trades today"
+
     lines = [
         "🔑 *LOWKEY ALPHA HUB*",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
         "🤖 *AGENTS*",
         f"✅ Scanner — {scans_today} candidates today",
-        f"🔧 Harvester — _Building\\.\\.\\._",
-        f"🔧 Wallet Analyst — _Building\\.\\.\\._",
-        f"🔧 Pattern Engine — _Building\\.\\.\\._",
-        f"{'✅' if autotrade else '🔧'} Confidence Engine — {trades_today} auto\\-trades today",
-        f"🔧 Learning Loop — _Building\\.\\.\\._",
-        f"🔧 Chart Detector — _Building\\.\\.\\._",
+        "🔧 Harvester — _Building..._",
+        "🔧 Wallet Analyst — _Building..._",
+        "🔧 Pattern Engine — _Building..._",
+        ce_line,
+        "🔧 Learning Loop — _Building..._",
+        "🔧 Chart Detector — _Building..._",
         f"⚡ Autotrade: *{at_status}*",
         "",
         "📊 *PERFORMANCE*",
-        f"Today: `{today_pnl:+.4f} SOL` \\| All Time: `{alltime_pnl:+.4f} SOL`",
-        f"Win Rate: `{win_rate}%` \\| Closed Trades: `{total_closed}`",
+        f"Today: `{today_pnl:+.4f} SOL` | All Time: `{alltime_pnl:+.4f} SOL`",
+        f"Win Rate: `{win_rate}%` | Closed Trades: `{total_closed}`",
         "",
         "🔥 *TOP WALLETS*",
         "_🔧 Wallet tracking not built yet_",
         "",
-        "📈 *RECENT AUTO\\-TRADES*",
+        "📈 *RECENT AUTO-TRADES*",
     ]
 
     if not recent:
         lines.append("_No trades yet_")
     else:
         for pos in recent:
-            raw_name = pos.token_name or "Unknown"
-            name = raw_name.replace("\\", "\\\\").replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+            name = (pos.token_name or "Unknown").replace("_", "\\_")
             if pos.status == "closed" and pos.pnl_sol is not None:
                 icon   = "✅" if pos.pnl_sol >= 0 else "❌"
                 reason = {
@@ -287,7 +289,7 @@ async def cmd_hub(message: Message):
         await message.reply("⛔ `/hub` is only available in Callers HQ.")
         return
     text = await _build_hub_text(_autotrade_enabled)
-    await message.reply(text, parse_mode="MarkdownV2", reply_markup=_hub_keyboard(_autotrade_enabled))
+    await message.reply(text, parse_mode="Markdown", reply_markup=_hub_keyboard(_autotrade_enabled))
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("hub:"))
@@ -300,7 +302,7 @@ async def cb_hub(callback: CallbackQuery):
         text = await _build_hub_text(_autotrade_enabled)
         try:
             await callback.message.edit_text(
-                text, parse_mode="MarkdownV2",
+                text, parse_mode="Markdown",
                 reply_markup=_hub_keyboard(_autotrade_enabled),
             )
         except Exception:
@@ -312,7 +314,7 @@ async def cb_hub(callback: CallbackQuery):
         await callback.answer(f"⚡ Autotrade {status}")
         text = await _build_hub_text(_autotrade_enabled)
         await callback.message.edit_text(
-            text, parse_mode="MarkdownV2",
+            text, parse_mode="Markdown",
             reply_markup=_hub_keyboard(_autotrade_enabled),
         )
 
