@@ -60,7 +60,8 @@ class Token(Base):
     name            = Column(String(128), nullable=True)
     symbol          = Column(String(32),  nullable=True)
     price_usd       = Column(Float,       nullable=True)
-    market_cap      = Column(Float,       nullable=True)
+    market_cap      = Column(Float,       nullable=True)   # current/last known MC
+    launch_mc       = Column(Float,       nullable=True)   # MC when first discovered
     liquidity_usd   = Column(Float,       nullable=True)
     volume_24h      = Column(Float,       nullable=True)
     rugcheck_score  = Column(Integer,     nullable=True)   # 0-1000, higher = safer
@@ -367,6 +368,7 @@ _NEW_TOKEN_COLS = [
     ("social_links",    "TEXT"),
     ("graduated",       "BOOLEAN"),
     ("reply_count",     "INTEGER"),
+    ("launch_mc",       "REAL"),
 ]
 
 async def init_db() -> None:
@@ -973,6 +975,7 @@ async def save_token(
             symbol=symbol,
             price_usd=price_usd,
             market_cap=market_cap,
+            launch_mc=market_cap,  # snapshot MC at first discovery
             liquidity_usd=liquidity_usd,
             volume_24h=volume_24h,
             rugcheck_score=rugcheck_score,
@@ -1007,12 +1010,15 @@ async def get_all_tokens(limit: int = 500) -> list["Token"]:
 
 
 async def update_token_market_cap(mint: str, market_cap: float) -> None:
-    """Update a token's market cap."""
+    """Update a token's current market cap. Also sets launch_mc if not already set."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Token).where(Token.mint == mint))
         tok = result.scalar_one_or_none()
         if tok:
             tok.market_cap = market_cap
+            # Set launch_mc if it was never captured
+            if not tok.launch_mc and market_cap > 0:
+                tok.launch_mc = market_cap
             tok.last_updated_at = datetime.utcnow()
             await session.commit()
 

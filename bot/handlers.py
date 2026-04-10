@@ -1332,6 +1332,73 @@ async def cmd_deepanalyze(message: Message):
         await status.edit_text(f"Deep analysis failed: {exc}", parse_mode=None)
 
 
+# ── /dbcheck — Inspect token database ─────────────────────────────────────────
+
+@router.message(Command("dbcheck"))
+async def cmd_dbcheck(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    from database.models import get_all_tokens, AsyncSessionLocal, select, func, Token
+
+    async with AsyncSessionLocal() as session:
+        total = (await session.execute(select(func.count(Token.mint)))).scalar() or 0
+        has_mc = (await session.execute(
+            select(func.count(Token.mint)).where(Token.market_cap > 0)
+        )).scalar() or 0
+        has_launch = (await session.execute(
+            select(func.count(Token.mint)).where(Token.launch_mc > 0)
+        )).scalar() or 0
+        no_mc = total - has_mc
+
+        # Sample 5 tokens with MC
+        samples_mc = (await session.execute(
+            select(Token).where(Token.market_cap > 0).order_by(Token.first_seen_at.desc()).limit(5)
+        )).scalars().all()
+
+        # Sample 5 tokens without MC
+        samples_nomc = (await session.execute(
+            select(Token).where(Token.market_cap.is_(None) | (Token.market_cap == 0))
+            .order_by(Token.first_seen_at.desc()).limit(5)
+        )).scalars().all()
+
+    lines = [
+        "🔍 DATABASE CHECK",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"Total tokens: {total}",
+        f"With market_cap > 0: {has_mc}",
+        f"With launch_mc > 0: {has_launch}",
+        f"No market_cap: {no_mc}",
+        "",
+        "Tokens WITH MC (newest 5):",
+    ]
+    for t in samples_mc:
+        lmc = getattr(t, "launch_mc", None)
+        lines.append(f"  {(t.name or t.symbol or '?')[:15]} | MC: ${t.market_cap or 0:,.0f} | Launch: ${lmc or 0:,.0f} | {t.source or '?'}")
+
+    lines.append("")
+    lines.append("Tokens WITHOUT MC (newest 5):")
+    for t in samples_nomc:
+        lines.append(f"  {(t.name or t.symbol or '?')[:15]} | {t.source or '?'} | {t.mint[:12]}...")
+
+    # Fetch live MC for the first 3 tokens with MC
+    lines.append("")
+    lines.append("Live DexScreener check (3 tokens):")
+    for t in samples_mc[:3]:
+        pair = await fetch_token_data(t.mint)
+        if pair:
+            m = parse_token_metrics(pair)
+            live_mc = m.get("market_cap", 0) or 0
+            stored = t.market_cap or 0
+            lmc = getattr(t, "launch_mc", None) or 0
+            mult = live_mc / lmc if lmc > 0 else 0
+            lines.append(f"  {(t.name or '?')[:12]} | Stored: ${stored:,.0f} | Launch: ${lmc:,.0f} | Live: ${live_mc:,.0f} | {mult:.1f}x")
+        else:
+            lines.append(f"  {(t.name or '?')[:12]} | Not found on DexScreener")
+
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /backfill — One-time token backfill ───────────────────────────────────────
 
 @router.message(Command("backfill"))
@@ -1371,18 +1438,21 @@ async def _run_backfill(bot, status_msg) -> None:
                 if not current_mc:
                     continue
 
-                # Update token MC in DB
+                # Update current MC in DB (also sets launch_mc if null)
                 await update_token_market_cap(tok.mint, current_mc)
                 updated += 1
 
-                # Calculate multiple vs first seen MC
-                launch_mc = tok.market_cap or current_mc
-                if launch_mc > 0:
-                    multiple = current_mc / launch_mc
-                else:
-                    multiple = 1.0
+                # Use launch_mc if available, otherwise stored market_cap
+                launch_mc = getattr(tok, "launch_mc", None) or tok.market_cap or 0
 
-                # Winner: 2x+ from first seen MC
+                # If still no launch MC, use current as baseline (first time seeing this token)
+                if launch_mc <= 0:
+                    launch_mc = current_mc  # can't calculate multiple without baseline
+                    continue
+
+                multiple = current_mc / launch_mc if launch_mc > 0 else 1.0
+
+                # Winner: 2x+ from launch MC
                 if multiple >= 2.0:
                     winners_found += 1
                     name = tok.name or tok.symbol or tok.mint[:12]
