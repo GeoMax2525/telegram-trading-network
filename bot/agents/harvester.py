@@ -32,9 +32,11 @@ PUMPFUN_DETAIL   = "https://frontend-api.pump.fun/coins/{mint}"
 RUGCHECK_URL     = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 
 # WebSocket endpoints — tried in order
-PUMPDEV_WS       = "wss://pumpdev.io/ws"
-PUMPPORTAL_WS    = "wss://pumpportal.fun/api/data"
-PUMP_PROGRAM_ID  = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+PUMPDEV_WS         = "wss://pumpdev.io/ws"
+PUMPPORTAL_WS      = "wss://pumpportal.fun/api/data"
+PUMP_PROGRAM_ID    = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+PUMPSWAP_PROGRAM   = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q=pumpswap"
 
 POLL_INTERVAL    = 60   # seconds
 STARTUP_DELAY    = 20   # seconds after bot start
@@ -484,6 +486,184 @@ async def _ws_helius(session: aiohttp.ClientSession) -> None:
                 break
 
 
+# ── PumpSwap Helius WebSocket monitor ────────────────────────────────────────
+
+async def _pumpswap_ws_loop() -> None:
+    """
+    Separate Helius WebSocket that monitors PumpSwap program for new pool creation.
+    Runs independently alongside the main WS cascade.
+    """
+    await asyncio.sleep(STARTUP_DELAY + 10)  # stagger after main WS
+
+    while True:
+        try:
+            ws_url = _helius_ws_url()
+            logger.info("Harvester PumpSwap WS: connecting to Helius...")
+
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(
+                    ws_url,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    heartbeat=30,
+                ) as ws:
+                    # Subscribe to PumpSwap program logs
+                    await ws.send_json({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "logsSubscribe",
+                        "params": [
+                            {"mentions": [PUMPSWAP_PROGRAM]},
+                            {"commitment": "confirmed"},
+                        ],
+                    })
+                    logger.info("Harvester PumpSwap WS: subscribed to %s", PUMPSWAP_PROGRAM[:12])
+
+                    debug_count = 0
+                    async for msg in ws:
+                        if msg.type != aiohttp.WSMsgType.TEXT:
+                            if msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                                break
+                            continue
+
+                        try:
+                            data = json.loads(msg.data)
+
+                            # Debug first few messages
+                            if debug_count < 3:
+                                debug_count += 1
+                                logger.info("Harvester PumpSwap WS RAW #%d: %s",
+                                            debug_count, msg.data[:400])
+
+                            result = data.get("params", {}).get("result", {})
+                            value = result.get("value", {})
+                            logs = value.get("logs") or []
+
+                            if not logs:
+                                continue
+
+                            # Look for pool creation events
+                            is_pool_create = any(
+                                "CreatePool" in log
+                                or "initialize" in log.lower()
+                                or "InitializePool" in log
+                                for log in logs
+                            )
+                            if not is_pool_create:
+                                continue
+
+                            # Extract mint addresses from program logs
+                            mints_found = []
+                            for log in logs:
+                                parts = log.split()
+                                for part in parts:
+                                    if 32 <= len(part) <= 44 and part.isalnum():
+                                        mints_found.append(part)
+
+                            logger.info("Harvester PumpSwap: pool creation detected, candidates=%s",
+                                        [m[:12] for m in mints_found[:5]])
+
+                            for mint in mints_found:
+                                if mint == PUMPSWAP_PROGRAM:
+                                    continue
+                                if await token_exists(mint):
+                                    continue
+
+                                pair = await fetch_token_data(mint)
+                                if not pair:
+                                    continue
+
+                                metrics = parse_token_metrics(pair)
+                                mcap = metrics.get("market_cap")
+                                if not mcap or mcap < 1:
+                                    continue
+
+                                name = metrics.get("name", "Unknown")
+                                symbol = metrics.get("symbol", "???")
+
+                                await save_token(
+                                    mint=mint, name=name, symbol=symbol,
+                                    price_usd=metrics.get("price_usd"),
+                                    market_cap=mcap,
+                                    liquidity_usd=metrics.get("liquidity_usd"),
+                                    volume_24h=metrics.get("volume_24h"),
+                                    source="pumpswap",
+                                )
+                                state.harvester_pumpswap_today += 1
+                                logger.info(
+                                    "Harvester[pumpswap]: saved %s (%s) MC=%s liq=%s",
+                                    symbol, mint[:12],
+                                    f"${mcap/1000:.0f}K" if mcap else "?",
+                                    f"${metrics.get('liquidity_usd', 0)/1000:.0f}K" if metrics.get('liquidity_usd') else "?",
+                                )
+                                break  # one token per pool event
+
+                        except (json.JSONDecodeError, TypeError, KeyError):
+                            pass
+
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning("Harvester PumpSwap WS error: %s", exc)
+
+        logger.info("Harvester PumpSwap WS: reconnecting in %ds...", WS_RECONNECT)
+        await asyncio.sleep(WS_RECONNECT)
+
+
+# ── PumpSwap DexScreener polling ─────────────────────────────────────────────
+
+async def _harvest_pumpswap_dex() -> tuple[int, int]:
+    """Poll DexScreener for new PumpSwap pairs."""
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as session:
+            async with session.get(DEXSCREENER_SEARCH) as resp:
+                if resp.status != 200:
+                    return 0, 0
+                data = await resp.json(content_type=None)
+    except Exception as exc:
+        logger.debug("Harvester: PumpSwap DexScreener search failed: %s", exc)
+        return 0, 0
+
+    pairs = data.get("pairs") or []
+    # Filter to PumpSwap pairs on Solana
+    pumpswap_pairs = [
+        p for p in pairs
+        if p.get("chainId") == "solana"
+        and p.get("dexId") in ("pumpswap", "pump-swap", "pumpamm")
+    ]
+
+    found = len(pumpswap_pairs)
+    saved = 0
+
+    for pair in pumpswap_pairs:
+        mint = pair.get("baseToken", {}).get("address")
+        if not mint or await token_exists(mint):
+            continue
+
+        metrics = parse_token_metrics(pair)
+        name = metrics.get("name", "Unknown")
+        symbol = metrics.get("symbol", "???")
+
+        await save_token(
+            mint=mint, name=name, symbol=symbol,
+            price_usd=metrics.get("price_usd"),
+            market_cap=metrics.get("market_cap"),
+            liquidity_usd=metrics.get("liquidity_usd"),
+            volume_24h=metrics.get("volume_24h"),
+            source="pumpswap",
+        )
+        saved += 1
+        state.harvester_pumpswap_today += 1
+        logger.info(
+            "Harvester[pumpswap-dex]: saved %s (%s) MC=%s",
+            symbol, mint[:12],
+            f"${metrics.get('market_cap', 0)/1000:.0f}K" if metrics.get('market_cap') else "?",
+        )
+
+    return found, saved
+
+
 # ── WebSocket cascade ────────────────────────────────────────────────────────
 
 WS_SOURCES = [
@@ -658,21 +838,28 @@ async def _polling_loop() -> None:
                 pump_found, pump_saved = await _harvest_pumpfun_poll()
                 pump_source = "poll"
 
-            total_found = dex_found + pump_found
-            total_saved = dex_saved + pump_saved
+            # PumpSwap DexScreener polling (always runs)
+            ps_found, ps_saved = await _harvest_pumpswap_dex()
+
+            total_found = dex_found + pump_found + ps_found
+            total_saved = dex_saved + pump_saved + ps_saved
 
             ws_status = "connected" if state.harvester_ws_connected else "disconnected"
             await log_agent_run(
                 agent_name="harvester",
                 tokens_found=total_found,
                 tokens_saved=total_saved,
-                notes=f"dex={dex_found}/{dex_saved} pump({pump_source})={pump_found}/{pump_saved} ws={ws_status}",
+                notes=(
+                    f"dex={dex_found}/{dex_saved} pump({pump_source})={pump_found}/{pump_saved} "
+                    f"pumpswap={ps_found}/{ps_saved} ws={ws_status}"
+                ),
             )
 
             if total_saved > 0:
                 logger.info(
-                    "Harvester poll — dex:%d/%d pump(%s):%d/%d ws=%s",
-                    dex_found, dex_saved, pump_source, pump_found, pump_saved, ws_status,
+                    "Harvester poll — dex:%d/%d pump(%s):%d/%d pumpswap:%d/%d ws=%s",
+                    dex_found, dex_saved, pump_source, pump_found, pump_saved,
+                    ps_found, ps_saved, ws_status,
                 )
 
         except Exception as exc:
@@ -685,14 +872,16 @@ async def _polling_loop() -> None:
 
 async def harvester_loop() -> None:
     """
-    Starts both the WebSocket cascade and the polling loop concurrently.
-    WebSocket cascade: pumpdev.io → PumpPortal → Helius (auto-failover).
-    Polling: DexScreener always + Pump.fun REST when WS is down.
+    Starts three concurrent loops:
+    1. WebSocket cascade: pumpdev → PumpPortal → Helius (new pump.fun tokens)
+    2. PumpSwap Helius WS: monitors PumpSwap program for new pool creations
+    3. Polling: DexScreener + Pump.fun REST fallback + PumpSwap DexScreener
     """
-    logger.info("Harvester agent starting — WebSocket cascade + polling mode")
+    logger.info("Harvester agent starting — WebSocket cascade + PumpSwap + polling")
 
     await asyncio.gather(
         _websocket_loop(),
+        _pumpswap_ws_loop(),
         _polling_loop(),
         return_exceptions=True,
     )

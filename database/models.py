@@ -932,6 +932,19 @@ async def get_pumpfun_count_today() -> int:
         return result.scalar() or 0
 
 
+async def get_pumpswap_count_today() -> int:
+    """Returns number of PumpSwap tokens harvested today."""
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(Token.mint)).where(
+                Token.source == "pumpswap",
+                Token.first_seen_at >= today,
+            )
+        )
+        return result.scalar() or 0
+
+
 async def get_token_by_mint(mint: str) -> "Token | None":
     """Returns a Token row by mint address, or None."""
     async with AsyncSessionLocal() as session:

@@ -31,3 +31,4 @@ harvester_ws_connected:      bool            = False
 harvester_ws_source:         str             = "none"  # pumpdev / pumpportal / helius / none
 harvester_ws_tokens_today:   int             = 0
 harvester_poll_tokens_today: int             = 0
+harvester_pumpswap_today:    int             = 0

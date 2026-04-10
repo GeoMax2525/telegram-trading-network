@@ -23,7 +23,7 @@ from database.models import (
     get_any_open_position_by_token, get_hub_stats, get_top_wallets,
     get_candidate_stats_today, get_all_trade_params,
     get_chart_pattern_stats_today, get_chart_pattern_win_rates,
-    get_pumpfun_count_today,
+    get_pumpfun_count_today, get_pumpswap_count_today,
 )
 
 logger = logging.getLogger(__name__)
@@ -314,12 +314,13 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     # Harvester last-run label
     pump_today = await get_pumpfun_count_today()
+    pumpswap_today = await get_pumpswap_count_today()
     ws_connected = state.harvester_ws_connected
     ws_source = state.harvester_ws_source
     ws_icon = "🟢" if ws_connected else "🔴"
     ws_label = ws_source if ws_connected else "Polling"
     ws_count = state.harvester_ws_tokens_today
-    poll_count = state.harvester_poll_tokens_today
+    ps_count = state.harvester_pumpswap_today
     if last_harvest is None:
         harvest_line = f"✅ Harvester — {ws_icon} {ws_label} | waiting for first run..."
     else:
@@ -328,7 +329,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         )
         harvest_line = (
             f"✅ Harvester — {ws_icon} {ws_label} | {token_count} tokens | "
-            f"pump: {ws_count} ws / {poll_count} poll | last {elapsed_min}min ago"
+            f"pump: {pump_today} | pumpswap: {pumpswap_today} | last {elapsed_min}min ago"
         )
 
     # Wallet Analyst last-run label
