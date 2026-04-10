@@ -232,9 +232,19 @@ def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🤖 Agent Details", callback_data="hub:agents"),
         InlineKeyboardButton(text="👛 Top Wallets",   callback_data="hub:wallets"),
     )
+
+    # Paper trade toggle: OFF ↔ PAPER. Live mode only via /autotrade live.
+    m = state.trade_mode
+    if m == "live":
+        toggle_label = "🟢 Live Trading: ON"
+    elif m == "paper":
+        toggle_label = "📋 Paper Trade: ON"
+    else:
+        toggle_label = "📋 Paper Trade: OFF"
+
     builder.row(
         InlineKeyboardButton(text="📈 Trade History", callback_data="hub:history"),
-        InlineKeyboardButton(text=f"⚡ Mode: {_mode_label()}", callback_data="hub:cycle_mode"),
+        InlineKeyboardButton(text=toggle_label,       callback_data="hub:toggle_paper"),
         InlineKeyboardButton(text="⚙️ Settings",      callback_data="hub:settings"),
     )
     builder.row(
@@ -472,12 +482,20 @@ async def cb_hub(callback: CallbackQuery):
         except Exception:
             pass  # unchanged
 
-    elif action == "cycle_mode":
-        # Cycle: off → paper → live → off
-        cycle = {"off": "paper", "paper": "live", "live": "off"}
-        state.trade_mode = cycle.get(state.trade_mode, "off")
-        state.autotrade_enabled = (state.trade_mode == "live")
-        await callback.answer(f"⚡ Mode: {_mode_label()}")
+    elif action == "toggle_paper":
+        # Toggle between OFF ↔ PAPER. If currently LIVE, turn off.
+        if state.trade_mode == "paper":
+            state.trade_mode = "off"
+            state.autotrade_enabled = False
+            await callback.answer("📋 Paper trading OFF")
+        elif state.trade_mode == "live":
+            state.trade_mode = "off"
+            state.autotrade_enabled = False
+            await callback.answer("🟢 Live trading OFF")
+        else:
+            state.trade_mode = "paper"
+            state.autotrade_enabled = False
+            await callback.answer("📋 Paper trading ON")
         text = await _build_hub_text(state.autotrade_enabled)
         await callback.message.edit_text(
             text, parse_mode="Markdown",
