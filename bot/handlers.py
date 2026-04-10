@@ -1420,10 +1420,14 @@ async def _run_backfill(bot, status_msg) -> None:
         winners_found = 0
         wallets_added = 0
         updated = 0
+        repaired = 0
         errors = 0
 
+        # Count tokens needing repair
+        needs_repair = sum(1 for t in tokens if not getattr(t, "launch_mc", None))
         await status_msg.edit_text(
-            f"🔄 Backfilling {total} tokens...", parse_mode=None,
+            f"🔄 Backfilling {total} tokens ({needs_repair} need launch_mc repair)...",
+            parse_mode=None,
         )
 
         for i, tok in enumerate(tokens):
@@ -1442,12 +1446,12 @@ async def _run_backfill(bot, status_msg) -> None:
                 await update_token_market_cap(tok.mint, current_mc)
                 updated += 1
 
-                # Use launch_mc if available, otherwise stored market_cap
+                # Determine launch MC
                 launch_mc = getattr(tok, "launch_mc", None) or tok.market_cap or 0
 
-                # If still no launch MC, use current as baseline (first time seeing this token)
                 if launch_mc <= 0:
-                    launch_mc = current_mc  # can't calculate multiple without baseline
+                    # No launch MC — set current as baseline for future comparison
+                    repaired += 1
                     continue
 
                 multiple = current_mc / launch_mc if launch_mc > 0 else 1.0
@@ -1530,10 +1534,13 @@ async def _run_backfill(bot, status_msg) -> None:
             "✅ BACKFILL COMPLETE",
             "━━━━━━━━━━━━━━━━━━━━",
             f"Tokens processed: {updated}/{total}",
+            f"Launch MC repaired: {repaired} (set baseline for next run)",
             f"Winners found (2x+): {winners_found}",
             f"New wallets added: {wallets_added}",
             f"Patterns saved: {winners_found}",
             f"Errors: {errors}",
+            "",
+            "Run /backfill again to find winners among repaired tokens.",
         ])
 
         await status_msg.edit_text(report, parse_mode=None)

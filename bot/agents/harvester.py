@@ -89,6 +89,11 @@ async def _save_pumpfun_token(token: dict, via: str) -> bool:
     vtok = float(token.get("virtual_token_reserves") or 0)
     price_usd = (vsol / vtok) if vsol > 0 and vtok > 0 else None
 
+    # Estimate MC from reserves if not provided (pump.fun bonding curve tokens)
+    if not market_cap and vsol > 0:
+        # Rough SOL-based MC estimate: vsol * 2 * SOL_price (~$150)
+        market_cap = vsol * 2 * 150 / 1e9 if vsol > 1e9 else vsol * 300
+
     bonding_curve = float(token.get("king_of_the_hill_progress") or 0)
     reply_count   = int(token.get("reply_count") or 0)
     graduated     = bool(token.get("raydium_pool"))

@@ -1714,7 +1714,7 @@ async def get_chart_pattern_stats_today() -> dict:
         confirmed = (await session.execute(
             select(func.count(Candidate.id)).where(
                 Candidate.created_at >= today,
-                Candidate.chart_score >= 50,
+                Candidate.chart_score >= 40,
                 Candidate.chart_pattern.is_not(None),
                 Candidate.chart_pattern != "none",
             )

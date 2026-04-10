@@ -244,6 +244,12 @@ async def run_once() -> tuple[int, int]:
         s for s in scans
         if s.close_reason in ("rug_mc", "rug_liquidity")
     ]
+    losses      = [s for s in scans if (s.peak_multiplier or 0) < 2 and s.close_reason not in ("rug_mc", "rug_liquidity")]
+
+    logger.info(
+        "Pattern Engine: %d scans → %d winners(2x) %d winners(5x) %d winners(10x) %d rugs %d losses",
+        len(scans), len(winners_2x), len(winners_5x), len(winners_10x), len(rugs), len(losses),
+    )
 
     patterns_saved = 0
 
