@@ -432,29 +432,39 @@ async def _build_hub_text(autotrade: bool) -> str:
                 f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | Avg: {w.avg_multiple:.1f}x | Tier {w.tier}"
             )
 
+    # Show recent AI trades (paper or live depending on mode)
+    trade_label = "paper" if state.trade_mode == "paper" else "live"
     lines += [
         "",
-        "📈 *RECENT AUTO-TRADES*",
+        f"📈 *RECENT AI TRADES ({trade_label})*",
     ]
 
-    if not recent:
-        lines.append("_No trades yet_")
-    else:
-        for pos in recent:
-            name = (pos.token_name or "Unknown").replace("_", "\\_")
-            if pos.status == "closed" and pos.pnl_sol is not None:
-                icon   = "✅" if pos.pnl_sol >= 0 else "❌"
-                reason = {
-                    "tp_hit": "TP hit",
-                    "sl_hit": "SL hit",
-                    "manual": "manual close",
-                }.get(pos.close_reason or "", pos.close_reason or "closed")
-                mc_str  = _format_usd(pos.entry_mc) if pos.entry_mc else "?"
-                pnl_str = f"{pos.pnl_sol:+.4f} SOL"
-                lines.append(f"{icon} `{name}` — {reason}, `{pnl_str}` @ {mc_str} MC")
+    if state.trade_mode == "paper" and paper_stats["recent"]:
+        for pt in paper_stats["recent"][:5]:
+            name = (pt.token_name or "?").replace("_", "\\_")
+            flag = ""
+            if pt.sold_too_early:
+                flag = " 😬"
+            elif pt.sold_too_late:
+                flag = " ⏰"
+            if pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
+                lines.append(f"✅ `{name}` — {pt.peak_multiple or 0:.1f}x, `+{pt.paper_pnl_sol:.4f} SOL`{flag}")
+            elif pt.status == "closed":
+                lines.append(f"❌ `{name}` — {pt.close_reason}, `{pt.paper_pnl_sol or 0:.4f} SOL`{flag}")
             else:
-                mc_str = _format_usd(pos.entry_mc) if pos.entry_mc else "?"
+                mc_str = _format_usd(pt.entry_mc) if pt.entry_mc else "?"
                 lines.append(f"🟡 `{name}` — open @ {mc_str} MC")
+    elif recent:
+        for pos in recent[:5]:
+            name = (pos.token_name or "?").replace("_", "\\_")
+            if pos.status == "closed" and pos.pnl_sol is not None:
+                icon = "✅" if pos.pnl_sol >= 0 else "❌"
+                reason = {"tp_hit": "TP", "sl_hit": "SL"}.get(pos.close_reason or "", pos.close_reason or "")
+                lines.append(f"{icon} `{name}` — {reason}, `{pos.pnl_sol:+.4f} SOL`")
+            else:
+                lines.append(f"🟡 `{name}` — open")
+    else:
+        lines.append("_No AI trades yet_")
 
     lines.append("")
     lines.append(f"_Updated: {datetime.utcnow().strftime('%H:%M:%S')} UTC_")
