@@ -237,7 +237,21 @@ async def _ws_pumpdev(session: aiohttp.ClientSession) -> None:
         state.harvester_ws_source = "pumpdev"
         logger.info("Harvester WS: connected to pumpdev.io")
 
+        # Try common subscription messages — pumpdev may need one
+        for sub_msg in [
+            '{"method": "subscribeNewToken"}',
+            '{"action": "subscribe", "channel": "newTokens"}',
+            '{"type": "subscribe", "topic": "new_token"}',
+        ]:
+            try:
+                await ws.send_str(sub_msg)
+                logger.info("Harvester WS[pumpdev]: sent subscribe: %s", sub_msg)
+            except Exception:
+                pass
+
+        msg_count = 0
         async for msg in ws:
+            msg_count += 1
             if msg.type == aiohttp.WSMsgType.TEXT:
                 raw_text = msg.data
 
@@ -302,7 +316,17 @@ async def _ws_pumpdev(session: aiohttp.ClientSession) -> None:
                     )
 
             elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
-                logger.warning("Harvester WS[pumpdev]: connection closed/error")
+                logger.warning("Harvester WS[pumpdev]: connection closed/error after %d msgs", msg_count)
+                break
+
+            # If we've received 50+ messages but saved 0 tokens, this source
+            # is sending data we can't parse — bail and try next source
+            if msg_count >= 50 and state.harvester_ws_tokens_today == 0:
+                logger.warning(
+                    "Harvester WS[pumpdev]: %d msgs received but 0 tokens saved — "
+                    "format mismatch, trying next source",
+                    msg_count,
+                )
                 break
 
 

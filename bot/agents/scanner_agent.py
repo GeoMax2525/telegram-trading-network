@@ -441,17 +441,30 @@ async def _evaluate_candidate(
     # Rugcheck
     rc_data = await _fetch_rugcheck(mint)
     if not _passes_rug_filter(rc_data, mcap, liquidity):
-        logger.debug("Scanner: %s filtered out (rug/range)", mint[:12])
+        # Log specific reason for rejection
+        if not (MIN_MCAP <= mcap <= MAX_MCAP):
+            logger.info("Scanner REJECTED %s: mcap $%.0f outside $%d–$%d", name, mcap, MIN_MCAP, MAX_MCAP)
+        elif liquidity < MIN_LIQUIDITY:
+            logger.info("Scanner REJECTED %s: liquidity $%.0f < $%d", name, liquidity, MIN_LIQUIDITY)
+        elif rc_data:
+            rc_score_val = rc_data.get("score", 0)
+            risks = {r.get("name", "").lower() for r in (rc_data.get("risks") or [])}
+            flagged = risks & HIGH_RISK_FLAGS
+            if rc_score_val < MIN_RUGCHECK:
+                logger.info("Scanner REJECTED %s: rugcheck %d < %d", name, rc_score_val, MIN_RUGCHECK)
+            elif flagged:
+                logger.info("Scanner REJECTED %s: rug flags %s", name, flagged)
         return None
 
     # AI score via full scan_token
     scan_data = await scan_token(mint)
     if scan_data is None:
+        logger.info("Scanner REJECTED %s: scan_token returned None (API fail)", name)
         return None
     ai_score = scan_data.get("total", 0)
 
     if ai_score < MIN_AI_SCORE:
-        logger.debug("Scanner: %s filtered out (AI score %.0f < %d)", mint[:12], ai_score, MIN_AI_SCORE)
+        logger.info("Scanner REJECTED %s: AI score %.0f < %d", name, ai_score, MIN_AI_SCORE)
         return None
 
     # Pattern match
@@ -531,14 +544,26 @@ async def run_once() -> tuple[int, int]:
         return_exceptions=True,
     )
 
+    # Log evaluation results summary
+    eval_none = sum(1 for r in evaluated if r is None)
+    eval_exc = sum(1 for r in evaluated if isinstance(r, Exception))
+    eval_ok = sum(1 for r in evaluated if isinstance(r, dict))
+    logger.info(
+        "Scanner: evaluation results — ok=%d rejected=%d errors=%d",
+        eval_ok, eval_none, eval_exc,
+    )
+    for r in evaluated:
+        if isinstance(r, Exception):
+            logger.warning("Scanner: evaluation exception: %s", r)
+
     queued = 0
     for result in evaluated:
         if not isinstance(result, dict):
             continue
-        if result["match_score"] < 50:
-            logger.debug(
-                "Scanner: %s match_score=%.0f < 50 — skipped",
-                result["mint"][:12], result["match_score"],
+        if result["match_score"] < 30:
+            logger.info(
+                "Scanner REJECTED %s: match_score=%.0f < 30",
+                result.get("name", result["mint"][:12]), result["match_score"],
             )
             continue
 
