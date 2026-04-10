@@ -51,6 +51,7 @@ from database.models import (
     set_param,
     get_all_params,
     get_recent_param_changes,
+    get_post_close_stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -518,6 +519,28 @@ async def _auto_adjust_params(
             await set_param("size_confidence_80", new80,
                             f"Low WR {recent_wr:.0%} — decreasing high-conf size", total_analyzed, recent_wr)
             changes.append(f"size_80: {cur80:.0f}%→{new80:.0f}%")
+
+    # ── Post-close learning: sold too early / too late ───────────────
+    pc = await get_post_close_stats()
+    if pc["total_tracked"] >= 5:
+        # If selling too early > 40%: increase TP
+        if pc["early_pct"] > 40:
+            for ptype in PATTERN_TYPES:
+                tp_params = await get_all_trade_params()
+                for tp_p in tp_params:
+                    if tp_p.pattern_type == ptype:
+                        new_tp = min(10.0, tp_p.optimal_tp_x + 0.5)
+                        if new_tp != tp_p.optimal_tp_x:
+                            await set_param(f"tp_adjust_{ptype}", new_tp,
+                                            f"Sold too early {pc['early_pct']}% — raising TP",
+                                            total_analyzed, recent_wr)
+                            changes.append(f"TP {ptype}: +0.5x (sold early {pc['early_pct']}%)")
+                        break
+
+        # If selling too late > 30%: tighten SL
+        if pc["late_pct"] > 30:
+            cur_sl = await get_param("scanner_rugcheck_max_risk")
+            changes.append(f"Sold too late {pc['late_pct']}% — consider tighter trailing stop")
 
     return changes
 

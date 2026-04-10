@@ -215,6 +215,13 @@ class PaperTrade(Base):
     paper_pnl_sol     = Column(Float,       nullable=True)
     opened_at         = Column(DateTime,    default=datetime.utcnow, nullable=False)
     closed_at         = Column(DateTime,    nullable=True)
+    # Post-close tracking (filled by monitor over 24h after close)
+    mc_1h_after       = Column(Float,       nullable=True)
+    mc_6h_after       = Column(Float,       nullable=True)
+    mc_24h_after      = Column(Float,       nullable=True)
+    peak_after_close  = Column(Float,       nullable=True)
+    sold_too_early    = Column(Boolean,     nullable=True)  # price went 50%+ higher after close
+    sold_too_late     = Column(Boolean,     nullable=True)  # SL hit but recovered within 1h
 
 
 # ── AI Trade Params table (Agent 6 — learned TP/SL/size) ────────────────────
@@ -345,6 +352,15 @@ _NEW_CANDIDATE_COLS = [
     ("chart_pattern", "TEXT"),
 ]
 
+_NEW_PAPER_TRADE_COLS = [
+    ("mc_1h_after",      "REAL"),
+    ("mc_6h_after",      "REAL"),
+    ("mc_24h_after",     "REAL"),
+    ("peak_after_close", "REAL"),
+    ("sold_too_early",   "BOOLEAN"),
+    ("sold_too_late",    "BOOLEAN"),
+]
+
 _NEW_TOKEN_COLS = [
     ("source",          "TEXT"),
     ("bonding_curve",   "REAL"),
@@ -414,6 +430,19 @@ async def init_db() -> None:
                 try:
                     await conn.execute(
                         text(f"ALTER TABLE tokens ADD COLUMN {col_name} {col_def}")
+                    )
+                except Exception:
+                    pass
+
+        for col_name, col_def in _NEW_PAPER_TRADE_COLS:
+            if is_postgres:
+                await conn.execute(
+                    text(f"ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
+                )
+            else:
+                try:
+                    await conn.execute(
+                        text(f"ALTER TABLE paper_trades ADD COLUMN {col_name} {col_def}")
                     )
                 except Exception:
                     pass
@@ -1953,3 +1982,74 @@ async def get_recent_param_changes(limit: int = 10) -> list["ParamChange"]:
             select(ParamChange).order_by(ParamChange.changed_at.desc()).limit(limit)
         )
         return list(result.scalars().all())
+
+
+# ── Post-close tracking helpers ──────────────────────────────────────────────
+
+async def get_recently_closed_paper_trades(hours: int = 25) -> list["PaperTrade"]:
+    """Returns paper trades closed within last N hours that still need post-close tracking."""
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.closed_at >= cutoff,
+                PaperTrade.mc_24h_after.is_(None),  # not yet fully tracked
+            )
+        )
+        return list(result.scalars().all())
+
+
+async def update_paper_post_close(
+    trade_id: int, mc_1h: float | None = None, mc_6h: float | None = None,
+    mc_24h: float | None = None, peak_after: float | None = None,
+    sold_too_early: bool | None = None, sold_too_late: bool | None = None,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(PaperTrade).where(PaperTrade.id == trade_id))
+        pt = result.scalar_one_or_none()
+        if not pt:
+            return
+        if mc_1h is not None:
+            pt.mc_1h_after = mc_1h
+        if mc_6h is not None:
+            pt.mc_6h_after = mc_6h
+        if mc_24h is not None:
+            pt.mc_24h_after = mc_24h
+        if peak_after is not None:
+            pt.peak_after_close = max(pt.peak_after_close or 0, peak_after)
+        if sold_too_early is not None:
+            pt.sold_too_early = sold_too_early
+        if sold_too_late is not None:
+            pt.sold_too_late = sold_too_late
+        await session.commit()
+
+
+async def get_post_close_stats() -> dict:
+    """Returns aggregate post-close stats for learning."""
+    async with AsyncSessionLocal() as session:
+        total = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.status == "closed", PaperTrade.mc_24h_after.is_not(None),
+            )
+        )).scalar() or 0
+
+        too_early = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.sold_too_early == True,
+            )
+        )).scalar() or 0
+
+        too_late = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.sold_too_late == True,
+            )
+        )).scalar() or 0
+
+    return {
+        "total_tracked": total,
+        "sold_too_early": too_early,
+        "sold_too_late": too_late,
+        "early_pct": round(too_early / total * 100) if total > 0 else 0,
+        "late_pct": round(too_late / total * 100) if total > 0 else 0,
+    }

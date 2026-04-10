@@ -549,23 +549,28 @@ async def cb_hub(callback: CallbackQuery):
         await callback.answer()
         ps = await get_paper_trade_stats()
         lines = [
-            "📋 *PAPER TRADING RESULTS*",
-            f"Total: `{ps['total']}` | Win rate: `{ps['win_rate']}%`",
-            f"Paper P&L: `{ps['total_pnl']:+.4f} SOL`",
-            f"Open: `{ps['open_count']}` | Today: `{ps['today_count']}`",
+            "📋 PAPER TRADING RESULTS",
+            f"Total: {ps['total']} | Win rate: {ps['win_rate']}%",
+            f"Paper P&L: {ps['total_pnl']:+.4f} SOL",
+            f"Open: {ps['open_count']} | Today: {ps['today_count']}",
             "",
         ]
         if ps["recent"]:
-            lines.append("📈 *Recent:*")
+            lines.append("Recent:")
             for pt in ps["recent"]:
-                n = (pt.token_name or "?").replace("_", "\\_")
+                n = pt.token_name or "?"
+                flag = ""
+                if pt.sold_too_early:
+                    flag = " SOLD TOO EARLY"
+                elif pt.sold_too_late:
+                    flag = " SOLD TOO LATE"
                 if pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
-                    lines.append(f"✅ `{n}` — {pt.peak_multiple or 0:.1f}x | +{pt.paper_pnl_sol:.4f} SOL")
+                    lines.append(f"  ✅ {n} — {pt.peak_multiple or 0:.1f}x +{pt.paper_pnl_sol:.4f} SOL{flag}")
                 else:
-                    lines.append(f"❌ `{n}` — {pt.close_reason} | {pt.paper_pnl_sol or 0:.4f} SOL")
+                    lines.append(f"  ❌ {n} — {pt.close_reason} {pt.paper_pnl_sol or 0:.4f} SOL{flag}")
         else:
-            lines.append("_No paper trades yet_")
-        await callback.message.reply("\n".join(lines), parse_mode="Markdown")
+            lines.append("No paper trades yet")
+        await callback.message.reply("\n".join(lines), parse_mode=None)
 
     else:
         await callback.answer()
@@ -659,12 +664,29 @@ async def cmd_papertrades(message: Message):
         lines.append("Recent trades:")
         for pt in ps["recent"]:
             n = pt.token_name or "?"
+            flag = ""
+            if pt.sold_too_early:
+                peak_x = (pt.peak_after_close or 0) / (pt.entry_mc or 1) if pt.entry_mc else 0
+                flag = f" | peaked {peak_x:.1f}x after SOLD TOO EARLY"
+            elif pt.sold_too_late:
+                flag = " | SOLD TOO LATE (recovered)"
+
             if pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
-                lines.append(f"  ✅ {n} — {pt.peak_multiple or 0:.1f}x +{pt.paper_pnl_sol:.4f} SOL")
+                lines.append(f"  ✅ {n} — {pt.peak_multiple or 0:.1f}x +{pt.paper_pnl_sol:.4f} SOL{flag}")
             else:
-                lines.append(f"  ❌ {n} — {pt.close_reason} {pt.paper_pnl_sol or 0:.4f} SOL")
+                lines.append(f"  ❌ {n} — {pt.close_reason} {pt.paper_pnl_sol or 0:.4f} SOL{flag}")
     else:
         lines.append("No paper trades yet. Set mode to PAPER: /autotrade paper")
+
+    # Post-close summary
+    from database.models import get_post_close_stats
+    pc = await get_post_close_stats()
+    if pc["total_tracked"] > 0:
+        lines += [
+            "",
+            "Post-close analysis:",
+            f"  Tracked: {pc['total_tracked']} | Sold early: {pc['early_pct']}% | Sold late: {pc['late_pct']}%",
+        ]
 
     await message.reply("\n".join(lines), parse_mode=None)
 
