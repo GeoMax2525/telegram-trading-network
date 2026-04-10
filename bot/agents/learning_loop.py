@@ -47,6 +47,10 @@ from database.models import (
     select,
     Position,
     func,
+    get_param,
+    set_param,
+    get_all_params,
+    get_recent_param_changes,
 )
 
 logger = logging.getLogger(__name__)
@@ -424,6 +428,100 @@ async def _notify_safety_alert(bot, reason: str):
         logger.error("Agent6: safety alert failed: %s", exc)
 
 
+# ── Autonomous parameter adjustment ──────────────────────────────────────────
+
+async def _auto_adjust_params(
+    recent_wr: float, total_analyzed: int, regime: str,
+) -> list[str]:
+    """
+    Adjusts ALL agent parameters based on outcomes.
+    Returns list of change descriptions.
+    """
+    changes = []
+
+    # ── Confidence thresholds ────────────────────────────────────────
+    cur_full = await get_param("conf_full_threshold")
+    if recent_wr > 0.65:
+        new_full = max(65, cur_full - 2)
+        if new_full != cur_full:
+            await set_param("conf_full_threshold", new_full,
+                            f"WR {recent_wr:.0%} > 65% — lowering", total_analyzed, recent_wr)
+            changes.append(f"conf threshold: {cur_full:.0f}→{new_full:.0f} (WR {recent_wr:.0%})")
+    elif recent_wr < 0.40:
+        new_full = min(90, cur_full + 3)
+        if new_full != cur_full:
+            await set_param("conf_full_threshold", new_full,
+                            f"WR {recent_wr:.0%} < 40% — tightening", total_analyzed, recent_wr)
+            changes.append(f"conf threshold: {cur_full:.0f}→{new_full:.0f} (WR {recent_wr:.0%})")
+
+    # ── Scanner filters ──────────────────────────────────────────────
+    # Check rejection rate (data_points vs candidates)
+    if state.data_points_today > 0 and state.scanner_candidates_today > 0:
+        pass_rate = state.data_points_today / max(state.scanner_candidates_today, 1)
+        if pass_rate < 0.10:  # >90% rejection
+            cur_min_mc = await get_param("scanner_min_mc")
+            new_min_mc = max(1000, cur_min_mc * 0.80)
+            if new_min_mc != cur_min_mc:
+                await set_param("scanner_min_mc", new_min_mc,
+                                f"Pass rate {pass_rate:.0%} — loosening min_mc", total_analyzed, recent_wr)
+                changes.append(f"min_mc: ${cur_min_mc:.0f}→${new_min_mc:.0f} (pass rate {pass_rate:.0%})")
+
+            cur_min_liq = await get_param("scanner_min_liquidity")
+            new_min_liq = max(1000, cur_min_liq * 0.80)
+            if new_min_liq != cur_min_liq:
+                await set_param("scanner_min_liquidity", new_min_liq,
+                                f"Pass rate {pass_rate:.0%} — loosening min_liq", total_analyzed, recent_wr)
+                changes.append(f"min_liq: ${cur_min_liq:.0f}→${new_min_liq:.0f}")
+
+    # If paper trades losing too much, tighten scanner
+    if recent_wr < 0.35:
+        cur_min_mc = await get_param("scanner_min_mc")
+        new_min_mc = min(50000, cur_min_mc * 1.20)
+        if new_min_mc != cur_min_mc:
+            await set_param("scanner_min_mc", new_min_mc,
+                            f"WR {recent_wr:.0%} — tightening scanner", total_analyzed, recent_wr)
+            changes.append(f"min_mc: ${cur_min_mc:.0f}→${new_min_mc:.0f} (bad WR)")
+
+    # ── MC weight adjustment (most/least predictive) ─────────────────
+    for prefix, label in [("low_mc_", "low"), ("mid_mc_", "mid"), ("high_mc_", "high")]:
+        keys = {k: f"{prefix}{k}" for k in COMPONENT_KEYS}
+        cur = {}
+        for short, full in keys.items():
+            cur[short] = await get_param(full)
+
+        # Find best/worst by current weight
+        best_k = max(cur, key=cur.get)
+        worst_k = min(cur, key=cur.get)
+
+        if cur[best_k] < 0.45 and cur[worst_k] > 0.02:
+            new_best = min(0.45, cur[best_k] + 0.02)
+            new_worst = max(0.02, cur[worst_k] - 0.02)
+            if new_best != cur[best_k]:
+                await set_param(keys[best_k], new_best,
+                                f"{label} MC: boosting top signal", total_analyzed, recent_wr)
+                await set_param(keys[worst_k], new_worst,
+                                f"{label} MC: reducing weakest signal", total_analyzed, recent_wr)
+                changes.append(f"{label} weights: {best_k}↑{new_best:.2f} {worst_k}↓{new_worst:.2f}")
+
+    # ── Position sizing ──────────────────────────────────────────────
+    if recent_wr > 0.70:
+        cur80 = await get_param("size_confidence_80")
+        new80 = min(25, cur80 + 1)
+        if new80 != cur80:
+            await set_param("size_confidence_80", new80,
+                            f"High WR {recent_wr:.0%} — increasing high-conf size", total_analyzed, recent_wr)
+            changes.append(f"size_80: {cur80:.0f}%→{new80:.0f}%")
+    elif recent_wr < 0.50:
+        cur80 = await get_param("size_confidence_80")
+        new80 = max(10, cur80 - 2)
+        if new80 != cur80:
+            await set_param("size_confidence_80", new80,
+                            f"Low WR {recent_wr:.0%} — decreasing high-conf size", total_analyzed, recent_wr)
+            changes.append(f"size_80: {cur80:.0f}%→{new80:.0f}%")
+
+    return changes
+
+
 # ── Main run ─────────────────────────────────────────────────────────────────
 
 async def run_once(bot) -> bool:
@@ -516,13 +614,10 @@ async def run_once(bot) -> bool:
         if params_updated:
             all_changes.append(f"Trade params updated for {params_updated} pattern types")
 
-    # ── Major: threshold recalibration ───────────────────────────────
-    threshold_changes = []
-    if level == "major":
-        new_thresholds, threshold_changes = _adjust_thresholds(recent_wr, state.confidence_thresholds)
-        if threshold_changes:
-            state.confidence_thresholds = new_thresholds
-            all_changes.extend(threshold_changes)
+    # ── Major: full autonomous parameter adjustment ────────────────────
+    if level in ("full", "major"):
+        auto_changes = await _auto_adjust_params(recent_wr, new_analyzed, regime)
+        all_changes.extend(auto_changes)
 
     # ── Save weights ─────────────────────────────────────────────────
     new_analyzed = last_analyzed + len(batch)

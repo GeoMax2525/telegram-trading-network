@@ -48,6 +48,7 @@ from database.models import (
     token_exists,
     get_token_count,
     open_paper_trade,
+    get_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -419,9 +420,14 @@ async def _evaluate_candidate(
 ) -> dict | None:
     """
     Fetches fresh data (if not already in raw), runs rug filter,
-    AI scoring, and pattern matching.
+    AI scoring, and pattern matching. Reads filter params from DB.
     Returns enriched candidate dict or None if filtered out.
     """
+    # Load dynamic filter params from DB
+    p = await get_params(
+        "scanner_min_mc", "scanner_max_mc", "scanner_min_liquidity",
+        "scanner_min_ai_score", "scanner_rugcheck_max_risk",
+    )
     mint = raw["mint"]
 
     # Fetch full data if not already present
@@ -446,29 +452,36 @@ async def _evaluate_candidate(
     # Rugcheck
     rc_data = await _fetch_rugcheck(mint)
 
+    _min_mc = p["scanner_min_mc"]
+    _max_mc = p["scanner_max_mc"]
+    _min_liq = p["scanner_min_liquidity"]
+    _min_ai = p["scanner_min_ai_score"]
+    _max_rug = p["scanner_rugcheck_max_risk"]
+
     if is_paper:
         # CHAOS MODE: skip all filters, just log
         if not mcap:
             logger.info("Scanner[paper] %s: no MC data, passing anyway", name)
     else:
-        # LIVE MODE: enforce all filters
+        # LIVE MODE: enforce DB-driven filters
         if not mcap:
             logger.info("Scanner REJECTED %s (%s): no market cap data", name, mint[:12])
             return None
-        if not _passes_rug_filter(rc_data, mcap, liquidity):
-            if not (MIN_MCAP <= mcap <= MAX_MCAP):
-                logger.info("Scanner REJECTED %s: mcap $%.0f outside $%d–$%d", name, mcap, MIN_MCAP, MAX_MCAP)
-            elif liquidity < MIN_LIQUIDITY:
-                logger.info("Scanner REJECTED %s: liquidity $%.0f < $%d", name, liquidity, MIN_LIQUIDITY)
-            elif rc_data:
-                rc_score_val = rc_data.get("score", 0)
-                risks = {r.get("name", "").lower() for r in (rc_data.get("risks") or [])}
-                flagged = risks & HIGH_RISK_FLAGS
-                if rc_score_val > MAX_RUGCHECK_RISK:
-                    logger.info("Scanner REJECTED %s: rugcheck risk %d > %d", name, rc_score_val, MAX_RUGCHECK_RISK)
-                elif flagged:
-                    logger.info("Scanner REJECTED %s: rug flags %s", name, flagged)
+        if not (_min_mc <= mcap <= _max_mc):
+            logger.info("Scanner REJECTED %s: mcap $%.0f outside $%.0f–$%.0f", name, mcap, _min_mc, _max_mc)
             return None
+        if liquidity < _min_liq:
+            logger.info("Scanner REJECTED %s: liquidity $%.0f < $%.0f", name, liquidity, _min_liq)
+            return None
+        if rc_data:
+            rc_score_val = rc_data.get("score", 0)
+            risks = {r.get("name", "").lower() for r in (rc_data.get("risks") or [])}
+            if rc_score_val > _max_rug:
+                logger.info("Scanner REJECTED %s: rugcheck risk %d > %.0f", name, rc_score_val, _max_rug)
+                return None
+            if risks & HIGH_RISK_FLAGS:
+                logger.info("Scanner REJECTED %s: rug flags %s", name, risks & HIGH_RISK_FLAGS)
+                return None
 
     # AI score via full scan_token
     scan_data = await scan_token(mint)
@@ -482,8 +495,8 @@ async def _evaluate_candidate(
     else:
         ai_score = scan_data.get("total", 0)
 
-    if not is_paper and ai_score < MIN_AI_SCORE:
-        logger.info("Scanner REJECTED %s: AI score %.0f < %d", name, ai_score, MIN_AI_SCORE)
+    if not is_paper and ai_score < _min_ai:
+        logger.info("Scanner REJECTED %s: AI score %.0f < %.0f", name, ai_score, _min_ai)
         return None
 
     # Pattern match
@@ -611,16 +624,20 @@ async def run_once() -> tuple[int, int]:
                 logger.info("Scanner: paper balance reset to %.1f SOL (reset #%d)",
                             state.paper_balance, state.paper_resets)
 
-            # Confidence-based position sizing (% of virtual balance)
+            # Confidence-based position sizing from DB params (% of balance)
+            sp = await get_params(
+                "size_confidence_20", "size_confidence_50",
+                "size_confidence_70", "size_confidence_80",
+            )
             conf = scored.get("confidence_score", 0)
             if conf >= 80:
-                size_pct = 0.20
+                size_pct = sp["size_confidence_80"] / 100.0
             elif conf >= 70:
-                size_pct = 0.15
+                size_pct = sp["size_confidence_70"] / 100.0
             elif conf >= 50:
-                size_pct = 0.10
+                size_pct = sp["size_confidence_50"] / 100.0
             else:
-                size_pct = 0.05
+                size_pct = sp["size_confidence_20"] / 100.0
 
             paper_sol = round(min(state.paper_balance * size_pct, state.paper_balance * 0.20), 4)
 

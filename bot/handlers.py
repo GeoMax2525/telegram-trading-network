@@ -29,6 +29,7 @@ from database.models import (
     token_exists, save_token, get_token_by_mint,
     get_tier_wallets, get_pattern_by_type, has_caller_scanned,
     upsert_wallet, get_paper_trade_stats,
+    get_all_params, get_recent_param_changes,
 )
 from bot.agents.confidence_engine import score_candidate
 from bot.agents.chart_detector import analyze_chart
@@ -281,37 +282,31 @@ async def _chart_detector_line() -> str:
 
 
 async def _learning_loop_line() -> str:
-    remaining = max(0, 10 - (state.learning_loop_total_closed - state.learning_loop_last_analyzed))
-    w = state.learning_loop_weights
+    remaining = max(0, 3 - (state.learning_loop_total_closed - state.learning_loop_last_analyzed))
     regime = getattr(state, "market_regime", "NEUTRAL")
     regime_icon = {"GOOD": "🟢", "NEUTRAL": "🟡", "BAD": "🔴"}.get(regime, "⚪")
-    thresholds = getattr(state, "confidence_thresholds", {})
-    t_full = thresholds.get("execute_full", 80)
-    t_half = thresholds.get("execute_half", 70)
     sol_chg = getattr(state, "sol_24h_change", 0.0)
-    last_change = getattr(state, "learning_loop_last_change", "No changes yet")
-
-    if state.learning_loop_last_run is None and not w:
-        return f"✅ Learning Loop — {regime_icon} {regime} | waiting for trades..."
 
     if state.learning_loop_last_run is None:
-        return f"✅ Learning Loop — {regime_icon} {regime} | {remaining} trades to next adjust"
+        return f"✅ Learning Loop — {regime_icon} {regime} | SOL {sol_chg:+.1f}% | waiting..."
 
     elapsed_min = int((datetime.utcnow() - state.learning_loop_last_run).total_seconds() / 60)
     age = f"{elapsed_min}min ago" if elapsed_min < 60 else f"{elapsed_min // 60}h ago"
 
-    w_str = " ".join(f"{k[:3]}={v:.0%}" for k, v in sorted(w.items(), key=lambda x: -x[1]))
-
-    params = await get_all_trade_params()
-    ai_str = f" | {sum(1 for p in params if p.sample_size >= 10)}/{len(params)} AI" if params else ""
-
-    # Truncate last change for display
-    change_short = last_change[:60] + "..." if len(last_change) > 60 else last_change
+    # Show last 3 param changes
+    recent = await get_recent_param_changes(3)
+    if recent:
+        adj_lines = []
+        for c in recent:
+            short_name = c.param_name.replace("scanner_", "").replace("conf_", "").replace("_mc_", ".")
+            adj_lines.append(f"{short_name}: {c.old_value:g}→{c.new_value:g}")
+        adj_str = " | ".join(adj_lines)
+    else:
+        adj_str = "No adjustments yet"
 
     return (
-        f"✅ Learning Loop — {regime_icon} {regime} | SOL {sol_chg:+.1f}% | last {age}{ai_str}\n"
-        f"     Thresh: full={t_full} half={t_half} | {w_str}\n"
-        f"     Last: {change_short}"
+        f"✅ Learning Loop — {regime_icon} {regime} | SOL {sol_chg:+.1f}% | last {age}\n"
+        f"     🧠 {adj_str}"
     )
 
 
@@ -1015,6 +1010,61 @@ async def handle_analyze_address(message: Message):
     logger.info("Analyze button: address=%r len=%d", address, len(address))
     status_msg = await message.reply("🔍 Running full agent analysis...", parse_mode=None)
     await _run_analysis(address, status_msg)
+
+
+# ── /params — Show all agent parameters ──────────────────────────────────────
+
+@router.message(Command("params"))
+async def cmd_params(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        await message.reply("⛔ `/params` is only available in Callers HQ.")
+        return
+
+    params = await get_all_params()
+    changes = await get_recent_param_changes(10)
+
+    # Group params by category
+    groups = {
+        "Scanner": [k for k in sorted(params) if k.startswith("scanner_")],
+        "Confidence": [k for k in sorted(params) if k.startswith("conf_")],
+        "Weights (Low MC)": [k for k in sorted(params) if k.startswith("low_mc_")],
+        "Weights (Mid MC)": [k for k in sorted(params) if k.startswith("mid_mc_")],
+        "Weights (High MC)": [k for k in sorted(params) if k.startswith("high_mc_")],
+        "Position Sizing": [k for k in sorted(params) if k.startswith("size_")],
+        "Wallet Tiers": [k for k in sorted(params) if k.startswith("tier")],
+        "Learning": [k for k in sorted(params) if k.startswith("learning_")],
+        "Other": [k for k in sorted(params) if not any(
+            k.startswith(p) for p in ("scanner_", "conf_", "low_mc_", "mid_mc_", "high_mc_",
+                                       "size_", "tier", "learning_"))],
+    }
+
+    lines = ["🧠 AGENT PARAMETERS", "━━━━━━━━━━━━━━━━━━━━", ""]
+    for group_name, keys in groups.items():
+        if not keys:
+            continue
+        lines.append(f"[{group_name}]")
+        for k in keys:
+            v = params[k]
+            # Format nicely
+            if "weight" in k or "mc_" in k or "winrate" in k:
+                lines.append(f"  {k}: {v:.4f}")
+            elif "threshold" in k or "score" in k or "batch" in k:
+                lines.append(f"  {k}: {v:.0f}")
+            else:
+                lines.append(f"  {k}: {v:g}")
+        lines.append("")
+
+    if changes:
+        lines.append("RECENT CHANGES (last 10)")
+        for c in changes:
+            age = ""
+            if c.changed_at:
+                mins = int((datetime.utcnow() - c.changed_at).total_seconds() / 60)
+                age = f"{mins}m ago" if mins < 60 else f"{mins // 60}h ago"
+            reason = (c.reason or "")[:40]
+            lines.append(f"  {c.param_name}: {c.old_value:g}->{c.new_value:g} | {reason} | {age}")
+
+    await message.reply("\n".join(lines), parse_mode=None)
 
 
 # ── /start ────────────────────────────────────────────────────────────────────

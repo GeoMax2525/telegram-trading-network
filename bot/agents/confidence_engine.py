@@ -41,6 +41,7 @@ from database.models import (
     get_current_weights,
     get_trade_params,
     get_token_by_mint,
+    get_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -209,39 +210,52 @@ def _score_market() -> float:
 
 # ── Main scoring function ────────────────────────────────────────────────────
 
-def _get_mc_weight_set(mcap: float) -> tuple[dict[str, float], str]:
-    """Returns (weights_dict, weight_set_label) based on market cap."""
+async def _get_mc_weight_set(mcap: float) -> tuple[dict[str, float], str]:
+    """Returns (weights_dict, weight_set_label) from DB params."""
     if mcap < 100_000:
-        return dict(MC_WEIGHTS["low"]), "Low MC (<$100K)"
+        prefix, label = "low_mc_", "Low MC (<$100K)"
     elif mcap < 1_000_000:
-        return dict(MC_WEIGHTS["mid"]), "Mid MC ($100K-$1M)"
+        prefix, label = "mid_mc_", "Mid MC ($100K-$1M)"
     else:
-        return dict(MC_WEIGHTS["high"]), "High MC (>$1M)"
+        prefix, label = "high_mc_", "High MC (>$1M)"
+
+    keys = [f"{prefix}{k}" for k in ("insider", "fingerprint", "chart", "rug", "caller", "market")]
+    p = await get_params(*keys)
+
+    weights = {
+        "insider":     p.get(f"{prefix}insider", 0.25),
+        "fingerprint": p.get(f"{prefix}fingerprint", 0.25),
+        "chart":       p.get(f"{prefix}chart", 0.15),
+        "rug":         p.get(f"{prefix}rug", 0.15),
+        "caller":      p.get(f"{prefix}caller", 0.10),
+        "market":      p.get(f"{prefix}market", 0.05),
+    }
+
+    # Normalize
+    total = sum(weights.values())
+    if total > 0:
+        weights = {k: round(v / total, 4) for k, v in weights.items()}
+
+    return weights, label
 
 
 async def _load_weights(mcap: float) -> tuple[dict[str, float], str]:
     """
-    Load learned weights from DB, fall back to MC-based defaults.
-    Agent 6 adjustments are blended with MC-based base weights.
+    Load MC-based weights from DB, blend with Agent 6 learned adjustments.
     Returns (weights, weight_set_label).
     """
-    base, label = _get_mc_weight_set(mcap)
+    base, label = await _get_mc_weight_set(mcap)
 
     row = await get_current_weights()
     if row:
-        # Blend: 70% MC-based default + 30% learned adjustments
         learned = {
-            "fingerprint": row.fingerprint_weight,
-            "insider":     row.insider_weight,
-            "chart":       row.chart_weight,
-            "rug":         row.rug_weight,
-            "caller":      row.caller_weight,
-            "market":      row.market_weight,
+            "fingerprint": row.fingerprint_weight, "insider": row.insider_weight,
+            "chart": row.chart_weight, "rug": row.rug_weight,
+            "caller": row.caller_weight, "market": row.market_weight,
         }
         blended = {}
         for k in base:
             blended[k] = round(base[k] * 0.7 + learned[k] * 0.3, 4)
-        # Normalize
         total = sum(blended.values())
         if total > 0:
             blended = {k: round(v / total, 4) for k, v in blended.items()}
@@ -290,11 +304,12 @@ async def score_candidate(candidate: dict) -> dict:
         confidence, rug, rug_gate_pass, chart, chart_gate_pass,
     )
 
-    # Decision thresholds (same for both modes — Agent 6 can adjust)
-    thresholds = state.confidence_thresholds
-    t_full = thresholds.get("execute_full", 80)
-    t_half = thresholds.get("execute_half", 70)
-    t_monitor = thresholds.get("monitor", 60)
+    # Decision thresholds from DB (Agent 6 adjustable)
+    tp = await get_params("conf_full_threshold", "conf_half_threshold", "conf_paper_threshold")
+    t_full = tp["conf_full_threshold"]
+    t_half = tp["conf_half_threshold"]
+    t_paper = tp["conf_paper_threshold"]
+    t_monitor = t_half - 10  # monitor = 10 below half
 
     # LIVE decision: requires chart + rug hard gates + high threshold
     if confidence >= t_full and live_gates_pass:
@@ -312,15 +327,15 @@ async def score_candidate(candidate: dict) -> dict:
         and decision in ("execute_full", "execute_half")
     )
 
-    # PAPER execution: 20+ confidence, NO gates (chaos mode — max data)
+    # PAPER execution: DB-driven threshold, no hard gates
     paper_trade = (
         state.trade_mode == "paper"
-        and confidence >= 20
+        and confidence >= t_paper
     )
 
     logger.info(
-        "Agent5: PAPER CHECK — %s mode=%s conf=%.1f threshold=20 result=%s",
-        candidate.get("name", "?")[:20], state.trade_mode, confidence,
+        "Agent5: PAPER CHECK — %s mode=%s conf=%.1f threshold=%.0f result=%s",
+        candidate.get("name", "?")[:20], state.trade_mode, confidence, t_paper,
         "TRIGGER" if paper_trade else f"SKIP(mode={state.trade_mode},conf={confidence:.1f})",
     )
 

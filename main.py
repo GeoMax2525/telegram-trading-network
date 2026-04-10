@@ -28,7 +28,7 @@ from bot.agents.pattern_engine import pattern_engine_loop
 from bot.agents.scanner_agent import scanner_agent_loop
 from bot.agents.learning_loop import learning_loop
 from bot.agents.paper_monitor import paper_monitor_loop
-from database.models import init_db, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses
+from database.models import init_db, init_agent_params, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -113,6 +113,9 @@ async def main() -> None:
     db_type = "PostgreSQL" if DATABASE_URL.startswith("postgresql") else "SQLite"
     logger.info("Using %s (%s)", db_type, DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else DATABASE_URL)
     await init_db()
+    added = await init_agent_params()
+    if added:
+        logger.info("Initialized %d agent params with defaults", added)
 
     bot = Bot(
         token=BOT_TOKEN,

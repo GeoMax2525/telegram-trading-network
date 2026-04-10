@@ -13,6 +13,8 @@ Tables:
   candidates       — every candidate scored by Agent 5 (Confidence Engine).
   agent_weights    — learned confidence weights from Agent 6 (Learning Loop).
   ai_trade_params  — learned TP/SL/position size per pattern type (Agent 6).
+  agent_params     — all dynamic agent parameters (key-value, adjusted by Agent 6).
+  param_changes    — log of every parameter change with reason.
 """
 
 import logging
@@ -166,6 +168,29 @@ class AgentWeights(Base):
     trades_analyzed      = Column(Integer,     nullable=False, default=0)
     notes                = Column(String(512), nullable=True)
     updated_at           = Column(DateTime,    default=datetime.utcnow, nullable=False)
+
+
+# ── Agent Params table (key-value, all dynamic parameters) ──────────────────
+
+class AgentParam(Base):
+    __tablename__ = "agent_params"
+
+    param_name  = Column(String(64),  primary_key=True)
+    param_value = Column(Float,       nullable=False)
+    updated_at  = Column(DateTime,    default=datetime.utcnow, nullable=False)
+
+
+class ParamChange(Base):
+    __tablename__ = "param_changes"
+
+    id              = Column(Integer,    primary_key=True, autoincrement=True)
+    param_name      = Column(String(64), nullable=False, index=True)
+    old_value       = Column(Float,      nullable=False)
+    new_value       = Column(Float,      nullable=False)
+    reason          = Column(String(256),nullable=True)
+    trades_analyzed = Column(Integer,    nullable=True)
+    win_rate        = Column(Float,      nullable=True)
+    changed_at      = Column(DateTime,   default=datetime.utcnow, nullable=False)
 
 
 # ── Paper Trades table ────────────────────────────────────────────────────────
@@ -1805,3 +1830,125 @@ async def get_paper_trade_stats() -> dict:
         "today_count": today_count, "today_pnl": float(today_pnl),
         "open_count": open_count, "recent": recent,
     }
+
+
+# ── Agent Params helpers ─────────────────────────────────────────────────────
+
+# All defaults — inserted on first run if not present
+AGENT_PARAM_DEFAULTS = {
+    # Scanner
+    "scanner_min_mc": 10000, "scanner_max_mc": 5000000, "scanner_min_liquidity": 5000,
+    "scanner_min_ai_score": 40, "scanner_rugcheck_max_risk": 500,
+    "scanner_interval_seconds": 15, "scanner_max_candidates": 10,
+    # Wallet tiers
+    "tier1_min_score": 80, "tier2_min_score": 60, "tier3_min_score": 40,
+    "tier1_min_winrate": 0.65, "tier2_min_winrate": 0.45,
+    "tier1_min_trades": 5, "tier2_min_trades": 3, "tier3_min_trades": 2,
+    "wallet_analyst_interval_min": 30,
+    # Pattern engine
+    "pattern_min_samples": 3, "pattern_interval_hours": 6,
+    # Confidence thresholds
+    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 20,
+    # MC weights — low
+    "low_mc_insider": 0.35, "low_mc_fingerprint": 0.28, "low_mc_chart": 0.05,
+    "low_mc_rug": 0.20, "low_mc_caller": 0.08, "low_mc_market": 0.04,
+    # MC weights — mid
+    "mid_mc_insider": 0.30, "mid_mc_fingerprint": 0.25, "mid_mc_chart": 0.15,
+    "mid_mc_rug": 0.18, "mid_mc_caller": 0.08, "mid_mc_market": 0.04,
+    # MC weights — high
+    "high_mc_insider": 0.20, "high_mc_fingerprint": 0.20, "high_mc_chart": 0.30,
+    "high_mc_rug": 0.15, "high_mc_caller": 0.10, "high_mc_market": 0.05,
+    # Position sizing (% of balance)
+    "size_confidence_20": 5, "size_confidence_50": 10,
+    "size_confidence_70": 15, "size_confidence_80": 20,
+    # Learning loop
+    "learning_micro_batch": 3, "learning_full_batch": 5, "learning_major_batch": 15,
+    "learning_max_weight_shift": 0.10,
+}
+
+
+async def init_agent_params() -> int:
+    """Insert defaults for any missing params. Returns count of new params added."""
+    added = 0
+    async with AsyncSessionLocal() as session:
+        for name, default in AGENT_PARAM_DEFAULTS.items():
+            result = await session.execute(
+                select(AgentParam).where(AgentParam.param_name == name)
+            )
+            if result.scalar_one_or_none() is None:
+                session.add(AgentParam(param_name=name, param_value=float(default)))
+                added += 1
+        await session.commit()
+    return added
+
+
+async def get_param(name: str) -> float:
+    """Get a single param value, falls back to default."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AgentParam.param_value).where(AgentParam.param_name == name)
+        )
+        val = result.scalar_one_or_none()
+    if val is not None:
+        return val
+    return AGENT_PARAM_DEFAULTS.get(name, 0.0)
+
+
+async def get_params(*names: str) -> dict[str, float]:
+    """Get multiple params at once."""
+    result = {}
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name.in_(names))
+        )).scalars().all()
+        for r in rows:
+            result[r.param_name] = r.param_value
+    for n in names:
+        if n not in result:
+            result[n] = AGENT_PARAM_DEFAULTS.get(n, 0.0)
+    return result
+
+
+async def get_all_params() -> dict[str, float]:
+    """Get all params."""
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(select(AgentParam))).scalars().all()
+    result = dict(AGENT_PARAM_DEFAULTS)
+    for r in rows:
+        result[r.param_name] = r.param_value
+    return result
+
+
+async def set_param(name: str, value: float, reason: str | None = None,
+                    trades: int | None = None, win_rate: float | None = None) -> None:
+    """Set a param value and log the change."""
+    old_value = await get_param(name)
+    if abs(old_value - value) < 0.0001:
+        return  # no change
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(AgentParam).where(AgentParam.param_name == name)
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            row.param_value = value
+            row.updated_at = datetime.utcnow()
+        else:
+            session.add(AgentParam(param_name=name, param_value=value))
+
+        # Log the change
+        session.add(ParamChange(
+            param_name=name, old_value=old_value, new_value=value,
+            reason=reason, trades_analyzed=trades, win_rate=win_rate,
+        ))
+        await session.commit()
+
+
+async def get_recent_param_changes(limit: int = 10) -> list["ParamChange"]:
+    """Returns the most recent param changes."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ParamChange).order_by(ParamChange.changed_at.desc()).limit(limit)
+        )
+        return list(result.scalars().all())
