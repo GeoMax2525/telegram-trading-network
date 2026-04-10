@@ -1843,6 +1843,7 @@ AGENT_PARAM_DEFAULTS = {
     # Wallet tiers
     "tier1_min_score": 80, "tier2_min_score": 60, "tier3_min_score": 40,
     "tier1_min_winrate": 0.65, "tier2_min_winrate": 0.45,
+    "tier1_min_avg_mult": 5.0, "tier2_min_avg_mult": 2.0, "tier3_min_avg_mult": 1.5,
     "tier1_min_trades": 5, "tier2_min_trades": 3, "tier3_min_trades": 2,
     "wallet_analyst_interval_min": 30,
     # Pattern engine

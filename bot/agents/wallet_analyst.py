@@ -267,23 +267,30 @@ def _score_wallet(
 
     Components (sum to 100 max):
       win_rate      × 40  (100% WR = 40 pts)
-      avg_multiple  × 25  (3x = 18.75, 5x = 25, capped at 5x)
+      avg_multiple  × 25  (tiered: 5x+=25, 3-5x=18, 2-3x=12, 1-2x=6)
       early_entry   × 15  (100% early = 15 pts)
-      consistency   × 10  (1+ trades = 3, 3+ = 6, 5+ = 8, 10+ = 10)
-      volume        × 10  (1+ wins = 3, 3+ = 6, 5+ = 10)
+      consistency   × 10  (1+=3, 3+=6, 5+=8, 10+=10)
+      volume        × 10  (1+=3, 3+=6, 5+=10)
     """
     win_rate = wins / total_trades if total_trades > 0 else 0.0
 
-    # Win rate: heavily weighted (40 pts max)
+    # Win rate (40 pts max)
     score = win_rate * 40
 
-    # Avg multiple: capped at 5x for full points (25 pts max)
-    score += (min(avg_multiple, 5.0) / 5.0) * 25
+    # Avg multiple — tiered scoring (25 pts max)
+    if avg_multiple >= 5.0:
+        score += 25
+    elif avg_multiple >= 3.0:
+        score += 18
+    elif avg_multiple >= 2.0:
+        score += 12
+    elif avg_multiple >= 1.0:
+        score += 6
 
     # Early entry rate (15 pts max)
     score += early_entry_rate * 15
 
-    # Consistency: graduated from 1 trade (10 pts max)
+    # Consistency (10 pts max)
     if total_trades >= 10:
         score += 10
     elif total_trades >= 5:
@@ -304,11 +311,11 @@ def _score_wallet(
     score = round(score, 1)
 
     # Multi-criteria tier assignment
-    if score >= 80 and win_rate >= 0.65 and avg_multiple >= 2.0 and total_trades >= 5:
+    if score >= 80 and win_rate >= 0.65 and avg_multiple >= 5.0 and total_trades >= 5:
         tier = 1
-    elif score >= 60 and win_rate >= 0.45 and avg_multiple >= 1.5 and total_trades >= 3:
+    elif score >= 60 and win_rate >= 0.45 and avg_multiple >= 2.0 and total_trades >= 3:
         tier = 2
-    elif score >= 40 and total_trades >= 2:
+    elif score >= 40 and avg_multiple >= 1.5 and total_trades >= 2:
         tier = 3
     else:
         tier = 0
