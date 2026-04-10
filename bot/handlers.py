@@ -294,7 +294,10 @@ async def _learning_loop_line() -> str:
     age = f"{elapsed_min}min ago" if elapsed_min < 60 else f"{elapsed_min // 60}h ago"
 
     # Show last 3 param changes
-    recent = await get_recent_param_changes(3)
+    try:
+        recent = await get_recent_param_changes(3)
+    except Exception:
+        recent = []
     if recent:
         adj_lines = []
         for c in recent:
@@ -385,7 +388,12 @@ async def _build_hub_text(autotrade: bool) -> str:
         f"{ce_stats['executed_today']} executed"
     )
     mode_display = _mode_label()
-    paper_stats = await get_paper_trade_stats()
+    try:
+        paper_stats = await get_paper_trade_stats()
+    except Exception:
+        paper_stats = {"total": 0, "closed": 0, "wins": 0, "win_rate": 0,
+                       "total_pnl": 0.0, "today_count": 0, "today_pnl": 0.0,
+                       "open_count": 0, "recent": []}
 
     lines = [
         "🔑 *LOWKEY ALPHA HUB*",
@@ -443,9 +451,9 @@ async def _build_hub_text(autotrade: bool) -> str:
         for pt in paper_stats["recent"][:5]:
             name = (pt.token_name or "?").replace("_", "\\_")
             flag = ""
-            if pt.sold_too_early:
+            if getattr(pt, "sold_too_early", None):
                 flag = " 😬"
-            elif pt.sold_too_late:
+            elif getattr(pt, "sold_too_late", None):
                 flag = " ⏰"
             if pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
                 lines.append(f"✅ `{name}` — {pt.peak_multiple or 0:.1f}x, `+{pt.paper_pnl_sol:.4f} SOL`{flag}")
@@ -477,8 +485,20 @@ async def cmd_hub(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         await message.reply("⛔ `/hub` is only available in Callers HQ.")
         return
-    text = await _build_hub_text(state.autotrade_enabled)
-    await message.reply(text, parse_mode="Markdown", reply_markup=_hub_keyboard(state.autotrade_enabled))
+    try:
+        text = await _build_hub_text(state.autotrade_enabled)
+        await message.reply(text, parse_mode="Markdown", reply_markup=_hub_keyboard(state.autotrade_enabled))
+    except Exception as exc:
+        logger.error("Hub render failed: %s", exc)
+        # Fallback: send without Markdown if parse fails
+        try:
+            text = await _build_hub_text(state.autotrade_enabled)
+            # Strip markdown formatting
+            plain = text.replace("*", "").replace("`", "").replace("_", "")
+            await message.reply(plain, parse_mode=None, reply_markup=_hub_keyboard(state.autotrade_enabled))
+        except Exception as exc2:
+            logger.error("Hub fallback also failed: %s", exc2)
+            await message.reply(f"⛔ Hub error: {exc}", parse_mode=None)
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("hub:"))
