@@ -585,21 +585,26 @@ async def run_once() -> tuple[int, int]:
 
         # Open paper trade if Agent 5 flagged it
         if scored.get("paper_trade"):
+            logger.info(
+                "Scanner: PAPER TRADE triggered for %s (%s) confidence=%.0f",
+                scored.get("name", "?"), scored.get("mint", "?")[:12],
+                scored.get("confidence_score", 0),
+            )
             try:
-                await open_paper_trade(
+                pt = await open_paper_trade(
                     token_address=scored.get("mint", ""),
                     token_name=scored.get("name"),
                     entry_mc=scored.get("mcap"),
-                    entry_price=scored.get("mcap"),  # MC as entry reference
+                    entry_price=scored.get("mcap"),
                     paper_sol=0.5,
                     confidence=scored.get("confidence_score", 0),
                     pattern_type=scored.get("chart_pattern") or scored.get("source"),
                     tp_x=scored.get("trade_tp_x", 3.0),
                     sl_pct=scored.get("trade_sl_pct", 30.0),
                 )
-                logger.info("Scanner: paper trade opened for %s", scored.get("name", "?"))
+                logger.info("Scanner: paper trade saved to DB id=%s for %s", pt.id, scored.get("name", "?"))
             except Exception as exc:
-                logger.error("Scanner: paper trade failed for %s: %s", scored.get("mint", "?")[:12], exc)
+                logger.error("Scanner: paper trade DB save failed for %s: %s", scored.get("mint", "?")[:12], exc)
 
         state.pending_candidates.append(scored)
         state.scanner_candidates_today += 1
