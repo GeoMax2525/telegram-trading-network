@@ -782,8 +782,10 @@ async def _run_analysis(address: str, status_msg: Message) -> None:
         rc_data = await _fetch_rugcheck(address)
         rc_score = (rc_data or {}).get("score")
         if rc_score is not None:
-            rc_icon = "✅" if rc_score >= 600 else "⚠️" if rc_score >= 400 else "🔴"
-            rug_line = f"🛡️ Rug Safety: {rc_score}/1000 {rc_icon}"
+            # Rugcheck score = risk score (lower = safer)
+            rc_icon = "✅" if rc_score <= 50 else "⚠️" if rc_score <= 200 else "🔴"
+            rc_label = "Low risk" if rc_score <= 50 else "Moderate" if rc_score <= 200 else "High risk"
+            rug_line = f"🛡️ Rug Safety: risk={rc_score} ({rc_label}) {rc_icon}"
         else:
             rug_line = "🛡️ Rug Safety: No data"
 

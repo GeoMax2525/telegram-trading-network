@@ -156,22 +156,40 @@ async def _score_chart(candidate: dict) -> tuple[float, str]:
 
 
 def _score_rug(candidate: dict) -> float:
-    """Score 0–100 based on rugcheck score. Higher rugcheck = safer = higher score."""
+    """
+    Score 0–100 based on rugcheck data.
+    Rugcheck API: score = RISK score (lower = safer).
+      score 0-10:   very safe  → 90-100
+      score 11-50:  safe       → 70-89
+      score 51-200: moderate   → 50-69
+      score 201-500: risky     → 30-49
+      score 500+:   dangerous  → 10-29
+    """
     rc = candidate.get("rugcheck")
     if rc is None:
-        return 40.0  # no data — slightly below neutral
+        logger.debug("Rug score: no rugcheck data — defaulting to 40")
+        return 40.0
 
-    # Rugcheck scores: 0-1000, 600+ is our minimum filter.
-    # Scale 600-1000 to 50-100
-    if rc >= 900:
-        return 100.0
-    if rc >= 800:
-        return 85.0
-    if rc >= 700:
-        return 70.0
-    if rc >= 600:
-        return 55.0
-    return 20.0  # below threshold (shouldn't reach here after scanner filter)
+    # Rugcheck score = risk score (lower = safer)
+    if rc <= 5:
+        safety = 95.0
+    elif rc <= 10:
+        safety = 90.0
+    elif rc <= 30:
+        safety = 80.0
+    elif rc <= 50:
+        safety = 70.0
+    elif rc <= 100:
+        safety = 60.0
+    elif rc <= 200:
+        safety = 50.0
+    elif rc <= 500:
+        safety = 35.0
+    else:
+        safety = 15.0
+
+    logger.info("Rug score: rugcheck raw=%d → safety=%.0f", rc, safety)
+    return safety
 
 
 async def _score_caller(candidate: dict) -> float:

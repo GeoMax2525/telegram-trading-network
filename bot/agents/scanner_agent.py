@@ -63,7 +63,7 @@ MAX_CANDIDATES  = 5      # max new candidates queued per tick
 MIN_MCAP        = 10_000
 MAX_MCAP        = 5_000_000
 MIN_LIQUIDITY   = 5_000
-MIN_RUGCHECK    = 600
+MAX_RUGCHECK_RISK = 500   # reject tokens with rugcheck risk score above this
 MIN_AI_SCORE    = 40
 MAX_AGE_HOURS   = 4
 MIN_BUYERS_M5   = 5
@@ -105,8 +105,9 @@ def _passes_rug_filter(rc_data: dict | None, mcap: float, liquidity: float) -> b
     if rc_data is None:
         return True   # no data — allow through; AI score will handle it
 
-    score = rc_data.get("score", 0)
-    if score < MIN_RUGCHECK:
+    # Rugcheck score = RISK score (lower = safer, higher = more risky)
+    risk_score = rc_data.get("score", 0)
+    if risk_score > MAX_RUGCHECK_RISK:
         return False
 
     risks = {r.get("name", "").lower() for r in (rc_data.get("risks") or [])}
@@ -450,8 +451,8 @@ async def _evaluate_candidate(
             rc_score_val = rc_data.get("score", 0)
             risks = {r.get("name", "").lower() for r in (rc_data.get("risks") or [])}
             flagged = risks & HIGH_RISK_FLAGS
-            if rc_score_val < MIN_RUGCHECK:
-                logger.info("Scanner REJECTED %s: rugcheck %d < %d", name, rc_score_val, MIN_RUGCHECK)
+            if rc_score_val > MAX_RUGCHECK_RISK:
+                logger.info("Scanner REJECTED %s: rugcheck risk %d > %d", name, rc_score_val, MAX_RUGCHECK_RISK)
             elif flagged:
                 logger.info("Scanner REJECTED %s: rug flags %s", name, flagged)
         return None
