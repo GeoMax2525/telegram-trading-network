@@ -13,7 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.config import MAIN_GROUP_ID, ADMIN_IDS
 from bot import state
-from bot.scanner import scan_token, fetch_current_market_cap, fetch_live_data, fetch_sol_price_usd
+from bot.scanner import scan_token, fetch_current_market_cap, fetch_live_data, fetch_sol_price_usd, fetch_token_data, parse_token_metrics
 from bot.keyboards import trade_card_keyboard, pnl_keyboard, top_calls_keyboard
 from bot.wallet import get_wallet_address, get_token_holding
 from database.models import (
@@ -24,7 +24,11 @@ from database.models import (
     get_candidate_stats_today, get_all_trade_params,
     get_chart_pattern_stats_today, get_chart_pattern_win_rates,
     get_pumpfun_count_today, get_pumpswap_count_today,
+    token_exists, save_token, get_token_by_mint,
+    get_tier_wallets, get_pattern_by_type, has_caller_scanned,
 )
+from bot.agents.confidence_engine import score_candidate
+from bot.agents.chart_detector import analyze_chart
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -601,6 +605,181 @@ async def cmd_patterns(message: Message):
 
     lines.append(f"_Updated: {datetime.utcnow().strftime('%H:%M:%S')} UTC_")
     await message.reply("\n".join(lines), parse_mode="Markdown")
+
+
+# ── /analyze <address> ────────────────────────────────────────────────────────
+
+@router.message(Command("analyze"))
+async def cmd_analyze(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        await message.reply("⛔ `/analyze` is only available in Callers HQ.")
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply("Usage: `/analyze <contract_address>`", parse_mode="Markdown")
+        return
+
+    address = parts[1].strip()
+    if len(address) < 32 or len(address) > 44:
+        await message.reply("⛔ Invalid contract address.")
+        return
+
+    status_msg = await message.reply("🔍 Running full agent analysis...")
+
+    try:
+        # ── Fetch token data ─────────────────────────────────────────────
+        pair = await fetch_token_data(address)
+        if not pair:
+            await status_msg.edit_text("⛔ Token not found on DexScreener.")
+            return
+
+        metrics = parse_token_metrics(pair)
+        name      = metrics.get("name", "Unknown")
+        symbol    = metrics.get("symbol", "???")
+        mcap      = metrics.get("market_cap", 0) or 0
+        liquidity = metrics.get("liquidity_usd", 0) or 0
+        price     = metrics.get("price_usd", 0) or 0
+
+        # ── Agent 1: Harvester — in DB? ──────────────────────────────────
+        in_db = await token_exists(address)
+        if not in_db:
+            await save_token(
+                mint=address, name=name, symbol=symbol,
+                price_usd=price, market_cap=mcap,
+                liquidity_usd=liquidity,
+                volume_24h=metrics.get("volume_24h"),
+                source="manual_analyze",
+            )
+            harvester_line = "🌾 Harvester: New token — added to DB ⚠️"
+        else:
+            harvester_line = "🌾 Harvester: In DB ✅"
+
+        # ── Agent 2: Wallet signal ───────────────────────────────────────
+        tier_wallets = await get_tier_wallets(max_tier=2)
+        wallet_line = f"👛 Wallets: {len(tier_wallets)} tracked (T1/T2)"
+
+        # ── Caller check ─────────────────────────────────────────────────
+        caller_scanned = await has_caller_scanned(address)
+        caller_line = (
+            "📞 Caller: Previously scanned ✅"
+            if caller_scanned
+            else "📞 Caller: Not scanned by callers"
+        )
+
+        # ── Agent 3: Pattern match ───────────────────────────────────────
+        pattern = await get_pattern_by_type("winner_2x")
+        if pattern:
+            from bot.agents.scanner_agent import _fingerprint_match
+            match_score = _fingerprint_match(pattern, mcap, liquidity, 0)
+            if match_score >= 50:
+                pattern_line = f"🧩 Pattern: winner\\_2x ✅ (score: {match_score:.0f})"
+            else:
+                pattern_line = f"🧩 Pattern: Weak match (score: {match_score:.0f})"
+        else:
+            match_score = 50
+            pattern_line = "🧩 Pattern: No patterns learned yet"
+
+        # ── Agent 7: Chart patterns ──────────────────────────────────────
+        chart_result = await analyze_chart({
+            "mint": address, "name": name, "symbol": symbol,
+            "mcap": mcap, "liquidity": liquidity, "insider_count": 0,
+        })
+        chart_score = chart_result.get("chart_score", 0)
+        chart_pattern = chart_result.get("pattern_name", "none")
+        chart_patterns = chart_result.get("patterns_detected", [])
+
+        if chart_pattern != "none":
+            chart_display = chart_pattern.replace("_", " ").title()
+            chart_line = f"📈 Chart: {chart_display} detected | Score: {chart_score:.0f}"
+        else:
+            chart_line = f"📈 Chart: No pattern detected | Score: {chart_score:.0f}"
+        if len(chart_patterns) > 1:
+            extras = ", ".join(p.replace("_", " ").title() for p in chart_patterns[1:3])
+            chart_line += f"\n     Also: {extras}"
+
+        # ── Rugcheck ─────────────────────────────────────────────────────
+        from bot.agents.scanner_agent import _fetch_rugcheck
+        rc_data = await _fetch_rugcheck(address)
+        rc_score = (rc_data or {}).get("score")
+        if rc_score is not None:
+            rc_icon = "✅" if rc_score >= 600 else "⚠️" if rc_score >= 400 else "🔴"
+            rug_line = f"🛡️ Rug Safety: {rc_score}/1000 {rc_icon}"
+        else:
+            rug_line = "🛡️ Rug Safety: No data"
+
+        # ── Agent 5: Full confidence score ───────────────────────────────
+        scan_data = await scan_token(address)
+        ai_score = scan_data.get("total", 0) if scan_data else 0
+
+        candidate = {
+            "mint": address, "name": name, "symbol": symbol,
+            "mcap": mcap, "liquidity": liquidity, "ai_score": ai_score,
+            "match_score": match_score, "rugcheck": rc_score,
+            "source": "manual_analyze", "insider_count": 0,
+        }
+        scored = await score_candidate(candidate)
+        confidence = scored.get("confidence_score", 0)
+        decision = scored.get("decision", "discard")
+
+        decision_map = {
+            "execute_full": "🟢 AUTO-EXECUTE (full position)",
+            "execute_half": "🟡 AUTO-EXECUTE (half position)",
+            "monitor":      "🔵 MONITOR (high interest)",
+            "discard":      "⚪ DISCARD (below threshold)",
+        }
+        decision_display = decision_map.get(decision, decision)
+
+        if decision in ("execute_full", "execute_half"):
+            action_line = "⚡ Would auto-buy if autotrade ON"
+        elif confidence >= 70:
+            action_line = f"⚡ Close — needs {80 - confidence:.0f} more points"
+        else:
+            action_line = "⚡ Would auto-buy at 80+ confidence"
+
+        tp = scored.get("trade_tp_x", 3.0)
+        sl = scored.get("trade_sl_pct", 30.0)
+        ps = scored.get("params_source", "default")
+
+        # ── Build report ─────────────────────────────────────────────────
+        mc_str = _format_usd(mcap) if mcap else "?"
+        liq_str = _format_usd(liquidity) if liquidity else "?"
+
+        report = "\n".join([
+            "🔍 *MANUAL AGENT ANALYSIS*",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"🪙 *{name}* (${symbol})",
+            f"📍 `{address}`",
+            f"💰 MC: {mc_str} | Liq: {liq_str}",
+            "",
+            "📊 *AGENT SCORES*",
+            harvester_line,
+            wallet_line,
+            caller_line,
+            pattern_line,
+            chart_line,
+            rug_line,
+            "",
+            f"🎯 *Confidence: {confidence:.0f}/100*",
+            f"   FP: {scored.get('fingerprint_score', 0):.0f} | "
+            f"Ins: {scored.get('insider_score', 0):.0f} | "
+            f"Chart: {chart_score:.0f} | "
+            f"Rug: {scored.get('rug_score', 0):.0f} | "
+            f"Call: {scored.get('caller_score', 0):.0f} | "
+            f"Mkt: {scored.get('market_score', 0):.0f}",
+            "",
+            f"💡 *{decision_display}*",
+            action_line,
+            f"📐 TP: {tp:.1f}x | SL: {sl:.0f}% | Params: _{ps}_",
+            "",
+            f"_Analyzed {datetime.utcnow().strftime('%H:%M:%S')} UTC_",
+        ])
+
+        await status_msg.edit_text(report, parse_mode="Markdown")
+
+    except Exception as exc:
+        logger.error("Analyze command failed for %s: %s", address, exc)
+        await status_msg.edit_text(f"⛔ Analysis failed: `{exc}`", parse_mode="Markdown")
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
