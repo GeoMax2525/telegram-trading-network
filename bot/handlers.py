@@ -227,29 +227,29 @@ def _mode_label() -> str:
 
 def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+
+    # Row 1: Paper trading toggle
+    if state.trade_mode == "paper":
+        paper_label = "📋 Paper Trading: ON ✅"
+    else:
+        paper_label = "📋 Paper Trading: OFF"
+    builder.row(InlineKeyboardButton(text=paper_label, callback_data="hub:toggle_paper"))
+
+    # Row 2: Live trading — locked
+    builder.row(InlineKeyboardButton(text="🟢 Live Trading: LOCKED 🔒", callback_data="hub:live_locked"))
+
+    # Row 3: Navigation
     builder.row(
         InlineKeyboardButton(text="🔄 Refresh",       callback_data="hub:refresh"),
         InlineKeyboardButton(text="🤖 Agent Details", callback_data="hub:agents"),
         InlineKeyboardButton(text="👛 Top Wallets",   callback_data="hub:wallets"),
     )
 
-    # Paper trade toggle: OFF ↔ PAPER. Live mode only via /autotrade live.
-    m = state.trade_mode
-    if m == "live":
-        toggle_label = "🟢 Live Trading: ON"
-    elif m == "paper":
-        toggle_label = "📋 Paper Trade: ON"
-    else:
-        toggle_label = "📋 Paper Trade: OFF"
-
-    builder.row(
-        InlineKeyboardButton(text="📈 Trade History", callback_data="hub:history"),
-        InlineKeyboardButton(text=toggle_label,       callback_data="hub:toggle_paper"),
-        InlineKeyboardButton(text="⚙️ Settings",      callback_data="hub:settings"),
-    )
+    # Row 4: Tools
     builder.row(
         InlineKeyboardButton(text="🔍 Analyze Token", callback_data="hub:analyze"),
         InlineKeyboardButton(text="📋 Paper Trades",  callback_data="hub:papertrades"),
+        InlineKeyboardButton(text="⚙️ Settings",      callback_data="hub:settings"),
     )
     return builder.as_markup()
 
@@ -483,23 +483,25 @@ async def cb_hub(callback: CallbackQuery):
             pass  # unchanged
 
     elif action == "toggle_paper":
-        # Toggle between OFF ↔ PAPER. If currently LIVE, turn off.
         if state.trade_mode == "paper":
             state.trade_mode = "off"
             state.autotrade_enabled = False
             await callback.answer("📋 Paper trading OFF")
-        elif state.trade_mode == "live":
-            state.trade_mode = "off"
-            state.autotrade_enabled = False
-            await callback.answer("🟢 Live trading OFF")
         else:
             state.trade_mode = "paper"
             state.autotrade_enabled = False
-            await callback.answer("📋 Paper trading ON")
+            await callback.answer("📋 Paper trading ON ✅")
         text = await _build_hub_text(state.autotrade_enabled)
         await callback.message.edit_text(
             text, parse_mode="Markdown",
             reply_markup=_hub_keyboard(state.autotrade_enabled),
+        )
+
+    elif action == "live_locked":
+        await callback.answer(
+            "🔒 Live trading will be enabled after paper trading validation.\n"
+            "Use /autotrade live when ready.",
+            show_alert=True,
         )
 
     elif action == "agents":
