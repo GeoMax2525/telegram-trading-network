@@ -28,9 +28,11 @@ from database.models import (
     get_pumpfun_count_today, get_pumpswap_count_today,
     token_exists, save_token, get_token_by_mint,
     get_tier_wallets, get_pattern_by_type, has_caller_scanned,
+    upsert_wallet,
 )
 from bot.agents.confidence_engine import score_candidate
 from bot.agents.chart_detector import analyze_chart
+from bot.agents.wallet_analyst import _get_early_buyers, _score_wallet
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -694,9 +696,47 @@ async def _run_analysis(address: str, status_msg: Message) -> None:
         else:
             harvester_line = "🌾 Harvester: In DB ✅"
 
-        # ── Agent 2: Wallet signal ───────────────────────────────────────
+        # ── Agent 2: Wallet signal + early buyer detection ────────────────
         tier_wallets = await get_tier_wallets(max_tier=2)
-        wallet_line = f"👛 Wallets: {len(tier_wallets)} tracked (T1/T2)"
+        known_addresses = {w.address for w in tier_wallets}
+
+        early_buyers = await _get_early_buyers(address, window_minutes=10)
+        insider_count = 0
+        new_wallets_added = 0
+        known_insiders = []
+
+        for buyer in early_buyers:
+            if buyer in known_addresses:
+                # Known tracked wallet bought early
+                insider_count += 1
+                # Find their tier
+                for w in tier_wallets:
+                    if w.address == buyer:
+                        known_insiders.append(f"{buyer[:4]}..{buyer[-4:]} (T{w.tier})")
+                        break
+            else:
+                # New wallet — add with initial score
+                score, tier = _score_wallet(
+                    wins=1, losses=0, total_trades=1,
+                    avg_multiple=1.0, early_entry_rate=1.0,
+                )
+                if tier > 0:
+                    await upsert_wallet(
+                        address=buyer, score=score, tier=tier,
+                        win_rate=1.0, avg_multiple=1.0,
+                        wins=1, losses=0, total_trades=1,
+                        avg_entry_mcap=mcap,
+                    )
+                    new_wallets_added += 1
+
+        wallet_line = f"👛 Early Buyers: {len(early_buyers)} found"
+        if new_wallets_added:
+            wallet_line += f" | {new_wallets_added} new wallets added"
+        if insider_count:
+            insider_names = ", ".join(known_insiders[:3])
+            wallet_line += f"\n🔥 Tier match: {insider_count} known insiders bought early"
+            if insider_names:
+                wallet_line += f"\n     {insider_names}"
 
         # ── Caller check ─────────────────────────────────────────────────
         caller_scanned = await has_caller_scanned(address)
@@ -755,7 +795,7 @@ async def _run_analysis(address: str, status_msg: Message) -> None:
             "mint": address, "name": name, "symbol": symbol,
             "mcap": mcap, "liquidity": liquidity, "ai_score": ai_score,
             "match_score": match_score, "rugcheck": rc_score,
-            "source": "manual_analyze", "insider_count": 0,
+            "source": "manual_analyze", "insider_count": insider_count,
         }
         scored = await score_candidate(candidate)
         confidence = scored.get("confidence_score", 0)
