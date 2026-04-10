@@ -47,6 +47,7 @@ from database.models import (
     get_pattern_by_type,
     token_exists,
     get_token_count,
+    open_paper_trade,
 )
 
 logger = logging.getLogger(__name__)
@@ -581,6 +582,24 @@ async def run_once() -> tuple[int, int]:
         except Exception as exc:
             logger.error("Scanner: Agent5 scoring failed for %s: %s", result["mint"][:12], exc)
             scored = result  # fall back to unscored candidate
+
+        # Open paper trade if Agent 5 flagged it
+        if scored.get("paper_trade"):
+            try:
+                await open_paper_trade(
+                    token_address=scored.get("mint", ""),
+                    token_name=scored.get("name"),
+                    entry_mc=scored.get("mcap"),
+                    entry_price=scored.get("mcap"),  # MC as entry reference
+                    paper_sol=0.5,
+                    confidence=scored.get("confidence_score", 0),
+                    pattern_type=scored.get("chart_pattern") or scored.get("source"),
+                    tp_x=scored.get("trade_tp_x", 3.0),
+                    sl_pct=scored.get("trade_sl_pct", 30.0),
+                )
+                logger.info("Scanner: paper trade opened for %s", scored.get("name", "?"))
+            except Exception as exc:
+                logger.error("Scanner: paper trade failed for %s: %s", scored.get("mint", "?")[:12], exc)
 
         state.pending_candidates.append(scored)
         state.scanner_candidates_today += 1

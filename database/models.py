@@ -168,6 +168,30 @@ class AgentWeights(Base):
     updated_at           = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
 
+# ── Paper Trades table ────────────────────────────────────────────────────────
+
+class PaperTrade(Base):
+    __tablename__ = "paper_trades"
+
+    id                = Column(Integer,     primary_key=True, autoincrement=True)
+    token_address     = Column(String(64),  nullable=False, index=True)
+    token_name        = Column(String(128), nullable=True)
+    entry_mc          = Column(Float,       nullable=True)
+    entry_price       = Column(Float,       nullable=True)
+    paper_sol_spent   = Column(Float,       nullable=False, default=0.5)
+    confidence_score  = Column(Float,       nullable=True)
+    pattern_type      = Column(String(64),  nullable=True)
+    take_profit_x     = Column(Float,       nullable=False, default=3.0)
+    stop_loss_pct     = Column(Float,       nullable=False, default=30.0)
+    status            = Column(String(16),  default="open",  nullable=False)
+    peak_mc           = Column(Float,       nullable=True)
+    peak_multiple     = Column(Float,       nullable=True)
+    close_reason      = Column(String(32),  nullable=True)   # tp_hit / sl_hit / expired
+    paper_pnl_sol     = Column(Float,       nullable=True)
+    opened_at         = Column(DateTime,    default=datetime.utcnow, nullable=False)
+    closed_at         = Column(DateTime,    nullable=True)
+
+
 # ── AI Trade Params table (Agent 6 — learned TP/SL/size) ────────────────────
 
 class AITradeParams(Base):
@@ -1669,3 +1693,115 @@ async def get_chart_pattern_win_rates() -> list[dict]:
 
         results.sort(key=lambda x: x["win_rate"], reverse=True)
         return results
+
+
+# ── Paper Trade helpers ──────────────────────────────────────────────────────
+
+async def open_paper_trade(
+    token_address: str, token_name: str | None,
+    entry_mc: float | None, entry_price: float | None,
+    paper_sol: float, confidence: float,
+    pattern_type: str | None, tp_x: float, sl_pct: float,
+) -> "PaperTrade":
+    async with AsyncSessionLocal() as session:
+        pt = PaperTrade(
+            token_address=token_address, token_name=token_name,
+            entry_mc=entry_mc, entry_price=entry_price,
+            paper_sol_spent=paper_sol, confidence_score=confidence,
+            pattern_type=pattern_type, take_profit_x=tp_x,
+            stop_loss_pct=sl_pct, status="open",
+            peak_mc=entry_mc, peak_multiple=1.0,
+        )
+        session.add(pt)
+        await session.commit()
+        await session.refresh(pt)
+        return pt
+
+
+async def get_open_paper_trades() -> list["PaperTrade"]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(PaperTrade).where(PaperTrade.status == "open")
+        )
+        return list(result.scalars().all())
+
+
+async def close_paper_trade(
+    trade_id: int, close_reason: str, pnl_sol: float, peak_mc: float | None, peak_mult: float | None,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(PaperTrade).where(PaperTrade.id == trade_id))
+        pt = result.scalar_one_or_none()
+        if pt:
+            pt.status = "closed"
+            pt.close_reason = close_reason
+            pt.paper_pnl_sol = pnl_sol
+            pt.closed_at = datetime.utcnow()
+            if peak_mc:
+                pt.peak_mc = peak_mc
+            if peak_mult:
+                pt.peak_multiple = peak_mult
+            await session.commit()
+
+
+async def update_paper_trade_peak(trade_id: int, current_mc: float, peak_mc: float, peak_mult: float) -> None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(PaperTrade).where(PaperTrade.id == trade_id))
+        pt = result.scalar_one_or_none()
+        if pt:
+            pt.peak_mc = peak_mc
+            pt.peak_multiple = peak_mult
+            await session.commit()
+
+
+async def get_paper_trade_stats() -> dict:
+    async with AsyncSessionLocal() as session:
+        total = (await session.execute(
+            select(func.count(PaperTrade.id))
+        )).scalar() or 0
+
+        closed = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.status == "closed", PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0
+
+        wins = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.status == "closed", PaperTrade.paper_pnl_sol > 0,
+            )
+        )).scalar() or 0
+
+        total_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0.0
+
+        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(PaperTrade.opened_at >= today)
+        )).scalar() or 0
+
+        today_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                PaperTrade.closed_at >= today, PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0.0
+
+        open_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+        )).scalar() or 0
+
+        recent = list((await session.execute(
+            select(PaperTrade).where(PaperTrade.status == "closed")
+            .order_by(PaperTrade.closed_at.desc()).limit(5)
+        )).scalars().all())
+
+    win_rate = round(wins / closed * 100) if closed > 0 else 0
+    return {
+        "total": total, "closed": closed, "wins": wins,
+        "win_rate": win_rate, "total_pnl": float(total_pnl),
+        "today_count": today_count, "today_pnl": float(today_pnl),
+        "open_count": open_count, "recent": recent,
+    }

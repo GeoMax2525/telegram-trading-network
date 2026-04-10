@@ -28,7 +28,7 @@ from database.models import (
     get_pumpfun_count_today, get_pumpswap_count_today,
     token_exists, save_token, get_token_by_mint,
     get_tier_wallets, get_pattern_by_type, has_caller_scanned,
-    upsert_wallet,
+    upsert_wallet, get_paper_trade_stats,
 )
 from bot.agents.confidence_engine import score_candidate
 from bot.agents.chart_detector import analyze_chart
@@ -216,6 +216,15 @@ async def _do_scan(message: Message, address: str) -> None:
 # ── /hub — Live Dashboard ─────────────────────────────────────────────────────
 
 
+def _mode_label() -> str:
+    m = state.trade_mode
+    if m == "live":
+        return "🟢 LIVE"
+    if m == "paper":
+        return "📋 PAPER"
+    return "🔴 OFF"
+
+
 def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -223,14 +232,14 @@ def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🤖 Agent Details", callback_data="hub:agents"),
         InlineKeyboardButton(text="👛 Top Wallets",   callback_data="hub:wallets"),
     )
-    at_label = "⚡ Autotrade ON" if autotrade else "⚡ Autotrade OFF"
     builder.row(
         InlineKeyboardButton(text="📈 Trade History", callback_data="hub:history"),
-        InlineKeyboardButton(text=at_label,           callback_data="hub:autotrade"),
+        InlineKeyboardButton(text=f"⚡ Mode: {_mode_label()}", callback_data="hub:cycle_mode"),
         InlineKeyboardButton(text="⚙️ Settings",      callback_data="hub:settings"),
     )
     builder.row(
         InlineKeyboardButton(text="🔍 Analyze Token", callback_data="hub:analyze"),
+        InlineKeyboardButton(text="📋 Paper Trades",  callback_data="hub:papertrades"),
     )
     return builder.as_markup()
 
@@ -370,7 +379,8 @@ async def _build_hub_text(autotrade: bool) -> str:
         f"{ce_stats['high_conf']} high conf | "
         f"{ce_stats['executed_today']} executed"
     )
-    exec_status = "ON 🟢" if autotrade else "OFF 🔴"
+    mode_display = _mode_label()
+    paper_stats = await get_paper_trade_stats()
 
     lines = [
         "🔑 *LOWKEY ALPHA HUB*",
@@ -384,11 +394,15 @@ async def _build_hub_text(autotrade: bool) -> str:
         ce_line,
         await _learning_loop_line(),
         await _chart_detector_line(),
-        f"⚡ Auto-execute: *{exec_status}*",
+        f"⚡ Trade Mode: *{mode_display}*",
         "",
         "📊 *PERFORMANCE*",
         f"Today: `{today_pnl:+.4f} SOL` | All Time: `{alltime_pnl:+.4f} SOL`",
         f"Win Rate: `{win_rate}%` | Closed Trades: `{total_closed}`",
+        "",
+        f"📋 *PAPER TRADING* ({paper_stats['open_count']} open)",
+        f"Today: `{paper_stats['today_count']}` trades | `{paper_stats['today_pnl']:+.4f} SOL`",
+        f"All time: `{paper_stats['win_rate']}%` WR | `{paper_stats['total_pnl']:+.4f} SOL`",
         "",
         "🔥 *TOP WALLETS*",
     ]
@@ -458,10 +472,12 @@ async def cb_hub(callback: CallbackQuery):
         except Exception:
             pass  # unchanged
 
-    elif action == "autotrade":
-        state.autotrade_enabled = not state.autotrade_enabled
-        status = "ON 🟢" if state.autotrade_enabled else "OFF 🔴"
-        await callback.answer(f"⚡ Autotrade {status}")
+    elif action == "cycle_mode":
+        # Cycle: off → paper → live → off
+        cycle = {"off": "paper", "paper": "live", "live": "off"}
+        state.trade_mode = cycle.get(state.trade_mode, "off")
+        state.autotrade_enabled = (state.trade_mode == "live")
+        await callback.answer(f"⚡ Mode: {_mode_label()}")
         text = await _build_hub_text(state.autotrade_enabled)
         await callback.message.edit_text(
             text, parse_mode="Markdown",
@@ -502,12 +518,30 @@ async def cb_hub(callback: CallbackQuery):
 
     elif action == "analyze":
         await callback.answer()
-        chat_id = callback.message.chat.id
-        _analyze_waiting.add(chat_id)
-        await callback.message.reply(
-            "🔍 Send the contract address to analyze:",
-            parse_mode=None,
-        )
+        _analyze_waiting.add(callback.message.chat.id)
+        await callback.message.reply("🔍 Send the contract address to analyze:", parse_mode=None)
+
+    elif action == "papertrades":
+        await callback.answer()
+        ps = await get_paper_trade_stats()
+        lines = [
+            "📋 *PAPER TRADING RESULTS*",
+            f"Total: `{ps['total']}` | Win rate: `{ps['win_rate']}%`",
+            f"Paper P&L: `{ps['total_pnl']:+.4f} SOL`",
+            f"Open: `{ps['open_count']}` | Today: `{ps['today_count']}`",
+            "",
+        ]
+        if ps["recent"]:
+            lines.append("📈 *Recent:*")
+            for pt in ps["recent"]:
+                n = (pt.token_name or "?").replace("_", "\\_")
+                if pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
+                    lines.append(f"✅ `{n}` — {pt.peak_multiple or 0:.1f}x | +{pt.paper_pnl_sol:.4f} SOL")
+                else:
+                    lines.append(f"❌ `{n}` — {pt.close_reason} | {pt.paper_pnl_sol or 0:.4f} SOL")
+        else:
+            lines.append("_No paper trades yet_")
+        await callback.message.reply("\n".join(lines), parse_mode="Markdown")
 
     else:
         await callback.answer()
@@ -540,7 +574,7 @@ async def cmd_wallets(message: Message):
     await message.reply("\n".join(lines), parse_mode="Markdown")
 
 
-# ── /autotrade on|off ────────────────────────────────────────────────────────
+# ── /autotrade off|paper|live ─────────────────────────────────────────────────
 
 @router.message(Command("autotrade"))
 async def cmd_autotrade(message: Message):
@@ -552,29 +586,63 @@ async def cmd_autotrade(message: Message):
         return
 
     parts = (message.text or "").split()
-    if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
-        current = "ON 🟢" if state.autotrade_enabled else "OFF 🔴"
+    valid_modes = ("off", "paper", "live", "on")
+    if len(parts) < 2 or parts[1].lower() not in valid_modes:
         await message.reply(
-            f"⚡ Autotrade is currently *{current}*\n"
-            f"Usage: `/autotrade on` or `/autotrade off`",
+            f"⚡ Trade mode: *{_mode_label()}*\n"
+            f"Usage: `/autotrade off` | `/autotrade paper` | `/autotrade live`",
             parse_mode="Markdown",
         )
         return
 
-    new_state = parts[1].lower() == "on"
-    state.autotrade_enabled = new_state
-    status = "ON 🟢" if new_state else "OFF 🔴"
+    mode = parts[1].lower()
+    if mode == "on":
+        mode = "live"  # legacy compat
+
+    state.trade_mode = mode
+    state.autotrade_enabled = (mode == "live")
+
+    mode_msgs = {
+        "off":   "🔴 OFF — Scanner running. Monitoring only.",
+        "paper": "📋 PAPER — Scanner running. Paper trades will execute.",
+        "live":  "🟢 LIVE — Scanner running. Real buys via Jupiter.",
+    }
     await message.reply(
-        f"⚡ Auto-execute turned *{status}*\n"
-        + ("_Scanner always running. Buys will execute automatically._" if new_state
-           else "_Scanner always running. Logging candidates silently._"),
+        f"⚡ Trade mode: *{_mode_label()}*\n_{mode_msgs[mode]}_",
         parse_mode="Markdown",
     )
-    logger.info(
-        "Autotrade %s by %s",
-        "enabled" if new_state else "disabled",
-        message.from_user.username or message.from_user.id,
-    )
+    logger.info("Trade mode set to %s by %s", mode, message.from_user.username or message.from_user.id)
+
+
+# ── /papertrades ──────────────────────────────────────────────────────────────
+
+@router.message(Command("papertrades"))
+async def cmd_papertrades(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        await message.reply("⛔ `/papertrades` is only available in Callers HQ.")
+        return
+
+    ps = await get_paper_trade_stats()
+    lines = [
+        "📋 PAPER TRADING RESULTS",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"Total: {ps['total']} | Win rate: {ps['win_rate']}%",
+        f"Paper P&L: {ps['total_pnl']:+.4f} SOL",
+        f"Open: {ps['open_count']} | Today: {ps['today_count']} ({ps['today_pnl']:+.4f} SOL)",
+        "",
+    ]
+    if ps["recent"]:
+        lines.append("Recent trades:")
+        for pt in ps["recent"]:
+            n = pt.token_name or "?"
+            if pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
+                lines.append(f"  ✅ {n} — {pt.peak_multiple or 0:.1f}x +{pt.paper_pnl_sol:.4f} SOL")
+            else:
+                lines.append(f"  ❌ {n} — {pt.close_reason} {pt.paper_pnl_sol or 0:.4f} SOL")
+    else:
+        lines.append("No paper trades yet. Set mode to PAPER: /autotrade paper")
+
+    await message.reply("\n".join(lines), parse_mode=None)
 
 
 # ── /patterns ─────────────────────────────────────────────────────────────────

@@ -8,8 +8,9 @@ Modules that read/write:
 
 from datetime import datetime
 
-# ── Autotrade toggle ──────────────────────────────────────────────────────────
-autotrade_enabled:        bool            = False
+# ── Trade mode: "off" / "paper" / "live" ─────────────────────────────────────
+trade_mode:               str             = "off"
+autotrade_enabled:        bool            = False   # legacy compat — True when mode is "live"
 
 # ── Scanner Agent 4 live stats (updated each tick) ───────────────────────────
 scanner_last_run:         datetime | None = None

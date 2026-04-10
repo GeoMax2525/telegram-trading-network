@@ -263,9 +263,13 @@ async def score_candidate(candidate: dict) -> dict:
     else:
         decision = "discard"
 
-    # Only mark as executed if autotrade is on AND decision is execute
+    # Execution: live mode = real trade, paper mode = paper trade, off = log only
     executed = (
-        state.autotrade_enabled
+        state.trade_mode == "live"
+        and decision in ("execute_full", "execute_half")
+    )
+    paper_trade = (
+        state.trade_mode == "paper"
         and decision in ("execute_full", "execute_half")
     )
 
@@ -324,6 +328,7 @@ async def score_candidate(candidate: dict) -> dict:
         "market_score":      market,
         "decision":          decision,
         "executed":          executed,
+        "paper_trade":       paper_trade,
         "trade_tp_x":        trade_tp_x,
         "trade_sl_pct":      trade_sl_pct,
         "trade_position_pct": trade_position_pct,
