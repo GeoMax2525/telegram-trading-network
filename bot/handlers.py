@@ -38,6 +38,10 @@ router = Router()
 CALLER_GROUP_ID = -1003852140576
 
 
+# Users waiting to input an address for /analyze (chat_id -> True)
+_analyze_waiting: set[int] = set()
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _verdict_emoji(verdict: str) -> str:
@@ -222,6 +226,9 @@ def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📈 Trade History", callback_data="hub:history"),
         InlineKeyboardButton(text=at_label,           callback_data="hub:autotrade"),
         InlineKeyboardButton(text="⚙️ Settings",      callback_data="hub:settings"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔍 Analyze Token", callback_data="hub:analyze"),
     )
     return builder.as_markup()
 
@@ -491,6 +498,15 @@ async def cb_hub(callback: CallbackQuery):
             "⚙️ Use /keybot to manage your trading settings.", show_alert=True
         )
 
+    elif action == "analyze":
+        await callback.answer()
+        chat_id = callback.message.chat.id
+        _analyze_waiting.add(chat_id)
+        await callback.message.reply(
+            "🔍 Send the contract address to analyze:",
+            parse_mode=None,
+        )
+
     else:
         await callback.answer()
 
@@ -611,30 +627,10 @@ async def cmd_patterns(message: Message):
     await message.reply("\n".join(lines), parse_mode="Markdown")
 
 
-# ── /analyze <address> ────────────────────────────────────────────────────────
+# ── Analyze: shared logic ─────────────────────────────────────────────────────
 
-@router.message(Command("analyze"))
-async def cmd_analyze(message: Message):
-    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        await message.reply("⛔ `/analyze` is only available in Callers HQ.")
-        return
-
-    parts = (message.text or "").split()
-    if len(parts) < 2:
-        await message.reply("Usage: `/analyze <contract_address>`", parse_mode="Markdown")
-        return
-
-    address = parts[1].strip()
-    # Strip any invisible/zero-width characters and trailing punctuation
-    address = re.sub(r'[^\w]', '', address) if not address.isalnum() else address
-    logger.info("Analyze: raw input=%r cleaned=%r len=%d", parts[1], address, len(address))
-
-    if len(address) < 32 or len(address) > 44:
-        await message.reply(f"⛔ Invalid contract address (len={len(address)}).")
-        return
-
-    status_msg = await message.reply("🔍 Running full agent analysis...")
-
+async def _run_analysis(address: str, status_msg: Message) -> None:
+    """Runs full agent analysis on address, edits status_msg with report."""
     try:
         # ── Fetch token data — try both DexScreener endpoints ────────────
         logger.info("Analyze: fetching DexScreener for %s", address)
@@ -825,6 +821,51 @@ async def cmd_analyze(message: Message):
     except Exception as exc:
         logger.error("Analyze command failed for %s: %s", address, exc)
         await status_msg.edit_text(f"⛔ Analysis failed: {exc}", parse_mode=None)
+
+
+# ── /analyze <address> command ─────────────────────────────────────────────────
+
+@router.message(Command("analyze"))
+async def cmd_analyze(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        await message.reply("⛔ `/analyze` is only available in Callers HQ.")
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        # No address provided — prompt for it (same as button flow)
+        _analyze_waiting.add(message.chat.id)
+        await message.reply("🔍 Send the contract address to analyze:", parse_mode=None)
+        return
+
+    raw_addr = parts[1].strip()
+    address = re.sub(r'[^\w]', '', raw_addr) if not raw_addr.isalnum() else raw_addr
+    logger.info("Analyze cmd: raw=%r cleaned=%r len=%d", raw_addr, address, len(address))
+
+    if len(address) < 32 or len(address) > 44:
+        await message.reply(f"⛔ Invalid address (len={len(address)}).", parse_mode=None)
+        return
+
+    status_msg = await message.reply("🔍 Running full agent analysis...", parse_mode=None)
+    await _run_analysis(address, status_msg)
+
+
+# ── Analyze: catch address after button/prompt ────────────────────────────────
+
+@router.message(lambda m: m.chat.id in _analyze_waiting and m.text and not m.text.startswith("/"))
+async def handle_analyze_address(message: Message):
+    _analyze_waiting.discard(message.chat.id)
+
+    raw_addr = (message.text or "").strip()
+    address = re.sub(r'[^\w]', '', raw_addr) if not raw_addr.isalnum() else raw_addr
+
+    if len(address) < 32 or len(address) > 44:
+        await message.reply(f"⛔ Invalid address (len={len(address)}).", parse_mode=None)
+        return
+
+    logger.info("Analyze button: address=%r len=%d", address, len(address))
+    status_msg = await message.reply("🔍 Running full agent analysis...", parse_mode=None)
+    await _run_analysis(address, status_msg)
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
