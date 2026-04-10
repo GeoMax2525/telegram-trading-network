@@ -668,7 +668,8 @@ async def cmd_analyze(message: Message):
 
         if not pair:
             await status_msg.edit_text(
-                f"⛔ Token not found on DexScreener.\nAddress: {address}"
+                f"⛔ Token not found on DexScreener.\nAddress: {address}",
+                parse_mode=None,
             )
             return
 
@@ -819,11 +820,11 @@ async def cmd_analyze(message: Message):
             f"Analyzed {datetime.utcnow().strftime('%H:%M:%S')} UTC",
         ])
 
-        await status_msg.edit_text(report)
+        await status_msg.edit_text(report, parse_mode=None)
 
     except Exception as exc:
         logger.error("Analyze command failed for %s: %s", address, exc)
-        await status_msg.edit_text(f"⛔ Analysis failed: {exc}")
+        await status_msg.edit_text(f"⛔ Analysis failed: {exc}", parse_mode=None)
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
