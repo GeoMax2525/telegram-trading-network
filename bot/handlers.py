@@ -1338,9 +1338,6 @@ async def cmd_deepanalyze(message: Message):
 async def cmd_backfill(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         return
-    if message.from_user.id not in ADMIN_IDS:
-        await message.reply("Admin only.", parse_mode=None)
-        return
 
     status = await message.reply("🔄 Starting backfill... this may take a few minutes.", parse_mode=None)
 
