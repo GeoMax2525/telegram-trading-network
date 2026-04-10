@@ -101,86 +101,132 @@ async def _parse_transactions(signatures: list[str]) -> list[dict]:
 
 # ── Early buyer detection ────────────────────────────────────────────────────
 
+async def _fetch_sigs_with_retry(address: str, limit: int = 200, retries: int = 3) -> list[dict]:
+    """Fetch signatures with retry logic. Tries up to `retries` times with 2s delay."""
+    for attempt in range(retries):
+        sigs = await _get_signatures(address, limit=limit)
+        if sigs:
+            return sigs
+        if attempt < retries - 1:
+            logger.info("Early buyers: 0 sigs for %s, retry %d/%d...", address[:12], attempt + 2, retries)
+            await asyncio.sleep(2)
+    return []
+
+
+async def _get_pair_address(mint: str) -> str | None:
+    """Get the DexScreener pair address for a token mint."""
+    from bot.scanner import fetch_token_data
+    pair = await fetch_token_data(mint)
+    if pair:
+        return pair.get("pairAddress")
+    return None
+
+
+async def _fetch_dexscreener_traders(pair_address: str, created_at_ms: int | None, window_minutes: int) -> list[str]:
+    """
+    Fallback: fetch early traders from DexScreener trades endpoint.
+    Returns list of wallet addresses (makers) from early trades.
+    """
+    url = f"https://api.dexscreener.com/latest/dex/trades/solana/{pair_address}"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json(content_type=None)
+    except Exception as exc:
+        logger.debug("DexScreener trades fetch failed: %s", exc)
+        return []
+
+    trades = data.get("trades") or (data if isinstance(data, list) else [])
+    if not trades:
+        return []
+
+    wallets: set[str] = set()
+    if created_at_ms:
+        cutoff_ms = created_at_ms + window_minutes * 60_000
+        for t in trades:
+            ts = t.get("blockTimestamp") or t.get("timestamp") or 0
+            maker = t.get("maker") or t.get("wallet")
+            if maker and ts <= cutoff_ms:
+                wallets.add(maker)
+    else:
+        # No creation time — just take first 20 unique makers
+        for t in trades[:50]:
+            maker = t.get("maker") or t.get("wallet")
+            if maker:
+                wallets.add(maker)
+            if len(wallets) >= 20:
+                break
+
+    return list(wallets)
+
+
 async def _get_early_buyers(
     mint: str,
     window_minutes: int = 10,
     created_at_ms: int | None = None,
 ) -> list[str]:
     """
-    Returns deduplicated wallet addresses that transacted on this token
+    Returns deduplicated wallet addresses that bought this token
     within the first `window_minutes` after launch.
 
-    If created_at_ms is provided (e.g. from DexScreener pairCreatedAt),
-    uses that as launch time. Otherwise paginates backwards to find the
-    actual first transaction.
+    Strategy:
+    1. Try getSignaturesForAddress on token mint (with retries)
+    2. If 0 results, try on the pair/pool address
+    3. If still 0, fallback to DexScreener trades endpoint
     """
-    # Get signatures — paginate backwards to find earliest transactions
-    all_sigs = []
-    last_sig = None
-    for _ in range(3):  # max 3 pages = 1500 signatures
-        payload = {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "getSignaturesForAddress",
-            "params": [mint, {"limit": 500, "commitment": "confirmed",
-                              **({"before": last_sig} if last_sig else {})}],
-        }
-        try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as session:
-                async with session.post(
-                    HELIUS_RPC_URL, json=payload,
-                    headers={"Content-Type": "application/json"},
-                ) as resp:
-                    if resp.status != 200:
-                        break
-                    data = await resp.json()
-                    batch = data.get("result") or []
-                    if not batch:
-                        break
-                    all_sigs.extend(batch)
-                    last_sig = batch[-1]["signature"]
-                    if len(batch) < 500:
-                        break  # no more pages
-        except Exception as exc:
-            logger.debug("_get_early_buyers pagination failed: %s", exc)
-            break
-
-    if not all_sigs:
-        return []
-
-    valid = [s for s in all_sigs if s.get("blockTime") and not s.get("err")]
-    if not valid:
-        return []
-
-    # Determine launch time
-    if created_at_ms:
-        launch_time = created_at_ms // 1000  # convert ms to seconds
-    else:
-        # Use the earliest transaction as launch time
-        launch_time = min(s["blockTime"] for s in valid)
-
-    cutoff = launch_time + window_minutes * 60
-
-    early_sigs = [s["signature"] for s in valid if s["blockTime"] <= cutoff]
-
-    logger.info(
-        "Early buyers %s: %d total sigs, launch=%d, cutoff=%d, early=%d",
-        mint[:12], len(valid), launch_time, cutoff, len(early_sigs),
-    )
-
-    if not early_sigs:
-        return []
-
-    # Parse early transactions to get wallet addresses
-    parsed = await _parse_transactions(early_sigs[:100])
-
     buyers: set[str] = set()
-    for tx in parsed:
-        fp = tx.get("feePayer")
-        if fp:
-            buyers.add(fp)
 
+    # ── Attempt 1: signatures on token mint ──────────────────────────
+    all_sigs = await _fetch_sigs_with_retry(mint, limit=500, retries=3)
+
+    # ── Attempt 2: signatures on pair address ────────────────────────
+    if not all_sigs:
+        pair_addr = await _get_pair_address(mint)
+        if pair_addr:
+            logger.info("Early buyers: trying pair address %s", pair_addr[:12])
+            all_sigs = await _fetch_sigs_with_retry(pair_addr, limit=500, retries=2)
+
+    # ── Process Helius signatures ────────────────────────────────────
+    if all_sigs:
+        valid = [s for s in all_sigs if s.get("blockTime") and not s.get("err")]
+
+        if valid:
+            if created_at_ms:
+                launch_time = created_at_ms // 1000
+            else:
+                launch_time = min(s["blockTime"] for s in valid)
+
+            cutoff = launch_time + window_minutes * 60
+            early_sigs = [s["signature"] for s in valid if s["blockTime"] <= cutoff]
+
+            logger.info(
+                "Early buyers %s: %d total sigs, launch=%d, early=%d",
+                mint[:12], len(valid), launch_time, len(early_sigs),
+            )
+
+            if early_sigs:
+                parsed = await _parse_transactions(early_sigs[:100])
+                for tx in parsed:
+                    fp = tx.get("feePayer")
+                    if fp:
+                        buyers.add(fp)
+                    # Also check tokenTransfers for receiver wallets
+                    for transfer in (tx.get("tokenTransfers") or []):
+                        to_addr = transfer.get("toUserAccount")
+                        if to_addr and transfer.get("mint") == mint:
+                            buyers.add(to_addr)
+
+    # ── Attempt 3: DexScreener trades fallback ───────────────────────
+    if not buyers:
+        pair_addr = await _get_pair_address(mint)
+        if pair_addr:
+            logger.info("Early buyers: trying DexScreener trades for %s", pair_addr[:12])
+            dex_buyers = await _fetch_dexscreener_traders(pair_addr, created_at_ms, window_minutes)
+            buyers.update(dex_buyers)
+
+    logger.info("Early buyers %s: found %d wallets", mint[:12], len(buyers))
     return list(buyers)
 
 
