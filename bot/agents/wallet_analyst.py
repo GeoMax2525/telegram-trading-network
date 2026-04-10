@@ -101,26 +101,78 @@ async def _parse_transactions(signatures: list[str]) -> list[dict]:
 
 # ── Early buyer detection ────────────────────────────────────────────────────
 
-async def _get_early_buyers(mint: str, window_minutes: int = 10) -> list[str]:
+async def _get_early_buyers(
+    mint: str,
+    window_minutes: int = 10,
+    created_at_ms: int | None = None,
+) -> list[str]:
     """
     Returns deduplicated wallet addresses that transacted on this token
     within the first `window_minutes` after launch.
+
+    If created_at_ms is provided (e.g. from DexScreener pairCreatedAt),
+    uses that as launch time. Otherwise paginates backwards to find the
+    actual first transaction.
     """
-    sigs = await _get_signatures(mint, limit=500)
-    if not sigs:
+    # Get signatures — paginate backwards to find earliest transactions
+    all_sigs = []
+    last_sig = None
+    for _ in range(3):  # max 3 pages = 1500 signatures
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getSignaturesForAddress",
+            "params": [mint, {"limit": 500, "commitment": "confirmed",
+                              **({"before": last_sig} if last_sig else {})}],
+        }
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as session:
+                async with session.post(
+                    HELIUS_RPC_URL, json=payload,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    if resp.status != 200:
+                        break
+                    data = await resp.json()
+                    batch = data.get("result") or []
+                    if not batch:
+                        break
+                    all_sigs.extend(batch)
+                    last_sig = batch[-1]["signature"]
+                    if len(batch) < 500:
+                        break  # no more pages
+        except Exception as exc:
+            logger.debug("_get_early_buyers pagination failed: %s", exc)
+            break
+
+    if not all_sigs:
         return []
 
-    valid = [s for s in sigs if s.get("blockTime") and not s.get("err")]
+    valid = [s for s in all_sigs if s.get("blockTime") and not s.get("err")]
     if not valid:
         return []
 
-    launch_time = min(s["blockTime"] for s in valid)
+    # Determine launch time
+    if created_at_ms:
+        launch_time = created_at_ms // 1000  # convert ms to seconds
+    else:
+        # Use the earliest transaction as launch time
+        launch_time = min(s["blockTime"] for s in valid)
+
     cutoff = launch_time + window_minutes * 60
 
     early_sigs = [s["signature"] for s in valid if s["blockTime"] <= cutoff]
+
+    logger.info(
+        "Early buyers %s: %d total sigs, launch=%d, cutoff=%d, early=%d",
+        mint[:12], len(valid), launch_time, cutoff, len(early_sigs),
+    )
+
     if not early_sigs:
         return []
 
+    # Parse early transactions to get wallet addresses
     parsed = await _parse_transactions(early_sigs[:100])
 
     buyers: set[str] = set()

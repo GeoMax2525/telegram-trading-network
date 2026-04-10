@@ -844,7 +844,11 @@ async def _run_analysis(address: str, status_msg: Message) -> None:
         tier_wallets = await get_tier_wallets(max_tier=2)
         known_addresses = {w.address for w in tier_wallets}
 
-        early_buyers = await _get_early_buyers(address, window_minutes=10)
+        # Get token creation time from DexScreener pair data
+        created_at_ms = pair.get("pairCreatedAt")
+        early_buyers = await _get_early_buyers(
+            address, window_minutes=10, created_at_ms=created_at_ms,
+        )
         insider_count = 0
         new_wallets_added = 0
         known_insiders = []
