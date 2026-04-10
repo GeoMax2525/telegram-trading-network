@@ -232,9 +232,9 @@ def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
 
     # Row 1: Paper trading toggle
     if state.trade_mode == "paper":
-        paper_label = "📋 Paper Trading: ON ✅"
+        paper_label = "📋 Paper Trading: ✅ ON"
     else:
-        paper_label = "📋 Paper Trading: OFF"
+        paper_label = "📋 Paper Trading: ❌ OFF"
     builder.row(InlineKeyboardButton(text=paper_label, callback_data="hub:toggle_paper"))
 
     # Row 2: Live trading — locked
@@ -409,15 +409,22 @@ async def _build_hub_text(autotrade: bool) -> str:
         await _learning_loop_line(),
         await _chart_detector_line(),
         f"⚡ Trade Mode: *{mode_display}*",
-        "",
-        *([
+    ]
+
+    # Chaos mode section — only in paper mode
+    if state.trade_mode == "paper":
+        pnl_val = state.paper_balance - state.PAPER_STARTING_BALANCE
+        pnl_pct = ((state.paper_balance / state.PAPER_STARTING_BALANCE) - 1) * 100
+        resets = f" | Resets: {state.paper_resets}" if state.paper_resets else ""
+        lines += [
+            "",
             "🔥 *CHAOS MODE — Max data collection*",
             f"💼 Paper Balance: `{state.paper_balance:.2f} SOL` / {state.PAPER_STARTING_BALANCE:.0f} SOL",
-            f"📈 Paper P&L: `{state.paper_balance - state.PAPER_STARTING_BALANCE:+.2f} SOL` "
-            f"(`{((state.paper_balance / state.PAPER_STARTING_BALANCE) - 1) * 100:+.1f}%`)"
-            + (f" | Resets: {state.paper_resets}" if state.paper_resets else ""),
-            f"📊 Data points: `{state.data_points_today}` | Paper today: `{state.paper_trades_today}`",
-        ] if state.trade_mode == "paper" else []),
+            f"📈 Paper P&L: `{pnl_val:+.2f} SOL` (`{pnl_pct:+.1f}%`){resets}",
+            f"📊 Candidates: `{state.data_points_today}` | Paper trades: `{state.paper_trades_today}`",
+        ]
+
+    lines += [
         "",
         "📊 *PERFORMANCE*",
         f"Today: `{today_pnl:+.4f} SOL` | All Time: `{alltime_pnl:+.4f} SOL`",
