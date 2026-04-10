@@ -157,39 +157,31 @@ async def _score_chart(candidate: dict) -> tuple[float, str]:
 
 def _score_rug(candidate: dict) -> float:
     """
-    Score 0–100 based on rugcheck data.
-    Rugcheck API: score = RISK score (lower = safer).
-      score 0-10:   very safe  → 90-100
-      score 11-50:  safe       → 70-89
-      score 51-200: moderate   → 50-69
-      score 201-500: risky     → 30-49
-      score 500+:   dangerous  → 10-29
+    Returns 1–100 safety score (higher = safer).
+
+    Uses rugcheck_normalised (1-10 risk scale from API) if available,
+    otherwise falls back to raw rugcheck score.
+    Inverts risk into safety: safety = 100 - (risk_normalised * 10).
     """
-    rc = candidate.get("rugcheck")
-    if rc is None:
-        logger.debug("Rug score: no rugcheck data — defaulting to 40")
-        return 40.0
+    rc_norm = candidate.get("rugcheck_normalised")
+    rc_raw = candidate.get("rugcheck")
 
-    # Rugcheck score = risk score (lower = safer)
-    if rc <= 5:
-        safety = 95.0
-    elif rc <= 10:
-        safety = 90.0
-    elif rc <= 30:
-        safety = 80.0
-    elif rc <= 50:
-        safety = 70.0
-    elif rc <= 100:
-        safety = 60.0
-    elif rc <= 200:
-        safety = 50.0
-    elif rc <= 500:
-        safety = 35.0
-    else:
-        safety = 15.0
+    if rc_norm is not None:
+        # score_normalised is 1-10, lower = safer
+        # Convert: 1 → 90, 5 → 50, 10 → 0  then clamp to 1-100
+        safety = max(1.0, min(100.0, 100.0 - (rc_norm * 10.0)))
+        logger.info("Rug score: normalised=%s → safety=%.0f", rc_norm, safety)
+        return safety
 
-    logger.info("Rug score: rugcheck raw=%d → safety=%.0f", rc, safety)
-    return safety
+    if rc_raw is not None:
+        # Raw score is unbounded risk. Map to 1-100 safety.
+        # 0-5 risk → 95, 50 → 70, 100 → 55, 200 → 40, 500+ → 10
+        safety = max(1.0, min(100.0, 100.0 - min(rc_raw, 1000) / 10.0))
+        logger.info("Rug score: raw=%s → safety=%.0f", rc_raw, safety)
+        return safety
+
+    logger.debug("Rug score: no rugcheck data — defaulting to 40")
+    return 40.0
 
 
 async def _score_caller(candidate: dict) -> float:

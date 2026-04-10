@@ -781,11 +781,19 @@ async def _run_analysis(address: str, status_msg: Message) -> None:
         from bot.agents.scanner_agent import _fetch_rugcheck
         rc_data = await _fetch_rugcheck(address)
         rc_score = (rc_data or {}).get("score")
-        if rc_score is not None:
-            # Rugcheck score = risk score (lower = safer)
-            rc_icon = "✅" if rc_score <= 50 else "⚠️" if rc_score <= 200 else "🔴"
-            rc_label = "Low risk" if rc_score <= 50 else "Moderate" if rc_score <= 200 else "High risk"
-            rug_line = f"🛡️ Rug Safety: risk={rc_score} ({rc_label}) {rc_icon}"
+        rc_norm = (rc_data or {}).get("score_normalised")
+
+        if rc_norm is not None:
+            # Convert normalised (1-10 risk) to 1-100 safety
+            safety_100 = max(1, min(100, round(100 - rc_norm * 10)))
+        elif rc_score is not None:
+            safety_100 = max(1, min(100, round(100 - min(rc_score, 1000) / 10)))
+        else:
+            safety_100 = None
+
+        if safety_100 is not None:
+            rc_icon = "✅" if safety_100 >= 70 else "⚠️" if safety_100 >= 40 else "🔴"
+            rug_line = f"🛡️ Rug Safety: {safety_100}/100 {rc_icon}"
         else:
             rug_line = "🛡️ Rug Safety: No data"
 
@@ -797,6 +805,7 @@ async def _run_analysis(address: str, status_msg: Message) -> None:
             "mint": address, "name": name, "symbol": symbol,
             "mcap": mcap, "liquidity": liquidity, "ai_score": ai_score,
             "match_score": match_score, "rugcheck": rc_score,
+            "rugcheck_normalised": rc_norm,
             "source": "manual_analyze", "insider_count": insider_count,
         }
         scored = await score_candidate(candidate)

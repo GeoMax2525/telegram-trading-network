@@ -472,18 +472,20 @@ async def _evaluate_candidate(
     match_score = _fingerprint_match(pattern, mcap, liquidity, ai_score)
 
     rc_score = (rc_data or {}).get("score")
+    rc_norm = (rc_data or {}).get("score_normalised")
     return {
-        "mint":         mint,
-        "name":         name,
-        "symbol":       symbol,
-        "source":       raw.get("source", "unknown"),
-        "ai_score":     round(ai_score, 1),
-        "match_score":  match_score,
-        "mcap":         mcap,
-        "liquidity":    liquidity,
-        "rugcheck":     rc_score,
-        "found_at":     datetime.utcnow().isoformat(),
-        "insider_count": raw.get("insider_count", 0),
+        "mint":                  mint,
+        "name":                  name,
+        "symbol":                symbol,
+        "source":                raw.get("source", "unknown"),
+        "ai_score":              round(ai_score, 1),
+        "match_score":           match_score,
+        "mcap":                  mcap,
+        "liquidity":             liquidity,
+        "rugcheck":              rc_score,
+        "rugcheck_normalised":   rc_norm,
+        "found_at":              datetime.utcnow().isoformat(),
+        "insider_count":         raw.get("insider_count", 0),
     }
 
 
