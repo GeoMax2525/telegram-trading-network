@@ -500,21 +500,23 @@ async def analyze_chart(candidate: dict) -> dict:
 
     data = candle_data[0]
 
-    # Run all pattern detectors
+    # Run all pattern detectors — log every attempt
     detected: list[tuple[str, float]] = []
+    all_scores: list[str] = []
 
     for name, detector in ALL_PATTERNS.items():
-        if name == "launchpad_setup":
-            score, matched = detector(data)
-        else:
-            score, matched = detector(data)
-        if matched:
+        score, matched = detector(data)
+        all_scores.append(f"{name}:{score:.0f}{'*' if matched else ''}")
+        if score > 0:  # chaos mode: include all non-zero scores
             detected.append((name, score))
 
     # Insider accumulation (special — needs insider_count)
     ins_score, ins_matched = _detect_insider_accumulation(data, insider_count)
-    if ins_matched:
+    all_scores.append(f"insider_accum:{ins_score:.0f}{'*' if ins_matched else ''}")
+    if ins_score > 0:
         detected.append(("insider_accumulation", ins_score))
+
+    logger.info("Chart[%s]: all patterns: %s", mint[:12], " | ".join(all_scores))
 
     # Sort by score descending
     detected.sort(key=lambda x: x[1], reverse=True)
@@ -555,8 +557,8 @@ async def analyze_chart(candidate: dict) -> dict:
     elif momentum == "bearish":
         base_score -= 10.0
 
-    # Clamp to 0-100
-    chart_score = round(max(0.0, min(100.0, base_score)), 1)
+    # Clamp to 15-100 (chaos mode: never return 0)
+    chart_score = round(max(15.0, min(100.0, base_score)), 1)
 
     pattern_names = [d[0] for d in detected]
 

@@ -12,6 +12,7 @@ Runs every 5 minutes. For each open paper trade:
 import asyncio
 import logging
 
+from bot import state
 from bot.config import CALLER_GROUP_ID
 from bot.scanner import fetch_live_data
 from database.models import (
@@ -56,12 +57,15 @@ async def _check_paper_trades(bot) -> None:
             if current_mult >= pt.take_profit_x:
                 pnl = round(sol * (current_mult - 1), 4)
                 await close_paper_trade(pt.id, "tp_hit", pnl, peak_mc, peak_mult)
-                logger.info("Paper: TP hit %s — %.1fx +%.4f SOL", name, current_mult, pnl)
+                state.paper_balance += sol + pnl  # return spent + profit
+                logger.info("Paper: TP hit %s — %.1fx +%.4f SOL bal=%.4f",
+                            name, current_mult, pnl, state.paper_balance)
                 try:
                     await bot.send_message(CALLER_GROUP_ID, "\n".join([
-                        f"✅ PAPER TRADE CLOSED - WIN",
-                        f"🪙 {name} | {current_mult:.1f}x | +{pnl:.4f} paper SOL",
-                        f"Entry MC: ${entry_mc/1000:.0f}K | Exit MC: ${current_mc/1000:.0f}K",
+                        f"✅ PAPER TRADE WIN",
+                        f"🪙 {name} | {current_mult:.1f}x | +{pnl:.4f} SOL",
+                        f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
+                        f"Balance: {state.paper_balance:.4f} SOL",
                     ]))
                 except Exception:
                     pass
@@ -72,12 +76,15 @@ async def _check_paper_trades(bot) -> None:
             if current_mult <= sl_threshold:
                 pnl = round(-sol * (1.0 - current_mult), 4)
                 await close_paper_trade(pt.id, "sl_hit", pnl, peak_mc, peak_mult)
-                logger.info("Paper: SL hit %s — %.2fx %.4f SOL", name, current_mult, pnl)
+                state.paper_balance += sol + pnl  # return remaining
+                logger.info("Paper: SL hit %s — %.2fx %.4f SOL bal=%.4f",
+                            name, current_mult, pnl, state.paper_balance)
                 try:
                     await bot.send_message(CALLER_GROUP_ID, "\n".join([
-                        f"❌ PAPER TRADE CLOSED - LOSS",
-                        f"🪙 {name} | SL hit | {pnl:.4f} paper SOL",
-                        f"Entry MC: ${entry_mc/1000:.0f}K | Exit MC: ${current_mc/1000:.0f}K",
+                        f"❌ PAPER TRADE LOSS",
+                        f"🪙 {name} | SL hit | {pnl:.4f} SOL",
+                        f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
+                        f"Balance: {state.paper_balance:.4f} SOL",
                     ]))
                 except Exception:
                     pass

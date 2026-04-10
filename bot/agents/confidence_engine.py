@@ -312,15 +312,14 @@ async def score_candidate(candidate: dict) -> dict:
         and decision in ("execute_full", "execute_half")
     )
 
-    # PAPER execution: 45+ confidence, no hard gates
+    # PAPER execution: 20+ confidence, NO gates (chaos mode — max data)
     paper_trade = (
         state.trade_mode == "paper"
-        and confidence >= 45
+        and confidence >= 20
     )
 
-    # Always log paper trade check so we can debug
     logger.info(
-        "Agent5: PAPER CHECK — %s mode=%s conf=%.1f threshold=45 result=%s",
+        "Agent5: PAPER CHECK — %s mode=%s conf=%.1f threshold=20 result=%s",
         candidate.get("name", "?")[:20], state.trade_mode, confidence,
         "TRIGGER" if paper_trade else f"SKIP(mode={state.trade_mode},conf={confidence:.1f})",
     )

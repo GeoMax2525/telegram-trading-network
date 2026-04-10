@@ -41,7 +41,7 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL = 86_400   # 24 hours
+POLL_INTERVAL = 21_600   # 6 hours (chaos mode: was 24 hours)
 STARTUP_DELAY = 120      # seconds after bot start
 MIN_SAMPLES   = 3        # minimum scans needed to emit a pattern
 

@@ -37,7 +37,7 @@ from database.models import (
 logger = logging.getLogger(__name__)
 
 HELIUS_ENHANCED_URL = "https://api.helius.xyz/v0/transactions"
-POLL_INTERVAL       = 3600   # 1 hour
+POLL_INTERVAL       = 1800   # 30 minutes (chaos mode: was 1 hour)
 STARTUP_DELAY       = 90     # seconds after bot start
 MAX_WALLETS_PER_RUN = 30     # cap to avoid rate limits
 EARLY_MC_THRESHOLD  = 200_000  # $200K MC = early entry
@@ -275,9 +275,9 @@ def _score_wallet(
     score  = round(score, 1)
 
     tier = (
-        1 if score >= 80 else
-        2 if score >= 60 else
-        3 if score >= 40 else 0
+        1 if score >= 60 else
+        2 if score >= 40 else
+        3 if score >= 20 else 0
     )
     return score, tier
 

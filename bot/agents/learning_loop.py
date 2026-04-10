@@ -52,12 +52,12 @@ from database.models import (
 logger = logging.getLogger(__name__)
 
 # Intervals
-MICRO_BATCH      = 10    # micro-adjust every N trades
-FULL_BATCH       = 50    # full review every N trades
-MAJOR_BATCH      = 100   # major recalibration every N trades
-POLL_INTERVAL    = 120   # check every 2 minutes (was 5)
+MICRO_BATCH      = 3     # micro-adjust every N trades (chaos: was 10)
+FULL_BATCH       = 5     # full review every N trades (chaos: was 50)
+MAJOR_BATCH      = 15    # major recalibration every N trades (chaos: was 100)
+POLL_INTERVAL    = 60    # check every 1 minute (chaos: was 2 min)
 STARTUP_DELAY    = 120
-MAX_WEIGHT_SHIFT = 0.05
+MAX_WEIGHT_SHIFT = 0.10  # aggressive tuning (chaos: was 0.05)
 MIN_WEIGHT       = 0.02
 WEEKLY_HOUR      = 9
 

@@ -56,9 +56,9 @@ PROFILES_URL    = "https://api.dexscreener.com/token-profiles/latest/v1"
 RUGCHECK_URL    = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 HELIUS_ENHANCED = "https://api.helius.xyz/v0/transactions"
 
-POLL_INTERVAL   = 30     # seconds
+POLL_INTERVAL   = 15     # seconds (chaos mode: was 30)
 STARTUP_DELAY   = 60     # seconds after bot start
-MAX_CANDIDATES  = 5      # max new candidates queued per tick
+MAX_CANDIDATES  = 10     # max new candidates queued per tick (was 5)
 
 # Filters
 MIN_MCAP        = 10_000
@@ -430,6 +430,8 @@ async def _evaluate_candidate(
     name      = raw.get("name",   "Unknown")
     symbol    = raw.get("symbol", "???")
 
+    is_paper = state.trade_mode == "paper"
+
     if not mcap or not liquidity:
         pair = await fetch_token_data(mint)
         if pair is None:
@@ -440,36 +442,47 @@ async def _evaluate_candidate(
         liquidity = metrics.get("liquidity_usd", 0) or 0
         name      = metrics.get("name",   name)
         symbol    = metrics.get("symbol", symbol)
-        if not mcap:
-            logger.info("Scanner REJECTED %s (%s): no market cap data", name, mint[:12])
-            return None
 
     # Rugcheck
     rc_data = await _fetch_rugcheck(mint)
-    if not _passes_rug_filter(rc_data, mcap, liquidity):
-        # Log specific reason for rejection
-        if not (MIN_MCAP <= mcap <= MAX_MCAP):
-            logger.info("Scanner REJECTED %s: mcap $%.0f outside $%d–$%d", name, mcap, MIN_MCAP, MAX_MCAP)
-        elif liquidity < MIN_LIQUIDITY:
-            logger.info("Scanner REJECTED %s: liquidity $%.0f < $%d", name, liquidity, MIN_LIQUIDITY)
-        elif rc_data:
-            rc_score_val = rc_data.get("score", 0)
-            risks = {r.get("name", "").lower() for r in (rc_data.get("risks") or [])}
-            flagged = risks & HIGH_RISK_FLAGS
-            if rc_score_val > MAX_RUGCHECK_RISK:
-                logger.info("Scanner REJECTED %s: rugcheck risk %d > %d", name, rc_score_val, MAX_RUGCHECK_RISK)
-            elif flagged:
-                logger.info("Scanner REJECTED %s: rug flags %s", name, flagged)
-        return None
+
+    if is_paper:
+        # CHAOS MODE: skip all filters, just log
+        if not mcap:
+            logger.info("Scanner[paper] %s: no MC data, passing anyway", name)
+    else:
+        # LIVE MODE: enforce all filters
+        if not mcap:
+            logger.info("Scanner REJECTED %s (%s): no market cap data", name, mint[:12])
+            return None
+        if not _passes_rug_filter(rc_data, mcap, liquidity):
+            if not (MIN_MCAP <= mcap <= MAX_MCAP):
+                logger.info("Scanner REJECTED %s: mcap $%.0f outside $%d–$%d", name, mcap, MIN_MCAP, MAX_MCAP)
+            elif liquidity < MIN_LIQUIDITY:
+                logger.info("Scanner REJECTED %s: liquidity $%.0f < $%d", name, liquidity, MIN_LIQUIDITY)
+            elif rc_data:
+                rc_score_val = rc_data.get("score", 0)
+                risks = {r.get("name", "").lower() for r in (rc_data.get("risks") or [])}
+                flagged = risks & HIGH_RISK_FLAGS
+                if rc_score_val > MAX_RUGCHECK_RISK:
+                    logger.info("Scanner REJECTED %s: rugcheck risk %d > %d", name, rc_score_val, MAX_RUGCHECK_RISK)
+                elif flagged:
+                    logger.info("Scanner REJECTED %s: rug flags %s", name, flagged)
+            return None
 
     # AI score via full scan_token
     scan_data = await scan_token(mint)
+    ai_score = 0
     if scan_data is None:
-        logger.info("Scanner REJECTED %s: scan_token returned None (API fail)", name)
-        return None
-    ai_score = scan_data.get("total", 0)
+        if is_paper:
+            logger.info("Scanner[paper] %s: scan_token failed, using ai_score=0", name)
+        else:
+            logger.info("Scanner REJECTED %s: scan_token returned None (API fail)", name)
+            return None
+    else:
+        ai_score = scan_data.get("total", 0)
 
-    if ai_score < MIN_AI_SCORE:
+    if not is_paper and ai_score < MIN_AI_SCORE:
         logger.info("Scanner REJECTED %s: AI score %.0f < %d", name, ai_score, MIN_AI_SCORE)
         return None
 
@@ -565,15 +578,17 @@ async def run_once() -> tuple[int, int]:
             logger.warning("Scanner: evaluation exception: %s", r)
 
     queued = 0
+    is_paper_mode = state.trade_mode == "paper"
     for result in evaluated:
         if not isinstance(result, dict):
             continue
-        if result["match_score"] < 30:
+        if not is_paper_mode and result["match_score"] < 30:
             logger.info(
                 "Scanner REJECTED %s: match_score=%.0f < 30",
                 result.get("name", result["mint"][:12]), result["match_score"],
             )
             continue
+        state.data_points_today += 1
 
         # Pass every qualifying candidate to Agent 5 for confidence scoring
         try:
@@ -589,26 +604,33 @@ async def run_once() -> tuple[int, int]:
 
         # Open paper trade if Agent 5 flagged it
         if scored.get("paper_trade"):
-            logger.info(
-                "Scanner: PAPER TRADE triggered for %s (%s) confidence=%.0f",
-                scored.get("name", "?"), scored.get("mint", "?")[:12],
-                scored.get("confidence_score", 0),
-            )
-            try:
-                pt = await open_paper_trade(
-                    token_address=scored.get("mint", ""),
-                    token_name=scored.get("name"),
-                    entry_mc=scored.get("mcap"),
-                    entry_price=scored.get("mcap"),
-                    paper_sol=0.5,
-                    confidence=scored.get("confidence_score", 0),
-                    pattern_type=scored.get("chart_pattern") or scored.get("source"),
-                    tp_x=scored.get("trade_tp_x", 3.0),
-                    sl_pct=scored.get("trade_sl_pct", 30.0),
+            # Position size: 15% of virtual balance, capped
+            paper_sol = min(state.paper_balance * 0.15, state.paper_balance)
+            if paper_sol < 0.01:
+                logger.info("Scanner: paper balance depleted (%.4f SOL), skipping", state.paper_balance)
+            else:
+                logger.info(
+                    "Scanner: PAPER TRADE for %s (%s) conf=%.0f sol=%.4f",
+                    scored.get("name", "?"), scored.get("mint", "?")[:12],
+                    scored.get("confidence_score", 0), paper_sol,
                 )
-                logger.info("Scanner: paper trade saved to DB id=%s for %s", pt.id, scored.get("name", "?"))
-            except Exception as exc:
-                logger.error("Scanner: paper trade DB save failed for %s: %s", scored.get("mint", "?")[:12], exc)
+                try:
+                    pt = await open_paper_trade(
+                        token_address=scored.get("mint", ""),
+                        token_name=scored.get("name"),
+                        entry_mc=scored.get("mcap"),
+                        entry_price=scored.get("mcap"),
+                        paper_sol=round(paper_sol, 4),
+                        confidence=scored.get("confidence_score", 0),
+                        pattern_type=scored.get("chart_pattern") or scored.get("source"),
+                        tp_x=scored.get("trade_tp_x", 3.0),
+                        sl_pct=scored.get("trade_sl_pct", 30.0),
+                    )
+                    state.paper_balance -= paper_sol
+                    state.paper_trades_today += 1
+                    logger.info("Scanner: paper trade id=%s bal=%.4f SOL", pt.id, state.paper_balance)
+                except Exception as exc:
+                    logger.error("Scanner: paper trade DB failed for %s: %s", scored.get("mint", "?")[:12], exc)
 
         state.pending_candidates.append(scored)
         state.scanner_candidates_today += 1
