@@ -434,7 +434,7 @@ async def _build_hub_text(autotrade: bool) -> str:
             short = f"{w.address[:4]}...{w.address[-4:]}"
             lines.append(
                 f"#{i} `{short}` | Score: {w.score:.0f} | "
-                f"Win: {w.win_rate * 100:.0f}% | Avg: {w.avg_multiple:.1f}x | Tier {w.tier}"
+                f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | Avg: {w.avg_multiple:.1f}x | Tier {w.tier}"
             )
 
     lines += [
@@ -530,7 +530,7 @@ async def cb_hub(callback: CallbackQuery):
                 short = f"{w.address[:4]}...{w.address[-4:]}"
                 lines.append(
                     f"#{i} `{short}` | Score: {w.score:.0f} | "
-                    f"{w.wins}W {w.losses}L | Tier {w.tier} | Avg: {w.avg_multiple:.1f}x"
+                    f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | Avg: {w.avg_multiple:.1f}x | Tier {w.tier}"
                 )
             await callback.answer()
             await callback.message.reply("\n".join(lines), parse_mode="Markdown")
@@ -598,7 +598,7 @@ async def cmd_wallets(message: Message):
         short = f"{w.address[:4]}...{w.address[-4:]}"
         lines.append(
             f"#{i} `{short}` | Score: {w.score:.0f} | "
-            f"{w.wins}W {w.losses}L | Tier {w.tier} | Avg: {w.avg_multiple:.1f}x"
+            f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | Avg: {w.avg_multiple:.1f}x | Tier {w.tier}"
         )
     await message.reply("\n".join(lines), parse_mode="Markdown")
 
