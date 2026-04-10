@@ -31,6 +31,7 @@ from database.models import (
     upsert_wallet, get_paper_trade_stats,
     get_all_params, get_recent_param_changes,
     upsert_pattern, set_param, compute_paper_balance,
+    get_all_tokens, update_token_market_cap,
 )
 from bot.agents.confidence_engine import score_candidate
 from bot.agents.chart_detector import analyze_chart
@@ -1329,6 +1330,164 @@ async def cmd_deepanalyze(message: Message):
     except Exception as exc:
         logger.error("Deep analyze failed for %s: %s", address, exc)
         await status.edit_text(f"Deep analysis failed: {exc}", parse_mode=None)
+
+
+# ── /backfill — One-time token backfill ───────────────────────────────────────
+
+@router.message(Command("backfill"))
+async def cmd_backfill(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply("Admin only.", parse_mode=None)
+        return
+
+    status = await message.reply("🔄 Starting backfill... this may take a few minutes.", parse_mode=None)
+
+    # Run in background so it doesn't timeout
+    asyncio.create_task(_run_backfill(message.bot, status))
+
+
+async def _run_backfill(bot, status_msg) -> None:
+    """Background task: backfill all tokens with current MC, find winners, extract wallets."""
+    try:
+        tokens = await get_all_tokens(limit=500)
+        total = len(tokens)
+        winners_found = 0
+        wallets_added = 0
+        updated = 0
+        errors = 0
+
+        await status_msg.edit_text(
+            f"🔄 Backfilling {total} tokens...", parse_mode=None,
+        )
+
+        for i, tok in enumerate(tokens):
+            try:
+                # Fetch current MC from DexScreener
+                pair = await fetch_token_data(tok.mint)
+                if not pair:
+                    continue
+
+                metrics = parse_token_metrics(pair)
+                current_mc = metrics.get("market_cap", 0) or 0
+                if not current_mc:
+                    continue
+
+                # Update token MC in DB
+                await update_token_market_cap(tok.mint, current_mc)
+                updated += 1
+
+                # Calculate multiple vs first seen MC
+                launch_mc = tok.market_cap or current_mc
+                if launch_mc > 0:
+                    multiple = current_mc / launch_mc
+                else:
+                    multiple = 1.0
+
+                # Winner: 2x+ from first seen MC
+                if multiple >= 2.0:
+                    winners_found += 1
+                    name = tok.name or tok.symbol or tok.mint[:12]
+                    created_at_ms = pair.get("pairCreatedAt")
+
+                    # Fetch early buyers
+                    early_buyers = await _get_early_buyers(
+                        tok.mint, window_minutes=10, created_at_ms=created_at_ms,
+                    )
+
+                    # Score and save wallets
+                    tier_wallets = await get_tier_wallets(max_tier=3)
+                    known = {w.address for w in tier_wallets}
+
+                    for wallet in early_buyers:
+                        if wallet in known:
+                            continue
+                        score, tier = _score_wallet(
+                            wins=1, losses=0, total_trades=1,
+                            avg_multiple=multiple, early_entry_rate=1.0,
+                        )
+                        if tier > 0:
+                            await upsert_wallet(
+                                address=wallet, score=score, tier=tier,
+                                win_rate=1.0, avg_multiple=round(multiple, 2),
+                                wins=1, losses=0, total_trades=1,
+                                avg_entry_mcap=launch_mc,
+                            )
+                            wallets_added += 1
+
+                    # Save winner pattern
+                    liq = metrics.get("liquidity_usd", 0) or 0
+                    threshold = "10x" if multiple >= 10 else "5x" if multiple >= 5 else "2x"
+                    await upsert_pattern(
+                        pattern_type=f"winner_{threshold}",
+                        outcome_threshold=threshold,
+                        sample_count=1,
+                        avg_entry_mcap=launch_mc,
+                        mcap_range_low=launch_mc * 0.5,
+                        mcap_range_high=launch_mc * 2.0,
+                        avg_liquidity=liq * 0.5 if liq else 5000,
+                        min_liquidity=3000,
+                        avg_ai_score=70,
+                        avg_rugcheck_score=5,
+                        best_hours=None,
+                        best_days=None,
+                        confidence_score=min(95, 50 + multiple * 5),
+                    )
+
+                    logger.info(
+                        "Backfill winner: %s %.1fx | %d early buyers, %d new wallets",
+                        name, multiple, len(early_buyers), wallets_added,
+                    )
+
+                # Progress update every 50 tokens
+                if (i + 1) % 50 == 0:
+                    try:
+                        await status_msg.edit_text(
+                            f"🔄 Backfill progress: {i + 1}/{total} tokens | "
+                            f"{winners_found} winners | {wallets_added} wallets",
+                            parse_mode=None,
+                        )
+                    except Exception:
+                        pass
+
+                # Rate limit: small delay between tokens
+                await asyncio.sleep(0.5)
+
+            except Exception as exc:
+                errors += 1
+                logger.debug("Backfill error for %s: %s", tok.mint[:12], exc)
+
+        # Final report
+        report = "\n".join([
+            "✅ BACKFILL COMPLETE",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"Tokens processed: {updated}/{total}",
+            f"Winners found (2x+): {winners_found}",
+            f"New wallets added: {wallets_added}",
+            f"Patterns saved: {winners_found}",
+            f"Errors: {errors}",
+        ])
+
+        await status_msg.edit_text(report, parse_mode=None)
+
+        # Also post to Callers HQ
+        try:
+            await bot.send_message(CALLER_GROUP_ID, report)
+        except Exception:
+            pass
+
+        logger.info(
+            "Backfill complete: %d tokens, %d winners, %d wallets, %d errors",
+            updated, winners_found, wallets_added, errors,
+        )
+
+    except Exception as exc:
+        logger.error("Backfill failed: %s", exc)
+        try:
+            await status_msg.edit_text(f"Backfill failed: {exc}", parse_mode=None)
+        except Exception:
+            pass
 
 
 # ── /start ────────────────────────────────────────────────────────────────────

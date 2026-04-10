@@ -997,6 +997,26 @@ async def get_token_count() -> int:
         return result.scalar() or 0
 
 
+async def get_all_tokens(limit: int = 500) -> list["Token"]:
+    """Returns all tokens, newest first."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Token).order_by(Token.first_seen_at.desc()).limit(limit)
+        )
+        return list(result.scalars().all())
+
+
+async def update_token_market_cap(mint: str, market_cap: float) -> None:
+    """Update a token's market cap."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Token).where(Token.mint == mint))
+        tok = result.scalar_one_or_none()
+        if tok:
+            tok.market_cap = market_cap
+            tok.last_updated_at = datetime.utcnow()
+            await session.commit()
+
+
 async def get_pumpfun_count_today() -> int:
     """Returns number of pump.fun tokens harvested today."""
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
