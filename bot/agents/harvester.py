@@ -551,30 +551,57 @@ async def _pumpswap_ws_loop() -> None:
                             if not is_pool_create:
                                 continue
 
-                            # Extract mint addresses from program logs
+                            # Extract token mint from logs — filter out known programs
+                            _SKIP_ADDRESSES = {
+                                PUMPSWAP_PROGRAM,
+                                PUMP_PROGRAM_ID,
+                                "11111111111111111111111111111111",         # System Program
+                                "ComputeBudget111111111111111111111111111",  # Compute Budget
+                                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # Token Program
+                                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",  # Token-2022
+                                "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",  # ATA Program
+                                "So11111111111111111111111111111111111111112",    # Wrapped SOL
+                                "SysvarRent111111111111111111111111111111111",    # Rent Sysvar
+                            }
+
                             mints_found = []
                             for log in logs:
                                 parts = log.split()
                                 for part in parts:
-                                    if 32 <= len(part) <= 44 and part.isalnum():
+                                    if (32 <= len(part) <= 44
+                                            and part.isalnum()
+                                            and part not in _SKIP_ADDRESSES
+                                            and not part.startswith("Program")
+                                            and not part.startswith("Compute")
+                                            and not part.startswith("Sysvar")):
                                         mints_found.append(part)
 
-                            logger.info("Harvester PumpSwap: pool creation detected, candidates=%s",
-                                        [m[:12] for m in mints_found[:5]])
+                            # Deduplicate while preserving order
+                            seen_mints = set()
+                            unique_mints = []
+                            for m in mints_found:
+                                if m not in seen_mints:
+                                    seen_mints.add(m)
+                                    unique_mints.append(m)
 
-                            for mint in mints_found:
-                                if mint == PUMPSWAP_PROGRAM:
-                                    continue
+                            logger.info("Harvester PumpSwap: pool creation — raw=%d unique=%d candidates=%s",
+                                        len(mints_found), len(unique_mints),
+                                        [m[:12] for m in unique_mints[:5]])
+
+                            for mint in unique_mints:
                                 if await token_exists(mint):
                                     continue
 
+                                # Verify it's a real token on DexScreener
                                 pair = await fetch_token_data(mint)
                                 if not pair:
+                                    logger.debug("Harvester PumpSwap: %s not on DexScreener, skipping", mint[:12])
                                     continue
 
                                 metrics = parse_token_metrics(pair)
                                 mcap = metrics.get("market_cap")
                                 if not mcap or mcap < 1:
+                                    logger.debug("Harvester PumpSwap: %s no MC data, skipping", mint[:12])
                                     continue
 
                                 name = metrics.get("name", "Unknown")

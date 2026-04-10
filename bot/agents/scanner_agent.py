@@ -433,12 +433,16 @@ async def _evaluate_candidate(
     if not mcap or not liquidity:
         pair = await fetch_token_data(mint)
         if pair is None:
+            logger.info("Scanner REJECTED %s (%s): DexScreener returned no data", name, mint[:12])
             return None
         metrics   = parse_token_metrics(pair)
         mcap      = metrics.get("market_cap",    0) or 0
         liquidity = metrics.get("liquidity_usd", 0) or 0
         name      = metrics.get("name",   name)
         symbol    = metrics.get("symbol", symbol)
+        if not mcap:
+            logger.info("Scanner REJECTED %s (%s): no market cap data", name, mint[:12])
+            return None
 
     # Rugcheck
     rc_data = await _fetch_rugcheck(mint)
