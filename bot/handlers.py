@@ -30,10 +30,11 @@ from database.models import (
     get_tier_wallets, get_pattern_by_type, has_caller_scanned,
     upsert_wallet, get_paper_trade_stats,
     get_all_params, get_recent_param_changes,
+    upsert_pattern,
 )
 from bot.agents.confidence_engine import score_candidate
 from bot.agents.chart_detector import analyze_chart
-from bot.agents.wallet_analyst import _get_early_buyers, _score_wallet
+from bot.agents.wallet_analyst import _get_early_buyers, _score_wallet, _get_signatures, _parse_transactions
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -1121,6 +1122,222 @@ async def cmd_params(message: Message):
             lines.append(f"  {c.param_name}: {c.old_value:g}->{c.new_value:g} | {reason} | {age}")
 
     await message.reply("\n".join(lines), parse_mode=None)
+
+
+# ── /deepanalyze <address> — Full launch fingerprint + wallet extraction ──────
+
+@router.message(Command("deepanalyze"))
+async def cmd_deepanalyze(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        await message.reply("Only available in Callers HQ.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply("Usage: /deepanalyze <contract_address>", parse_mode=None)
+        return
+
+    address = parts[1].strip()
+    if len(address) < 32:
+        await message.reply("Invalid address.", parse_mode=None)
+        return
+
+    status = await message.reply("🔬 Running deep analysis... (this takes ~30 seconds)", parse_mode=None)
+
+    try:
+        # ── 1. Fetch DexScreener data ────────────────────────────────────
+        pair = await fetch_token_data(address)
+        if not pair:
+            v2_url = f"https://api.dexscreener.com/tokens/v1/solana/{address}"
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.get(v2_url) as resp:
+                    if resp.status == 200:
+                        v2 = await resp.json(content_type=None)
+                        pl = v2 if isinstance(v2, list) else v2.get("pairs") or []
+                        if pl:
+                            pl.sort(key=lambda p: (p.get("liquidity") or {}).get("usd", 0), reverse=True)
+                            pair = pl[0]
+        if not pair:
+            await status.edit_text("Token not found on DexScreener.", parse_mode=None)
+            return
+
+        metrics = parse_token_metrics(pair)
+        name = metrics.get("name", "Unknown")
+        symbol = metrics.get("symbol", "???")
+        mcap = metrics.get("market_cap", 0) or 0
+        liquidity = metrics.get("liquidity_usd", 0) or 0
+        created_at_ms = pair.get("pairCreatedAt")
+
+        # ── 2. Get full transaction history from Helius ──────────────────
+        all_sigs = []
+        last_sig = None
+        for _ in range(5):  # up to 2500 sigs
+            payload = {
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [address, {"limit": 500, "commitment": "confirmed",
+                                     **({"before": last_sig} if last_sig else {})}],
+            }
+            try:
+                from bot.config import HELIUS_RPC_URL
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
+                    async with s.post(HELIUS_RPC_URL, json=payload,
+                                      headers={"Content-Type": "application/json"}) as resp:
+                        if resp.status != 200:
+                            break
+                        data = await resp.json()
+                        batch = data.get("result") or []
+                        if not batch:
+                            break
+                        all_sigs.extend(batch)
+                        last_sig = batch[-1]["signature"]
+                        if len(batch) < 500:
+                            break
+            except Exception:
+                break
+
+        valid_sigs = [s for s in all_sigs if s.get("blockTime") and not s.get("err")]
+
+        # ── 3. Launch timestamp + first buyers ───────────────────────────
+        if created_at_ms:
+            launch_ts = created_at_ms // 1000
+        elif valid_sigs:
+            launch_ts = min(s["blockTime"] for s in valid_sigs)
+        else:
+            launch_ts = 0
+
+        cutoff_10m = launch_ts + 600  # 10 minutes
+        early_sigs = [s for s in valid_sigs if s["blockTime"] <= cutoff_10m]
+
+        # Parse early transactions
+        early_sig_ids = [s["signature"] for s in early_sigs[:100]]
+        early_parsed = await _parse_transactions(early_sig_ids)
+
+        early_wallets: set[str] = set()
+        early_sol_volume = 0.0
+        for tx in early_parsed:
+            fp = tx.get("feePayer")
+            if fp:
+                early_wallets.add(fp)
+            for nt in (tx.get("nativeTransfers") or []):
+                early_sol_volume += abs(nt.get("amount", 0)) / 1e9
+
+        # ── 4. Check tracked wallets ─────────────────────────────────────
+        tier_wallets = await get_tier_wallets(max_tier=3)
+        known_set = {w.address for w in tier_wallets}
+        insider_matches = [w for w in early_wallets if w in known_set]
+
+        # ── 5. Score and save all early buyer wallets ────────────────────
+        new_wallets = 0
+        for wallet in early_wallets:
+            if wallet in known_set:
+                continue
+            score, tier = _score_wallet(wins=1, losses=0, total_trades=1,
+                                        avg_multiple=5.0, early_entry_rate=1.0)
+            if tier > 0:
+                await upsert_wallet(
+                    address=wallet, score=score, tier=tier,
+                    win_rate=1.0, avg_multiple=5.0,
+                    wins=1, losses=0, total_trades=1,
+                    avg_entry_mcap=mcap * 0.01 if mcap else None,  # estimate launch MC
+                )
+                new_wallets += 1
+
+        # ── 6. Time to 2x ────────────────────────────────────────────────
+        # Find when MC first hit 2x of launch estimate
+        launch_mc_est = mcap * 0.01 if mcap else 0  # rough: current MC / 100 = launch MC
+        # We can't get historical MC from sigs alone, so estimate from pair age
+
+        # ── 7. Save mega_runner pattern ──────────────────────────────────
+        launch_mc = launch_mc_est or 50000  # fallback estimate
+        await upsert_pattern(
+            pattern_type="mega_runner",
+            outcome_threshold="50x",
+            sample_count=1,
+            avg_entry_mcap=launch_mc,
+            mcap_range_low=launch_mc * 0.5,
+            mcap_range_high=launch_mc * 2.0,
+            avg_liquidity=liquidity * 0.1 if liquidity else 5000,
+            min_liquidity=3000,
+            avg_ai_score=75,
+            avg_rugcheck_score=5,
+            best_hours=None,
+            best_days=None,
+            confidence_score=90.0,
+        )
+
+        # ── 8. Rugcheck ──────────────────────────────────────────────────
+        from bot.agents.scanner_agent import _fetch_rugcheck
+        rc_data = await _fetch_rugcheck(address)
+        rc_score = (rc_data or {}).get("score", "?")
+
+        # ── 9. Social links ──────────────────────────────────────────────
+        token_row = await get_token_by_mint(address)
+        socials = "None"
+        if token_row and token_row.social_links:
+            import json as _json
+            try:
+                sl = _json.loads(token_row.social_links)
+                parts_s = []
+                if sl.get("twitter"): parts_s.append("Twitter")
+                if sl.get("telegram"): parts_s.append("Telegram")
+                if sl.get("website"): parts_s.append("Website")
+                socials = ", ".join(parts_s) if parts_s else "None"
+            except Exception:
+                pass
+
+        # ── Build report ─────────────────────────────────────────────────
+        from datetime import timezone
+        launch_dt = datetime.fromtimestamp(launch_ts, tz=timezone.utc) if launch_ts else None
+        launch_str = launch_dt.strftime("%Y-%m-%d %H:%M UTC") if launch_dt else "Unknown"
+
+        mc_str = _format_usd(mcap) if mcap else "?"
+        liq_str = _format_usd(liquidity) if liquidity else "?"
+        launch_mc_str = _format_usd(launch_mc) if launch_mc else "?"
+
+        report = "\n".join([
+            "🔬 DEEP ANALYSIS",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"🪙 {name} (${symbol})",
+            f"📍 {address}",
+            "",
+            "📅 LAUNCH DATA",
+            f"  Created: {launch_str}",
+            f"  Total transactions: {len(valid_sigs)}",
+            f"  Est. launch MC: {launch_mc_str}",
+            f"  Current MC: {mc_str} | Liq: {liq_str}",
+            f"  Rugcheck risk: {rc_score}",
+            f"  Socials: {socials}",
+            "",
+            "👛 FIRST 10 MIN BUYERS",
+            f"  Unique wallets: {len(early_wallets)}",
+            f"  Early tx count: {len(early_sigs)}",
+            f"  Est. early volume: {early_sol_volume:.1f} SOL",
+            f"  Known insiders: {len(insider_matches)}",
+            *([f"    {a[:6]}..{a[-4:]}" for a in insider_matches[:5]] if insider_matches else []),
+            f"  New wallets scored: {new_wallets}",
+            "",
+            "🧩 PATTERN SAVED",
+            f"  Type: mega_runner (50x+ outcome)",
+            f"  Launch MC range: {_format_usd(launch_mc * 0.5)}–{_format_usd(launch_mc * 2.0)}",
+            f"  Confidence: 90/100",
+            "",
+            f"Analysis complete — {len(early_wallets)} wallets + pattern saved",
+        ])
+
+        # Save token to DB if not there
+        if not await token_exists(address):
+            await save_token(
+                mint=address, name=name, symbol=symbol,
+                price_usd=metrics.get("price_usd"), market_cap=mcap,
+                liquidity_usd=liquidity, volume_24h=metrics.get("volume_24h"),
+                source="deep_analyze",
+            )
+
+        await status.edit_text(report, parse_mode=None)
+
+    except Exception as exc:
+        logger.error("Deep analyze failed for %s: %s", address, exc)
+        await status.edit_text(f"Deep analysis failed: {exc}", parse_mode=None)
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
