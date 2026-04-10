@@ -48,6 +48,7 @@ from database.models import (
     token_exists,
     get_token_count,
     open_paper_trade,
+    has_open_paper_trade,
     get_params,
     compute_paper_balance,
 )
@@ -618,6 +619,13 @@ async def run_once() -> tuple[int, int]:
 
         # Open paper trade if Agent 5 flagged it
         if scored.get("paper_trade"):
+            # Check for duplicate — one position per token
+            mint_addr = scored.get("mint", "")
+            if mint_addr and await has_open_paper_trade(mint_addr):
+                logger.info("Scanner: skip paper trade %s — already have open position",
+                            scored.get("name", "?")[:20])
+                continue
+
             # Compute true balance from DB
             state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
 

@@ -293,6 +293,22 @@ async def score_candidate(candidate: dict) -> dict:
         1,
     )
 
+    # Name quality penalty — obvious scam/low-effort names get dinged
+    _SPAM_KEYWORDS = {
+        "psyop", "elon", "inu", "420", "cum", "porn", "nude", "nsfw",
+        "rugpull", "scam", "honeypot", "fakeai", "ponzi",
+    }
+    token_name = (candidate.get("name") or "").lower()
+    token_symbol = (candidate.get("symbol") or "").lower()
+    name_combined = token_name + " " + token_symbol
+    spam_hits = sum(1 for kw in _SPAM_KEYWORDS if kw in name_combined)
+    if spam_hits >= 2:
+        confidence = max(0, confidence - 20)
+        logger.info("Agent5: name penalty -20 on %s (hits=%d)", token_name[:20], spam_hits)
+    elif spam_hits == 1:
+        confidence = max(0, confidence - 10)
+        logger.info("Agent5: name penalty -10 on %s (hits=%d)", token_name[:20], spam_hits)
+
     # Hard gates for LIVE execution (both rug + chart must pass)
     rug_gate_pass = rug >= 50
     chart_gate_pass = chart >= 50

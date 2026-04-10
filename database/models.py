@@ -1826,6 +1826,18 @@ async def get_open_paper_trades() -> list["PaperTrade"]:
         return list(result.scalars().all())
 
 
+async def has_open_paper_trade(token_address: str) -> bool:
+    """Returns True if there's already an open paper trade for this token."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.token_address == token_address,
+                PaperTrade.status == "open",
+            )
+        )
+        return (result.scalar() or 0) > 0
+
+
 async def close_paper_trade(
     trade_id: int, close_reason: str, pnl_sol: float, peak_mc: float | None, peak_mult: float | None,
 ) -> None:
