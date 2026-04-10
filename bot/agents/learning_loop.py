@@ -252,17 +252,48 @@ def _compute_weight_adjustments(
 # ── Wallet tier adjustments ──────────────────────────────────────────────────
 
 async def _adjust_wallet_tiers() -> tuple[int, int]:
+    """
+    Demotion rules based on recent win rate:
+      Tier 1 → Tier 2 if WR < 50%
+      Tier 2 → Tier 3 if WR < 35%
+      Tier 3 → Ignore if WR < 25%
+    Promotion: only if wallet meets full tier criteria (handled by wallet_analyst).
+    """
     wallets = await get_tier_wallets(max_tier=3)
     promoted = demoted = 0
     for w in wallets:
-        if w.total_trades < 20:
+        if w.total_trades < 2:
             continue
-        if w.win_rate < 0.40 and w.tier > 0:
-            await update_wallet_tier(w.address, w.tier - 1)
+
+        # Demotions
+        if w.tier == 1 and w.win_rate < 0.50:
+            await update_wallet_tier(w.address, 2)
             demoted += 1
-        elif w.win_rate > 0.70 and w.tier < 3:
-            await update_wallet_tier(w.address, w.tier + 1)
+            logger.info("Agent6: demoted %s..%s T1→T2 (wr=%.0f%%)",
+                        w.address[:4], w.address[-4:], w.win_rate * 100)
+        elif w.tier == 2 and w.win_rate < 0.35:
+            await update_wallet_tier(w.address, 3)
+            demoted += 1
+            logger.info("Agent6: demoted %s..%s T2→T3 (wr=%.0f%%)",
+                        w.address[:4], w.address[-4:], w.win_rate * 100)
+        elif w.tier == 3 and w.win_rate < 0.25:
+            await update_wallet_tier(w.address, 0)
+            demoted += 1
+            logger.info("Agent6: demoted %s..%s T3→ignore (wr=%.0f%%)",
+                        w.address[:4], w.address[-4:], w.win_rate * 100)
+
+        # Promotions (must meet full criteria)
+        elif w.tier == 2 and w.score >= 80 and w.win_rate >= 0.65 and w.avg_multiple >= 2.0 and w.total_trades >= 5:
+            await update_wallet_tier(w.address, 1)
             promoted += 1
+            logger.info("Agent6: promoted %s..%s T2→T1 (score=%.0f wr=%.0f%%)",
+                        w.address[:4], w.address[-4:], w.score, w.win_rate * 100)
+        elif w.tier == 3 and w.score >= 60 and w.win_rate >= 0.45 and w.avg_multiple >= 1.5 and w.total_trades >= 3:
+            await update_wallet_tier(w.address, 2)
+            promoted += 1
+            logger.info("Agent6: promoted %s..%s T3→T2 (score=%.0f wr=%.0f%%)",
+                        w.address[:4], w.address[-4:], w.score, w.win_rate * 100)
+
     return promoted, demoted
 
 

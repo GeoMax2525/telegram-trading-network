@@ -303,11 +303,16 @@ def _score_wallet(
 
     score = round(score, 1)
 
-    tier = (
-        1 if score >= 60 else
-        2 if score >= 40 else
-        3 if score >= 20 else 0
-    )
+    # Multi-criteria tier assignment
+    if score >= 80 and win_rate >= 0.65 and avg_multiple >= 2.0 and total_trades >= 5:
+        tier = 1
+    elif score >= 60 and win_rate >= 0.45 and avg_multiple >= 1.5 and total_trades >= 3:
+        tier = 2
+    elif score >= 40 and total_trades >= 2:
+        tier = 3
+    else:
+        tier = 0
+
     return score, tier
 
 
