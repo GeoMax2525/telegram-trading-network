@@ -673,7 +673,7 @@ async def cmd_analyze(message: Message):
             from bot.agents.scanner_agent import _fingerprint_match
             match_score = _fingerprint_match(pattern, mcap, liquidity, 0)
             if match_score >= 50:
-                pattern_line = f"🧩 Pattern: winner\\_2x ✅ (score: {match_score:.0f})"
+                pattern_line = f"🧩 Pattern: winner_2x ✅ (score: {match_score:.0f})"
             else:
                 pattern_line = f"🧩 Pattern: Weak match (score: {match_score:.0f})"
         else:
@@ -741,18 +741,24 @@ async def cmd_analyze(message: Message):
         sl = scored.get("trade_sl_pct", 30.0)
         ps = scored.get("params_source", "default")
 
-        # ── Build report ─────────────────────────────────────────────────
+        # ── Build report (plain text — no parse_mode to avoid escaping issues) ──
         mc_str = _format_usd(mcap) if mcap else "?"
         liq_str = _format_usd(liquidity) if liquidity else "?"
 
+        fp_s  = scored.get("fingerprint_score", 0)
+        ins_s = scored.get("insider_score", 0)
+        rug_s = scored.get("rug_score", 0)
+        cal_s = scored.get("caller_score", 0)
+        mkt_s = scored.get("market_score", 0)
+
         report = "\n".join([
-            "🔍 *MANUAL AGENT ANALYSIS*",
+            "🔍 MANUAL AGENT ANALYSIS",
             "━━━━━━━━━━━━━━━━━━━━",
-            f"🪙 *{name}* (${symbol})",
-            f"📍 `{address}`",
+            f"🪙 {name} (${symbol})",
+            f"📍 {address}",
             f"💰 MC: {mc_str} | Liq: {liq_str}",
             "",
-            "📊 *AGENT SCORES*",
+            "📊 AGENT SCORES",
             harvester_line,
             wallet_line,
             caller_line,
@@ -760,26 +766,22 @@ async def cmd_analyze(message: Message):
             chart_line,
             rug_line,
             "",
-            f"🎯 *Confidence: {confidence:.0f}/100*",
-            f"   FP: {scored.get('fingerprint_score', 0):.0f} | "
-            f"Ins: {scored.get('insider_score', 0):.0f} | "
-            f"Chart: {chart_score:.0f} | "
-            f"Rug: {scored.get('rug_score', 0):.0f} | "
-            f"Call: {scored.get('caller_score', 0):.0f} | "
-            f"Mkt: {scored.get('market_score', 0):.0f}",
+            f"🎯 Confidence: {confidence:.0f}/100",
+            f"   FP:{fp_s:.0f} Ins:{ins_s:.0f} Chart:{chart_score:.0f} "
+            f"Rug:{rug_s:.0f} Call:{cal_s:.0f} Mkt:{mkt_s:.0f}",
             "",
-            f"💡 *{decision_display}*",
+            f"💡 {decision_display}",
             action_line,
-            f"📐 TP: {tp:.1f}x | SL: {sl:.0f}% | Params: _{ps}_",
+            f"📐 TP: {tp:.1f}x | SL: {sl:.0f}% | Params: {ps}",
             "",
-            f"_Analyzed {datetime.utcnow().strftime('%H:%M:%S')} UTC_",
+            f"Analyzed {datetime.utcnow().strftime('%H:%M:%S')} UTC",
         ])
 
-        await status_msg.edit_text(report, parse_mode="Markdown")
+        await status_msg.edit_text(report)
 
     except Exception as exc:
         logger.error("Analyze command failed for %s: %s", address, exc)
-        await status_msg.edit_text(f"⛔ Analysis failed: `{exc}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"⛔ Analysis failed: {exc}")
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
