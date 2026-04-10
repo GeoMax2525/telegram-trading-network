@@ -268,9 +268,12 @@ async def score_candidate(candidate: dict) -> dict:
         state.trade_mode == "live"
         and decision in ("execute_full", "execute_half")
     )
+
+    # Paper mode: lower threshold (50+) to generate more data for learning
     paper_trade = (
         state.trade_mode == "paper"
-        and decision in ("execute_full", "execute_half")
+        and confidence >= 50
+        and gates_pass
     )
 
     # Look up AI-learned trade params for this source/pattern type
