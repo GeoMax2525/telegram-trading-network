@@ -3,6 +3,8 @@ import logging
 import re
 from datetime import datetime, timezone, timedelta
 
+import aiohttp
+
 from aiogram import Router, Bot, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -623,18 +625,56 @@ async def cmd_analyze(message: Message):
         return
 
     address = parts[1].strip()
+    # Strip any invisible/zero-width characters and trailing punctuation
+    address = re.sub(r'[^\w]', '', address) if not address.isalnum() else address
+    logger.info("Analyze: raw input=%r cleaned=%r len=%d", parts[1], address, len(address))
+
     if len(address) < 32 or len(address) > 44:
-        await message.reply("⛔ Invalid contract address.")
+        await message.reply(f"⛔ Invalid contract address (len={len(address)}).")
         return
 
     status_msg = await message.reply("🔍 Running full agent analysis...")
 
     try:
-        # ── Fetch token data ─────────────────────────────────────────────
+        # ── Fetch token data — try both DexScreener endpoints ────────────
+        logger.info("Analyze: fetching DexScreener for %s", address)
         pair = await fetch_token_data(address)
+
         if not pair:
-            await status_msg.edit_text("⛔ Token not found on DexScreener.")
+            # Fallback: try v2 Solana-specific endpoint
+            logger.info("Analyze: v1 returned no pairs, trying v2 endpoint")
+            try:
+                v2_url = f"https://api.dexscreener.com/tokens/v1/solana/{address}"
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as _session:
+                    async with _session.get(v2_url) as resp:
+                        logger.info("Analyze: v2 status=%d", resp.status)
+                        if resp.status == 200:
+                            v2_data = await resp.json(content_type=None)
+                            # v2 returns a list of pairs directly
+                            pairs_list = v2_data if isinstance(v2_data, list) else v2_data.get("pairs") or []
+                            if pairs_list:
+                                pairs_list.sort(
+                                    key=lambda p: (p.get("liquidity") or {}).get("usd", 0),
+                                    reverse=True,
+                                )
+                                pair = pairs_list[0]
+                                logger.info("Analyze: v2 found %d pairs", len(pairs_list))
+                            else:
+                                logger.info("Analyze: v2 returned empty list")
+            except Exception as exc:
+                logger.warning("Analyze: v2 endpoint failed: %s", exc)
+
+        if not pair:
+            await status_msg.edit_text(
+                f"⛔ Token not found on DexScreener.\nAddress: {address}"
+            )
             return
+
+        logger.info("Analyze: found pair for %s — %s/%s",
+                     address[:12], pair.get("baseToken", {}).get("symbol", "?"),
+                     pair.get("quoteToken", {}).get("symbol", "?"))
 
         metrics = parse_token_metrics(pair)
         name      = metrics.get("name", "Unknown")
