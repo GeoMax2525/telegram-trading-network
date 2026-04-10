@@ -49,6 +49,7 @@ from database.models import (
     get_token_count,
     open_paper_trade,
     get_params,
+    compute_paper_balance,
 )
 
 logger = logging.getLogger(__name__)
@@ -617,12 +618,12 @@ async def run_once() -> tuple[int, int]:
 
         # Open paper trade if Agent 5 flagged it
         if scored.get("paper_trade"):
-            # Reset balance if depleted
+            # Compute true balance from DB
+            state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+
             if state.paper_balance < 0.05:
-                state.paper_balance = state.PAPER_STARTING_BALANCE
-                state.paper_resets += 1
-                logger.info("Scanner: paper balance reset to %.1f SOL (reset #%d)",
-                            state.paper_balance, state.paper_resets)
+                logger.info("Scanner: paper balance depleted (%.4f SOL), skipping", state.paper_balance)
+                continue
 
             # Confidence-based position sizing from DB params (% of balance)
             sp = await get_params(
@@ -658,7 +659,8 @@ async def run_once() -> tuple[int, int]:
                     tp_x=scored.get("trade_tp_x", 3.0),
                     sl_pct=scored.get("trade_sl_pct", 30.0),
                 )
-                state.paper_balance -= paper_sol
+                # Recompute balance from DB (trade deducted via open_paper_trade)
+                state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_trades_today += 1
                 logger.info("Scanner: paper trade id=%s bal=%.4f SOL", pt.id, state.paper_balance)
             except Exception as exc:

@@ -30,7 +30,7 @@ from database.models import (
     get_tier_wallets, get_pattern_by_type, has_caller_scanned,
     upsert_wallet, get_paper_trade_stats,
     get_all_params, get_recent_param_changes,
-    upsert_pattern,
+    upsert_pattern, set_param, compute_paper_balance,
 )
 from bot.agents.confidence_engine import score_candidate
 from bot.agents.chart_detector import analyze_chart
@@ -413,14 +413,16 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     # Chaos mode section — only in paper mode
     if state.trade_mode == "paper":
-        pnl_val = state.paper_balance - state.PAPER_STARTING_BALANCE
-        pnl_pct = ((state.paper_balance / state.PAPER_STARTING_BALANCE) - 1) * 100
-        resets = f" | Resets: {state.paper_resets}" if state.paper_resets else ""
+        # Compute balance from DB (not memory — survives restarts)
+        real_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+        state.paper_balance = real_balance  # sync memory
+        pnl_val = real_balance - state.PAPER_STARTING_BALANCE
+        pnl_pct = ((real_balance / state.PAPER_STARTING_BALANCE) - 1) * 100 if state.PAPER_STARTING_BALANCE > 0 else 0
         lines += [
             "",
             "🔥 *CHAOS MODE — Max data collection*",
-            f"💼 Paper Balance: `{state.paper_balance:.2f} SOL` / {state.PAPER_STARTING_BALANCE:.0f} SOL",
-            f"📈 Paper P&L: `{pnl_val:+.2f} SOL` (`{pnl_pct:+.1f}%`){resets}",
+            f"💼 Paper Balance: `{real_balance:.2f} SOL` / {state.PAPER_STARTING_BALANCE:.0f} SOL",
+            f"📈 Paper P&L: `{pnl_val:+.2f} SOL` (`{pnl_pct:+.1f}%`)",
             f"📊 Candidates: `{state.data_points_today}` | Paper trades: `{state.paper_trades_today}`",
         ]
 
@@ -522,10 +524,12 @@ async def cb_hub(callback: CallbackQuery):
         if state.trade_mode == "paper":
             state.trade_mode = "off"
             state.autotrade_enabled = False
+            await set_param("trade_mode", 0, "Toggled off via hub")
             await callback.answer("📋 Paper trading OFF")
         else:
             state.trade_mode = "paper"
             state.autotrade_enabled = False
+            await set_param("trade_mode", 1, "Toggled on via hub")
             await callback.answer("📋 Paper trading ON ✅")
         try:
             text = await _build_hub_text(state.autotrade_enabled)
@@ -674,6 +678,8 @@ async def cmd_autotrade(message: Message):
 
     state.trade_mode = mode
     state.autotrade_enabled = (mode == "live")
+    mode_val = {"off": 0, "paper": 1, "live": 2}[mode]
+    await set_param("trade_mode", mode_val, f"Set via /autotrade {mode}")
 
     mode_msgs = {
         "off":   "🔴 OFF — Scanner running. Monitoring only.",

@@ -28,7 +28,7 @@ from bot.agents.pattern_engine import pattern_engine_loop
 from bot.agents.scanner_agent import scanner_agent_loop
 from bot.agents.learning_loop import learning_loop
 from bot.agents.paper_monitor import paper_monitor_loop
-from database.models import init_db, init_agent_params, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses
+from database.models import init_db, init_agent_params, get_param, compute_paper_balance, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -116,6 +116,18 @@ async def main() -> None:
     added = await init_agent_params()
     if added:
         logger.info("Initialized %d agent params with defaults", added)
+
+    # Restore trade mode from DB (survives restarts)
+    from bot import state as _state
+    mode_val = await get_param("trade_mode")
+    _state.trade_mode = {0: "off", 1: "paper", 2: "live"}.get(int(mode_val), "off")
+    _state.autotrade_enabled = (_state.trade_mode == "live")
+
+    # Restore paper balance from DB (computed, not cached)
+    starting = await get_param("paper_starting_balance")
+    _state.PAPER_STARTING_BALANCE = starting
+    _state.paper_balance = await compute_paper_balance(starting)
+    logger.info("Restored: trade_mode=%s paper_balance=%.4f SOL", _state.trade_mode, _state.paper_balance)
 
     bot = Bot(
         token=BOT_TOKEN,

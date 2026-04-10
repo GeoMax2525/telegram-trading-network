@@ -1861,6 +1861,27 @@ async def get_paper_trade_stats() -> dict:
     }
 
 
+async def compute_paper_balance(starting: float = 10.0) -> float:
+    """
+    Compute true paper balance from DB:
+    starting - sum(open positions) + sum(closed PnL)
+    """
+    async with AsyncSessionLocal() as session:
+        # SOL locked in open trades
+        open_locked = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_sol_spent), 0.0))
+            .where(PaperTrade.status == "open")
+        )).scalar() or 0.0
+
+        # Total PnL from closed trades
+        closed_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0))
+            .where(PaperTrade.status == "closed", PaperTrade.paper_pnl_sol.is_not(None))
+        )).scalar() or 0.0
+
+    return round(starting - float(open_locked) + float(closed_pnl), 4)
+
+
 # ── Agent Params helpers ─────────────────────────────────────────────────────
 
 # All defaults — inserted on first run if not present
@@ -1894,6 +1915,10 @@ AGENT_PARAM_DEFAULTS = {
     # Learning loop
     "learning_micro_batch": 3, "learning_full_batch": 5, "learning_major_batch": 15,
     "learning_max_weight_shift": 0.10,
+    # Trade mode: 0=off, 1=paper, 2=live
+    "trade_mode": 1,  # default to paper
+    # Paper balance
+    "paper_starting_balance": 10.0,
 }
 
 
