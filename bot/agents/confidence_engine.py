@@ -318,10 +318,17 @@ async def score_candidate(candidate: dict) -> dict:
         and confidence >= 45
     )
 
+    # Always log paper trade check so we can debug
+    logger.info(
+        "Agent5: PAPER CHECK — %s mode=%s conf=%.1f threshold=45 result=%s",
+        candidate.get("name", "?")[:20], state.trade_mode, confidence,
+        "TRIGGER" if paper_trade else f"SKIP(mode={state.trade_mode},conf={confidence:.1f})",
+    )
+
     if paper_trade:
         logger.info(
-            "Agent5: PAPER TRADE — %s conf=%.1f weights=%s",
-            candidate.get("name", "?"), confidence, weight_set,
+            "PAPER TRADE ATTEMPT: %s score:%.1f mode:%s",
+            candidate.get("name", "?"), confidence, state.trade_mode,
         )
 
     # Look up AI-learned trade params for this source/pattern type
