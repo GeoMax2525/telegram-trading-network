@@ -52,6 +52,14 @@ from database.models import (
     get_all_params,
     get_recent_param_changes,
     get_post_close_stats,
+    get_paper_trade_stats,
+    get_token_count,
+    get_top_wallets,
+    PaperTrade,
+    Candidate,
+    AgentLog,
+    Wallet as WalletModel,
+    ParamChange,
 )
 
 logger = logging.getLogger(__name__)
@@ -687,35 +695,214 @@ async def run_once(bot) -> bool:
 # ── Weekly report ────────────────────────────────────────────────────────────
 
 async def _send_weekly_report(bot) -> None:
-    perf = await get_weekly_performance()
-    weights_row = await get_current_weights()
-    if perf["trades"] == 0:
-        return
-
-    regime = state.market_regime
-    thresholds = state.confidence_thresholds
-
-    if weights_row:
-        weight_map = {k: getattr(weights_row, f"{k}_weight") for k in COMPONENT_KEYS}
-        best = max(weight_map, key=weight_map.get)
-        worst = min(weight_map, key=weight_map.get)
-    else:
-        best = worst = "N/A"
-
-    text = "\n".join([
-        "📊 WEEKLY AI PERFORMANCE REPORT",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"Trades: {perf['trades']} | Win rate: {perf['win_rate']}%",
-        f"PnL: {perf['total_pnl']:+.4f} SOL | Avg: {perf['avg_pnl']:+.4f} SOL",
-        f"Best signal: {best} | Worst: {worst}",
-        f"Market regime: {regime}",
-        f"Thresholds: full={thresholds['execute_full']} half={thresholds['execute_half']}",
-        "",
-        f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC",
-    ])
+    """Full weekly performance report to Callers HQ."""
+    now = datetime.utcnow()
+    week_start = (now - timedelta(days=7)).strftime("%b %d")
+    week_end = now.strftime("%b %d, %Y")
 
     try:
+        # ── System activity ──────────────────────────────────────────────
+        token_count = await get_token_count()
+
+        cutoff = now - timedelta(days=7)
+        async with AsyncSessionLocal() as session:
+            candidates_week = (await session.execute(
+                select(func.count(Candidate.id)).where(Candidate.created_at >= cutoff)
+            )).scalar() or 0
+
+            paper_week = (await session.execute(
+                select(func.count(PaperTrade.id)).where(PaperTrade.opened_at >= cutoff)
+            )).scalar() or 0
+
+            wallets_week = (await session.execute(
+                select(func.count(WalletModel.address)).where(WalletModel.last_updated_at >= cutoff)
+            )).scalar() or 0
+
+            patterns_updated = (await session.execute(
+                select(func.count(AgentLog.id)).where(
+                    AgentLog.agent_name == "pattern_engine", AgentLog.run_at >= cutoff,
+                )
+            )).scalar() or 0
+
+        # ── Paper trading performance ────────────────────────────────────
+        async with AsyncSessionLocal() as session:
+            paper_closed = (await session.execute(
+                select(func.count(PaperTrade.id)).where(
+                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
+                )
+            )).scalar() or 0
+
+            paper_wins = (await session.execute(
+                select(func.count(PaperTrade.id)).where(
+                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
+                    PaperTrade.paper_pnl_sol > 0,
+                )
+            )).scalar() or 0
+
+            paper_pnl = float((await session.execute(
+                select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
+                )
+            )).scalar() or 0.0)
+
+            # Best and worst trades
+            best_trade = (await session.execute(
+                select(PaperTrade).where(
+                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
+                ).order_by(PaperTrade.paper_pnl_sol.desc()).limit(1)
+            )).scalar_one_or_none()
+
+            worst_trade = (await session.execute(
+                select(PaperTrade).where(
+                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
+                ).order_by(PaperTrade.paper_pnl_sol.asc()).limit(1)
+            )).scalar_one_or_none()
+
+            # Avg win multiple and avg loss %
+            win_trades = (await session.execute(
+                select(PaperTrade).where(
+                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
+                    PaperTrade.paper_pnl_sol > 0,
+                )
+            )).scalars().all()
+
+            loss_trades = (await session.execute(
+                select(PaperTrade).where(
+                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
+                    PaperTrade.paper_pnl_sol <= 0,
+                )
+            )).scalars().all()
+
+        win_rate = round(paper_wins / paper_closed * 100) if paper_closed > 0 else 0
+        avg_win_mult = 0.0
+        if win_trades:
+            mults = [t.peak_multiple or 1.0 for t in win_trades]
+            avg_win_mult = sum(mults) / len(mults)
+        avg_loss_pct = 0.0
+        if loss_trades:
+            pcts = [abs(t.paper_pnl_sol or 0) / max(t.paper_sol_spent, 0.01) * 100 for t in loss_trades]
+            avg_loss_pct = sum(pcts) / len(pcts)
+
+        best_str = "None"
+        if best_trade and best_trade.paper_pnl_sol:
+            bn = (best_trade.token_name or "?")[:15]
+            best_str = f"{bn} +{best_trade.peak_multiple or 0:.1f}x (+{best_trade.paper_pnl_sol:.4f} SOL)"
+
+        worst_str = "None"
+        if worst_trade and worst_trade.paper_pnl_sol:
+            wn = (worst_trade.token_name or "?")[:15]
+            worst_str = f"{wn} {worst_trade.paper_pnl_sol:.4f} SOL"
+
+        # ── What the AI learned ──────────────────────────────────────────
+        weights_row = await get_current_weights()
+        if weights_row:
+            weight_map = {k: getattr(weights_row, f"{k}_weight") for k in COMPONENT_KEYS}
+            best_signal = max(weight_map, key=weight_map.get)
+            worst_signal = min(weight_map, key=weight_map.get)
+            best_w = weight_map[best_signal]
+            worst_w = weight_map[worst_signal]
+        else:
+            best_signal = worst_signal = "N/A"
+            best_w = worst_w = 0
+
+        # Pattern performance
+        trade_params = await get_all_trade_params()
+        top_pattern = "None"
+        worst_pattern = "None"
+        if trade_params:
+            by_wr = sorted(trade_params, key=lambda p: p.win_rate, reverse=True)
+            if by_wr:
+                top_pattern = f"{by_wr[0].pattern_type} ({by_wr[0].win_rate * 100:.0f}% WR)"
+            if len(by_wr) > 1:
+                worst_pattern = f"{by_wr[-1].pattern_type} ({by_wr[-1].win_rate * 100:.0f}% WR)"
+
+        # ── Wallet updates ───────────────────────────────────────────────
+        top_wallets = await get_top_wallets(limit=1)
+        top_wallet_str = "None yet"
+        if top_wallets:
+            tw = top_wallets[0]
+            top_wallet_str = f"{tw.address[:6]}..{tw.address[-4:]} {tw.win_rate * 100:.0f}% WR T{tw.tier}"
+
+        # ── Parameter changes ────────────────────────────────────────────
+        try:
+            recent_changes = await get_recent_param_changes(20)
+            week_changes = [c for c in recent_changes if c.changed_at and c.changed_at >= cutoff]
+        except Exception:
+            week_changes = []
+
+        conf_changes = [c for c in week_changes if "conf" in c.param_name]
+        scanner_changes = [c for c in week_changes if "scanner" in c.param_name]
+        weight_changes = [c for c in week_changes if "mc_" in c.param_name]
+
+        conf_str = "No changes"
+        if conf_changes:
+            c = conf_changes[0]
+            conf_str = f"{c.old_value:g} -> {c.new_value:g} ({c.reason or ''})"[:50]
+
+        # ── Focus for next week ──────────────────────────────────────────
+        if win_rate >= 65:
+            focus = "Strong performance. Monitoring for consistency before live mode."
+            target = "Maintain 65%+ win rate"
+        elif win_rate >= 50:
+            focus = "Improving signal weights. Tightening entry on weak patterns."
+            target = f"Raise win rate from {win_rate}% to 60%+"
+        elif win_rate > 0:
+            focus = "Adjusting thresholds aggressively. Cutting weak patterns."
+            target = f"Raise win rate from {win_rate}% to 50%+"
+        else:
+            focus = "Collecting data. Need more paper trades for analysis."
+            target = "Execute 20+ paper trades for baseline data"
+
+        # ── Build report ─────────────────────────────────────────────────
+        text = "\n".join([
+            f"📊 WEEKLY AI PERFORMANCE REPORT",
+            f"Week of {week_start} — {week_end}",
+            "━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "🤖 SYSTEM ACTIVITY",
+            f"  Tokens in DB: {token_count}",
+            f"  Candidates evaluated: {candidates_week}",
+            f"  Paper trades executed: {paper_week}",
+            f"  Wallets discovered: {wallets_week}",
+            f"  Pattern engine runs: {patterns_updated}",
+            "",
+            "📈 TRADING PERFORMANCE",
+            f"  Paper trades closed: {paper_closed}",
+            f"  Win rate: {win_rate}%",
+            f"  Avg win multiple: {avg_win_mult:.1f}x",
+            f"  Avg loss: {avg_loss_pct:.0f}%",
+            f"  Best: {best_str}",
+            f"  Worst: {worst_str}",
+            f"  Paper P&L: {paper_pnl:+.4f} SOL",
+            "",
+            "🧠 WHAT THE AI LEARNED",
+            f"  Top pattern: {top_pattern}",
+            f"  Worst pattern: {worst_pattern}",
+            f"  Best signal: {best_signal} ({best_w:.0%} weight)",
+            f"  Weakest signal: {worst_signal} ({worst_w:.0%} weight)",
+            "",
+            "👛 WALLET UPDATES",
+            f"  Wallets active: {wallets_week}",
+            f"  Top wallet: {top_wallet_str}",
+            "",
+            "⚙️ PARAMETER CHANGES",
+            f"  Confidence: {conf_str}",
+            f"  Scanner: {len(scanner_changes)} changes",
+            f"  Weights: {len(weight_changes)} changes",
+            f"  Total: {len(week_changes)} adjustments this week",
+            f"  Run /params to see full list",
+            "",
+            "🎯 NEXT WEEK FOCUS",
+            f"  {focus}",
+            f"  Target: {target}",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━",
+            "Keep paper trading. Go live when WR hits 65%+ consistently.",
+        ])
+
         await bot.send_message(CALLER_GROUP_ID, text)
+        logger.info("Agent6: weekly report sent to Callers HQ")
+
     except Exception as exc:
         logger.error("Agent6: weekly report failed: %s", exc)
 
