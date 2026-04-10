@@ -33,6 +33,7 @@ from database.models import (
     upsert_pattern, set_param, compute_paper_balance,
     get_all_tokens, update_token_market_cap,
     get_tokens_batch, set_token_launch_mc, get_token_count,
+    get_gmgn_stats,
 )
 from bot.agents.confidence_engine import score_candidate
 from bot.agents.chart_detector import analyze_chart
@@ -382,6 +383,16 @@ async def _build_hub_text(autotrade: bool) -> str:
             f"| last run {elapsed_min}min ago"
         )
 
+    # GMGN stats
+    try:
+        gmgn = await get_gmgn_stats()
+        gmgn_line = (
+            f"✅ GMGN — {gmgn['wallets']} wallets ({gmgn['tier1']} T1) "
+            f"| {gmgn['trending']} trending today"
+        )
+    except Exception:
+        gmgn_line = "✅ GMGN — waiting for data..."
+
     ce_stats = await get_candidate_stats_today()
     ce_icon = "✅" if autotrade else "🔧"
     ce_line = (
@@ -406,6 +417,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         scanner_line,
         harvest_line,
         analyst_line,
+        gmgn_line,
         _pattern_engine_line(last_pattern_engine, pattern_total, pattern_winners, pattern_rugs),
         ce_line,
         await _learning_loop_line(),
@@ -456,7 +468,8 @@ async def _build_hub_text(autotrade: bool) -> str:
             short = f"{w.address[:4]}...{w.address[-4:]}"
             lines.append(
                 f"#{i} `{short}` | Score: {w.score:.0f} | "
-                f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | Avg: {w.avg_multiple:.1f}x | Tier {w.tier}"
+                f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | {w.avg_multiple:.1f}x | T{w.tier}"
+                + (f" | {w.source}" if getattr(w, "source", None) else "")
             )
 
     # Show recent paper trades (ONLY from PaperTrades table, never Positions)
@@ -582,7 +595,8 @@ async def cb_hub(callback: CallbackQuery):
                 short = f"{w.address[:4]}...{w.address[-4:]}"
                 lines.append(
                     f"#{i} `{short}` | Score: {w.score:.0f} | "
-                    f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | Avg: {w.avg_multiple:.1f}x | Tier {w.tier}"
+                    f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | {w.avg_multiple:.1f}x | T{w.tier}"
+                + (f" | {w.source}" if getattr(w, "source", None) else "")
                 )
             await callback.answer()
             await callback.message.reply("\n".join(lines), parse_mode="Markdown")

@@ -71,6 +71,8 @@ class Token(Base):
     social_links    = Column(String(256), nullable=True)   # JSON: {"twitter": bool, "telegram": bool, "website": bool}
     graduated       = Column(Boolean,     nullable=True)   # graduated to Raydium
     reply_count     = Column(Integer,     nullable=True)   # pump.fun social activity
+    gmgn_trending   = Column(Boolean,     nullable=True)   # trending on GMGN
+    gmgn_rank       = Column(Integer,     nullable=True)   # GMGN rank position
     first_seen_at   = Column(DateTime,    default=datetime.utcnow, nullable=False)
     last_updated_at = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
@@ -89,6 +91,7 @@ class Wallet(Base):
     losses          = Column(Integer,    nullable=False, default=0)
     total_trades    = Column(Integer,    nullable=False, default=0)
     avg_entry_mcap  = Column(Float,      nullable=True)
+    source          = Column(String(16), nullable=True)   # helius / gmgn / manual
     first_seen_at   = Column(DateTime,   default=datetime.utcnow, nullable=False)
     last_updated_at = Column(DateTime,   default=datetime.utcnow, nullable=False)
 
@@ -369,6 +372,12 @@ _NEW_TOKEN_COLS = [
     ("graduated",       "BOOLEAN"),
     ("reply_count",     "INTEGER"),
     ("launch_mc",       "REAL"),
+    ("gmgn_trending",   "BOOLEAN"),
+    ("gmgn_rank",       "INTEGER"),
+]
+
+_NEW_WALLET_COLS = [
+    ("source", "TEXT"),
 ]
 
 async def init_db() -> None:
@@ -433,6 +442,17 @@ async def init_db() -> None:
                     await conn.execute(
                         text(f"ALTER TABLE tokens ADD COLUMN {col_name} {col_def}")
                     )
+                except Exception:
+                    pass
+
+        for col_name, col_def in _NEW_WALLET_COLS:
+            if is_postgres:
+                await conn.execute(
+                    text(f"ALTER TABLE wallets ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
+                )
+            else:
+                try:
+                    await conn.execute(text(f"ALTER TABLE wallets ADD COLUMN {col_name} {col_def}"))
                 except Exception:
                     pass
 
@@ -1000,6 +1020,24 @@ async def get_token_count() -> int:
         return result.scalar() or 0
 
 
+async def get_gmgn_stats() -> dict:
+    """Returns GMGN-related counts."""
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    async with AsyncSessionLocal() as session:
+        gmgn_wallets = (await session.execute(
+            select(func.count(Wallet.address)).where(Wallet.source == "gmgn")
+        )).scalar() or 0
+        gmgn_t1 = (await session.execute(
+            select(func.count(Wallet.address)).where(Wallet.source == "gmgn", Wallet.tier == 1)
+        )).scalar() or 0
+        gmgn_trending = (await session.execute(
+            select(func.count(Token.mint)).where(
+                Token.gmgn_trending == True, Token.last_updated_at >= today,
+            )
+        )).scalar() or 0
+    return {"wallets": gmgn_wallets, "tier1": gmgn_t1, "trending": gmgn_trending}
+
+
 async def get_all_tokens(limit: int = 500) -> list["Token"]:
     """Returns all tokens, newest first."""
     async with AsyncSessionLocal() as session:
@@ -1153,6 +1191,7 @@ async def upsert_wallet(
     losses: int,
     total_trades: int,
     avg_entry_mcap: float | None,
+    source: str | None = None,
 ) -> "Wallet":
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -1165,6 +1204,7 @@ async def upsert_wallet(
                 win_rate=win_rate, avg_multiple=avg_multiple,
                 wins=wins, losses=losses, total_trades=total_trades,
                 avg_entry_mcap=avg_entry_mcap,
+                source=source,
             )
             session.add(w)
         else:

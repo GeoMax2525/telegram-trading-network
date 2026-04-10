@@ -131,23 +131,30 @@ async def _score_fingerprint(candidate: dict, pattern) -> float:
             if token.bonding_curve and token.bonding_curve > 50:
                 base += 10.0
 
+            # GMGN trending bonus = +10
+            if getattr(token, "gmgn_trending", None):
+                base += 10.0
+
     return round(min(base, 100.0), 1)
 
 
 async def _score_insider(candidate: dict) -> float:
     """Score 0–100 based on insider wallet activity for this token."""
     insider_count = candidate.get("insider_count", 0)
-    if insider_count >= 3:
-        return 100.0
-    if insider_count == 2:
-        return 80.0
-    if insider_count == 1:
-        return 60.0
+    gmgn_boost = candidate.get("gmgn_wallet_boost", 0)  # +20 for T1, +10 for T2
 
-    # No insider data from scanner — check if any tier wallets exist at all
-    # (if source was not insider_wallet, count defaults to 0)
-    if candidate.get("source") == "insider_wallet":
-        return 40.0
+    base = 30.0  # default no signal
+    if insider_count >= 3:
+        base = 100.0
+    elif insider_count == 2:
+        base = 80.0
+    elif insider_count == 1:
+        base = 60.0
+    elif candidate.get("source") == "insider_wallet":
+        base = 40.0
+
+    # GMGN wallet boost
+    return min(100.0, base + gmgn_boost)
     return 30.0  # no insider signal
 
 
