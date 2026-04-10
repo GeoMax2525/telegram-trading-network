@@ -45,15 +45,24 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
-# Default weights (used when no learned weights exist in DB)
-DEFAULT_WEIGHTS = {
-    "fingerprint": 0.25,
-    "insider":     0.25,
-    "chart":       0.20,
-    "rug":         0.15,
-    "caller":      0.10,
-    "market":      0.05,
+# MC-based default weight sets
+MC_WEIGHTS = {
+    "low": {  # under $100K
+        "fingerprint": 0.28, "insider": 0.35, "chart": 0.05,
+        "rug": 0.20, "caller": 0.08, "market": 0.04,
+    },
+    "mid": {  # $100K – $1M
+        "fingerprint": 0.25, "insider": 0.30, "chart": 0.15,
+        "rug": 0.18, "caller": 0.08, "market": 0.04,
+    },
+    "high": {  # over $1M
+        "fingerprint": 0.20, "insider": 0.20, "chart": 0.30,
+        "rug": 0.15, "caller": 0.10, "market": 0.05,
+    },
 }
+
+# Legacy flat default (used as fallback)
+DEFAULT_WEIGHTS = MC_WEIGHTS["mid"]
 
 
 # ── Component scorers ────────────────────────────────────────────────────────
@@ -200,11 +209,28 @@ def _score_market() -> float:
 
 # ── Main scoring function ────────────────────────────────────────────────────
 
-async def _load_weights() -> dict[str, float]:
-    """Load learned weights from DB, fall back to defaults."""
+def _get_mc_weight_set(mcap: float) -> tuple[dict[str, float], str]:
+    """Returns (weights_dict, weight_set_label) based on market cap."""
+    if mcap < 100_000:
+        return dict(MC_WEIGHTS["low"]), "Low MC (<$100K)"
+    elif mcap < 1_000_000:
+        return dict(MC_WEIGHTS["mid"]), "Mid MC ($100K-$1M)"
+    else:
+        return dict(MC_WEIGHTS["high"]), "High MC (>$1M)"
+
+
+async def _load_weights(mcap: float) -> tuple[dict[str, float], str]:
+    """
+    Load learned weights from DB, fall back to MC-based defaults.
+    Agent 6 adjustments are blended with MC-based base weights.
+    Returns (weights, weight_set_label).
+    """
+    base, label = _get_mc_weight_set(mcap)
+
     row = await get_current_weights()
     if row:
-        return {
+        # Blend: 70% MC-based default + 30% learned adjustments
+        learned = {
             "fingerprint": row.fingerprint_weight,
             "insider":     row.insider_weight,
             "chart":       row.chart_weight,
@@ -212,7 +238,16 @@ async def _load_weights() -> dict[str, float]:
             "caller":      row.caller_weight,
             "market":      row.market_weight,
         }
-    return dict(DEFAULT_WEIGHTS)
+        blended = {}
+        for k in base:
+            blended[k] = round(base[k] * 0.7 + learned[k] * 0.3, 4)
+        # Normalize
+        total = sum(blended.values())
+        if total > 0:
+            blended = {k: round(v / total, 4) for k, v in blended.items()}
+        return blended, label
+
+    return base, label
 
 
 async def score_candidate(candidate: dict) -> dict:
@@ -222,7 +257,8 @@ async def score_candidate(candidate: dict) -> dict:
     All candidates are saved to the database silently.
     """
     pattern = await get_pattern_by_type("winner_2x")
-    weights = await _load_weights()
+    mcap = candidate.get("mcap", 0) or 0
+    weights, weight_set = await _load_weights(mcap)
 
     # Compute all 6 component scores
     fingerprint = await _score_fingerprint(candidate, pattern)
@@ -232,7 +268,7 @@ async def score_candidate(candidate: dict) -> dict:
     caller      = await _score_caller(candidate)
     market      = _score_market()
 
-    # Weighted confidence score using learned weights
+    # Weighted confidence score using MC-adjusted weights
     confidence = round(
         fingerprint * weights["fingerprint"]
         + insider   * weights["insider"]
@@ -343,6 +379,7 @@ async def score_candidate(candidate: dict) -> dict:
         "decision":          decision,
         "executed":          executed,
         "paper_trade":       paper_trade,
+        "weight_set":        weight_set,
         "trade_tp_x":        trade_tp_x,
         "trade_sl_pct":      trade_sl_pct,
         "trade_position_pct": trade_position_pct,

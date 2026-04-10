@@ -947,6 +947,7 @@ async def _run_analysis(address: str, status_msg: Message) -> None:
             f"🎯 Confidence: {confidence:.0f}/100",
             f"   FP:{fp_s:.0f} Ins:{ins_s:.0f} Chart:{chart_score:.0f} "
             f"Rug:{rug_s:.0f} Call:{cal_s:.0f} Mkt:{mkt_s:.0f}",
+            f"⚖️ Weight Set: {scored.get('weight_set', 'default')}",
             "",
             f"💡 {decision_display}",
             action_line,
