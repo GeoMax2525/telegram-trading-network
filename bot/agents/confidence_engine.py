@@ -243,18 +243,15 @@ async def score_candidate(candidate: dict) -> dict:
         1,
     )
 
-    # Hard gates for LIVE execution
+    # Hard gates for LIVE execution (both rug + chart must pass)
     rug_gate_pass = rug >= 50
     chart_gate_pass = chart >= 50
     live_gates_pass = rug_gate_pass and chart_gate_pass
 
-    # Paper gates: relaxed — only rug must pass
-    paper_gates_pass = rug_gate_pass
-
     logger.info(
-        "Agent5: %s mode=%s conf=%.1f rug=%.0f(gate=%s) chart=%.0f(gate=%s)",
+        "Agent5: %s mode=%s conf=%.1f rug=%.0f(%s) chart=%.0f(%s) live_gate=%s",
         candidate.get("name", "?")[:20], state.trade_mode,
-        confidence, rug, rug_gate_pass, chart, chart_gate_pass,
+        confidence, rug, rug_gate_pass, chart, chart_gate_pass, live_gates_pass,
     )
 
     # Dynamic thresholds (adjusted by Agent 6)
@@ -278,17 +275,16 @@ async def score_candidate(candidate: dict) -> dict:
         and decision in ("execute_full", "execute_half")
     )
 
-    # Paper mode: 50+ confidence, relaxed gates (rug only, no chart gate)
+    # Paper mode: 45+ confidence, NO hard gates (maximum data collection)
     paper_trade = (
         state.trade_mode == "paper"
-        and confidence >= 50
-        and paper_gates_pass
+        and confidence >= 45
     )
 
     if paper_trade:
         logger.info(
-            "Agent5: PAPER TRADE triggered — %s confidence=%.1f",
-            candidate.get("name", "?"), confidence,
+            "Agent5: PAPER TRADE triggered — %s confidence=%.1f rug=%.0f chart=%.0f",
+            candidate.get("name", "?"), confidence, rug, chart,
         )
 
     # Look up AI-learned trade params for this source/pattern type
