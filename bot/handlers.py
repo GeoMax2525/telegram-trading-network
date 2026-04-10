@@ -32,6 +32,7 @@ from database.models import (
     get_all_params, get_recent_param_changes,
     upsert_pattern, set_param, compute_paper_balance,
     get_all_tokens, update_token_market_cap,
+    get_tokens_batch, set_token_launch_mc, get_token_count,
 )
 from bot.agents.confidence_engine import score_candidate
 from bot.agents.chart_detector import analyze_chart
@@ -1399,169 +1400,202 @@ async def cmd_dbcheck(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
-# ── /backfill — One-time token backfill ───────────────────────────────────────
+# ── /backfill — Full token backfill (all tokens, batched) ─────────────────────
 
 @router.message(Command("backfill"))
 async def cmd_backfill(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         return
+    if state.backfill_running:
+        await message.reply(f"Backfill already running: {state.backfill_progress}", parse_mode=None)
+        return
 
-    status = await message.reply("🔄 Starting backfill... this may take a few minutes.", parse_mode=None)
-
-    # Run in background so it doesn't timeout
+    total = await get_token_count()
+    status = await message.reply(f"🔄 Starting backfill of {total} tokens...", parse_mode=None)
     asyncio.create_task(_run_backfill(message.bot, status))
 
 
+@router.message(Command("backfill_status"))
+async def cmd_backfill_status(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+    running = "🟢 Running" if state.backfill_running else "⚪ Not running"
+    await message.reply(f"{running}\n{state.backfill_progress}", parse_mode=None)
+
+
 async def _run_backfill(bot, status_msg) -> None:
-    """Background task: backfill all tokens with current MC, find winners, extract wallets."""
+    """
+    Background task: process ALL tokens in batches of 200.
+
+    For each token:
+    - If launch_mc missing: use stored market_cap as launch_mc
+    - Fetch current MC from DexScreener
+    - If DexScreener returns nothing: mark as dead
+    - If current_mc / launch_mc >= 2: winner → extract wallets + save pattern
+    """
+    state.backfill_running = True
+    state.backfill_progress = "Starting..."
+
     try:
-        tokens = await get_all_tokens(limit=500)
-        total = len(tokens)
-        winners_found = 0
-        wallets_added = 0
-        updated = 0
-        repaired = 0
-        errors = 0
+        total = await get_token_count()
+        offset = 0
+        batch_size = 200
+        stats = {"processed": 0, "dex_found": 0, "dead": 0, "winners": 0,
+                 "wallets": 0, "repaired_mc": 0, "errors": 0, "skipped_no_mc": 0}
 
-        # Count tokens needing repair
-        needs_repair = sum(1 for t in tokens if not getattr(t, "launch_mc", None))
-        await status_msg.edit_text(
-            f"🔄 Backfilling {total} tokens ({needs_repair} need launch_mc repair)...",
-            parse_mode=None,
-        )
+        while offset < total:
+            batch = await get_tokens_batch(offset, batch_size)
+            if not batch:
+                break
 
-        for i, tok in enumerate(tokens):
-            try:
-                # Fetch current MC from DexScreener
-                pair = await fetch_token_data(tok.mint)
-                if not pair:
-                    continue
+            for tok in batch:
+                stats["processed"] += 1
 
-                metrics = parse_token_metrics(pair)
-                current_mc = metrics.get("market_cap", 0) or 0
-                if not current_mc:
-                    continue
+                try:
+                    # Step 1: Determine launch_mc
+                    launch_mc = getattr(tok, "launch_mc", None)
+                    if not launch_mc or launch_mc <= 0:
+                        # Use stored market_cap as launch proxy
+                        launch_mc = tok.market_cap
+                        if launch_mc and launch_mc > 0:
+                            await set_token_launch_mc(tok.mint, launch_mc)
+                            stats["repaired_mc"] += 1
 
-                # Update current MC in DB (also sets launch_mc if null)
-                await update_token_market_cap(tok.mint, current_mc)
-                updated += 1
+                    if not launch_mc or launch_mc <= 0:
+                        stats["skipped_no_mc"] += 1
+                        continue
 
-                # Determine launch MC
-                launch_mc = getattr(tok, "launch_mc", None) or tok.market_cap or 0
+                    # Step 2: Fetch current MC from DexScreener
+                    pair = await fetch_token_data(tok.mint)
 
-                if launch_mc <= 0:
-                    # No launch MC — set current as baseline for future comparison
-                    repaired += 1
-                    continue
+                    if not pair:
+                        stats["dead"] += 1
+                        continue
 
-                multiple = current_mc / launch_mc if launch_mc > 0 else 1.0
+                    metrics = parse_token_metrics(pair)
+                    current_mc = metrics.get("market_cap", 0) or 0
 
-                # Winner: 2x+ from launch MC
-                if multiple >= 2.0:
-                    winners_found += 1
-                    name = tok.name or tok.symbol or tok.mint[:12]
-                    created_at_ms = pair.get("pairCreatedAt")
+                    if current_mc <= 0:
+                        stats["dead"] += 1
+                        continue
 
-                    # Fetch early buyers
-                    early_buyers = await _get_early_buyers(
-                        tok.mint, window_minutes=10, created_at_ms=created_at_ms,
-                    )
+                    stats["dex_found"] += 1
 
-                    # Score and save wallets
-                    tier_wallets = await get_tier_wallets(max_tier=3)
-                    known = {w.address for w in tier_wallets}
+                    # Update current MC in DB
+                    await update_token_market_cap(tok.mint, current_mc)
 
-                    for wallet in early_buyers:
-                        if wallet in known:
-                            continue
-                        score, tier = _score_wallet(
-                            wins=1, losses=0, total_trades=1,
-                            avg_multiple=multiple, early_entry_rate=1.0,
+                    # Step 3: Calculate multiple
+                    multiple = current_mc / launch_mc
+
+                    # Step 4: Winner detection
+                    if multiple >= 2.0:
+                        stats["winners"] += 1
+                        name = tok.name or tok.symbol or tok.mint[:12]
+                        created_at_ms = pair.get("pairCreatedAt")
+
+                        # Extract early buyers
+                        early_buyers = await _get_early_buyers(
+                            tok.mint, window_minutes=10, created_at_ms=created_at_ms,
                         )
-                        if tier > 0:
-                            await upsert_wallet(
-                                address=wallet, score=score, tier=tier,
-                                win_rate=1.0, avg_multiple=round(multiple, 2),
+
+                        # Score and save new wallets
+                        tier_wallets = await get_tier_wallets(max_tier=3)
+                        known = {w.address for w in tier_wallets}
+                        batch_wallets = 0
+
+                        for wallet in early_buyers:
+                            if wallet in known:
+                                continue
+                            score, tier = _score_wallet(
                                 wins=1, losses=0, total_trades=1,
-                                avg_entry_mcap=launch_mc,
+                                avg_multiple=multiple, early_entry_rate=1.0,
                             )
-                            wallets_added += 1
+                            if tier > 0:
+                                await upsert_wallet(
+                                    address=wallet, score=score, tier=tier,
+                                    win_rate=1.0, avg_multiple=round(multiple, 2),
+                                    wins=1, losses=0, total_trades=1,
+                                    avg_entry_mcap=launch_mc,
+                                )
+                                batch_wallets += 1
+                                stats["wallets"] += 1
 
-                    # Save winner pattern
-                    liq = metrics.get("liquidity_usd", 0) or 0
-                    threshold = "10x" if multiple >= 10 else "5x" if multiple >= 5 else "2x"
-                    await upsert_pattern(
-                        pattern_type=f"winner_{threshold}",
-                        outcome_threshold=threshold,
-                        sample_count=1,
-                        avg_entry_mcap=launch_mc,
-                        mcap_range_low=launch_mc * 0.5,
-                        mcap_range_high=launch_mc * 2.0,
-                        avg_liquidity=liq * 0.5 if liq else 5000,
-                        min_liquidity=3000,
-                        avg_ai_score=70,
-                        avg_rugcheck_score=5,
-                        best_hours=None,
-                        best_days=None,
-                        confidence_score=min(95, 50 + multiple * 5),
-                    )
-
-                    logger.info(
-                        "Backfill winner: %s %.1fx | %d early buyers, %d new wallets",
-                        name, multiple, len(early_buyers), wallets_added,
-                    )
-
-                # Progress update every 50 tokens
-                if (i + 1) % 50 == 0:
-                    try:
-                        await status_msg.edit_text(
-                            f"🔄 Backfill progress: {i + 1}/{total} tokens | "
-                            f"{winners_found} winners | {wallets_added} wallets",
-                            parse_mode=None,
+                        # Save winner pattern
+                        liq = metrics.get("liquidity_usd", 0) or 0
+                        threshold = "10x" if multiple >= 10 else "5x" if multiple >= 5 else "2x"
+                        await upsert_pattern(
+                            pattern_type=f"winner_{threshold}",
+                            outcome_threshold=threshold,
+                            sample_count=stats["winners"],
+                            avg_entry_mcap=launch_mc,
+                            mcap_range_low=launch_mc * 0.5,
+                            mcap_range_high=launch_mc * 2.0,
+                            avg_liquidity=liq * 0.5 if liq else 5000,
+                            min_liquidity=3000,
+                            avg_ai_score=70,
+                            avg_rugcheck_score=5,
+                            best_hours=None, best_days=None,
+                            confidence_score=min(95, 50 + multiple * 5),
                         )
-                    except Exception:
-                        pass
 
-                # Rate limit: small delay between tokens
-                await asyncio.sleep(0.5)
+                        logger.info(
+                            "Backfill WINNER: %s %.1fx launch=$%.0f now=$%.0f buyers=%d wallets=%d",
+                            name, multiple, launch_mc, current_mc, len(early_buyers), batch_wallets,
+                        )
 
-            except Exception as exc:
-                errors += 1
-                logger.debug("Backfill error for %s: %s", tok.mint[:12], exc)
+                    # Rate limit
+                    await asyncio.sleep(0.3)
+
+                except Exception as exc:
+                    stats["errors"] += 1
+                    logger.debug("Backfill error %s: %s", tok.mint[:12], exc)
+
+            offset += batch_size
+
+            # Progress update
+            state.backfill_progress = (
+                f"{stats['processed']}/{total} | "
+                f"DexOK:{stats['dex_found']} Dead:{stats['dead']} NoMC:{stats['skipped_no_mc']} | "
+                f"Winners:{stats['winners']} Wallets:{stats['wallets']}"
+            )
+            try:
+                await status_msg.edit_text(f"🔄 {state.backfill_progress}", parse_mode=None)
+            except Exception:
+                pass
 
         # Final report
         report = "\n".join([
             "✅ BACKFILL COMPLETE",
             "━━━━━━━━━━━━━━━━━━━━",
-            f"Tokens processed: {updated}/{total}",
-            f"Launch MC repaired: {repaired} (set baseline for next run)",
-            f"Winners found (2x+): {winners_found}",
-            f"New wallets added: {wallets_added}",
-            f"Patterns saved: {winners_found}",
-            f"Errors: {errors}",
-            "",
-            "Run /backfill again to find winners among repaired tokens.",
+            f"Tokens processed: {stats['processed']}/{total}",
+            f"DexScreener found: {stats['dex_found']}",
+            f"Dead/no data: {stats['dead']}",
+            f"No launch MC (skipped): {stats['skipped_no_mc']}",
+            f"Launch MC repaired: {stats['repaired_mc']}",
+            f"Winners found (2x+): {stats['winners']}",
+            f"New wallets added: {stats['wallets']}",
+            f"Errors: {stats['errors']}",
         ])
 
+        state.backfill_progress = report
         await status_msg.edit_text(report, parse_mode=None)
 
-        # Also post to Callers HQ
         try:
             await bot.send_message(CALLER_GROUP_ID, report)
         except Exception:
             pass
 
-        logger.info(
-            "Backfill complete: %d tokens, %d winners, %d wallets, %d errors",
-            updated, winners_found, wallets_added, errors,
-        )
+        logger.info("Backfill complete: %s", stats)
 
     except Exception as exc:
         logger.error("Backfill failed: %s", exc)
+        state.backfill_progress = f"Failed: {exc}"
         try:
             await status_msg.edit_text(f"Backfill failed: {exc}", parse_mode=None)
         except Exception:
             pass
+    finally:
+        state.backfill_running = False
 
 
 # ── /start ────────────────────────────────────────────────────────────────────

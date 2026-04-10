@@ -1009,6 +1009,26 @@ async def get_all_tokens(limit: int = 500) -> list["Token"]:
         return list(result.scalars().all())
 
 
+async def get_tokens_batch(offset: int, batch_size: int = 200) -> list["Token"]:
+    """Returns a batch of tokens for backfill processing."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Token).order_by(Token.first_seen_at.asc())
+            .offset(offset).limit(batch_size)
+        )
+        return list(result.scalars().all())
+
+
+async def set_token_launch_mc(mint: str, launch_mc: float) -> None:
+    """Sets launch_mc without overwriting if already set."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Token).where(Token.mint == mint))
+        tok = result.scalar_one_or_none()
+        if tok and not tok.launch_mc:
+            tok.launch_mc = launch_mc
+            await session.commit()
+
+
 async def update_token_market_cap(mint: str, market_cap: float) -> None:
     """Update a token's current market cap. Also sets launch_mc if not already set."""
     async with AsyncSessionLocal() as session:
