@@ -139,10 +139,94 @@ async def _save_pumpfun_token(token: dict, via: str) -> bool:
 
 # ── WebSocket source 1: pumpdev.io ───────────────────────────────────────────
 
+def _normalize_ws_token(raw: dict) -> dict:
+    """
+    Normalizes token data from any WS source to pump.fun REST API format
+    so _save_pumpfun_token can handle it.
+    Tries multiple field name conventions.
+    """
+    # Already has 'mint' in pump.fun format — return as-is
+    if raw.get("mint") and raw.get("usd_market_cap"):
+        return raw
+
+    normalized = dict(raw)
+
+    # Mint address: try common field names
+    if not normalized.get("mint"):
+        normalized["mint"] = (
+            raw.get("mint")
+            or raw.get("mintAddress")
+            or raw.get("mint_address")
+            or raw.get("tokenAddress")
+            or raw.get("token_address")
+            or raw.get("address")
+            or raw.get("tokenMint")
+            or ""
+        )
+
+    # Name / symbol
+    if not normalized.get("name"):
+        normalized["name"] = raw.get("name") or raw.get("tokenName") or raw.get("token_name") or "Unknown"
+    if not normalized.get("symbol"):
+        normalized["symbol"] = raw.get("symbol") or raw.get("ticker") or "???"
+
+    # Market cap: try multiple field names
+    if not normalized.get("usd_market_cap"):
+        mc = (
+            raw.get("usd_market_cap")
+            or raw.get("marketCap")
+            or raw.get("market_cap")
+            or raw.get("marketCapUsd")
+            or raw.get("mcap")
+            or 0
+        )
+        normalized["usd_market_cap"] = mc
+
+    # Reserves
+    if not normalized.get("virtual_sol_reserves"):
+        normalized["virtual_sol_reserves"] = (
+            raw.get("virtual_sol_reserves")
+            or raw.get("vSolReserves")
+            or raw.get("solReserves")
+            or 0
+        )
+    if not normalized.get("virtual_token_reserves"):
+        normalized["virtual_token_reserves"] = (
+            raw.get("virtual_token_reserves")
+            or raw.get("vTokenReserves")
+            or raw.get("tokenReserves")
+            or 0
+        )
+
+    # Bonding curve
+    if not normalized.get("king_of_the_hill_progress"):
+        normalized["king_of_the_hill_progress"] = (
+            raw.get("king_of_the_hill_progress")
+            or raw.get("bondingCurveProgress")
+            or raw.get("bonding_curve_progress")
+            or raw.get("progress")
+            or 0
+        )
+
+    # Social / other
+    if not normalized.get("raydium_pool"):
+        normalized["raydium_pool"] = raw.get("raydium_pool") or raw.get("raydiumPool") or None
+
+    return normalized
+
+
+# Debug: count raw messages to log first few
+_ws_debug_count = 0
+_WS_DEBUG_LIMIT = 5
+
+
 async def _ws_pumpdev(session: aiohttp.ClientSession) -> None:
     """
     pumpdev.io — plain WebSocket, sends JSON messages with new token data.
     """
+    global _ws_debug_count
+    _ws_debug_count = 0
+
     logger.info("Harvester WS: trying pumpdev.io...")
     async with session.ws_connect(
         PUMPDEV_WS,
@@ -155,37 +239,91 @@ async def _ws_pumpdev(session: aiohttp.ClientSession) -> None:
 
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
+                raw_text = msg.data
+
+                # Debug: log first N raw messages
+                if _ws_debug_count < _WS_DEBUG_LIMIT:
+                    _ws_debug_count += 1
+                    preview = raw_text[:500] if len(raw_text) > 500 else raw_text
+                    logger.info(
+                        "Harvester WS[pumpdev] RAW #%d (len=%d): %s",
+                        _ws_debug_count, len(raw_text), preview,
+                    )
+
                 try:
-                    data = json.loads(msg.data)
-                    if isinstance(data, dict) and data.get("mint"):
-                        saved = await _save_pumpfun_token(data, via="pumpdev")
+                    data = json.loads(raw_text)
+                except (json.JSONDecodeError, TypeError):
+                    # Not JSON — log it
+                    if _ws_debug_count <= _WS_DEBUG_LIMIT:
+                        logger.info("Harvester WS[pumpdev]: non-JSON msg: %s", raw_text[:200])
+                    continue
+
+                # Handle dict (single token)
+                if isinstance(data, dict):
+                    token = _normalize_ws_token(data)
+                    if token.get("mint"):
+                        saved = await _save_pumpfun_token(token, via="pumpdev")
                         if saved:
                             state.harvester_ws_tokens_today += 1
-                    elif isinstance(data, list):
-                        for item in data:
-                            if isinstance(item, dict) and item.get("mint"):
-                                saved = await _save_pumpfun_token(item, via="pumpdev")
+                    elif _ws_debug_count <= _WS_DEBUG_LIMIT:
+                        # Log keys so we can see the structure
+                        logger.info(
+                            "Harvester WS[pumpdev]: dict without mint, keys=%s",
+                            list(data.keys())[:20],
+                        )
+
+                # Handle list of tokens
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            token = _normalize_ws_token(item)
+                            if token.get("mint"):
+                                saved = await _save_pumpfun_token(token, via="pumpdev")
                                 if saved:
                                     state.harvester_ws_tokens_today += 1
-                except (json.JSONDecodeError, TypeError):
-                    pass
+
+                # Handle wrapped events: {"event": "newToken", "data": {...}}
+                elif isinstance(data, dict) and "data" in data:
+                    inner = data["data"]
+                    if isinstance(inner, dict):
+                        token = _normalize_ws_token(inner)
+                        if token.get("mint"):
+                            saved = await _save_pumpfun_token(token, via="pumpdev")
+                            if saved:
+                                state.harvester_ws_tokens_today += 1
+
+            elif msg.type == aiohttp.WSMsgType.BINARY:
+                if _ws_debug_count < _WS_DEBUG_LIMIT:
+                    _ws_debug_count += 1
+                    logger.info(
+                        "Harvester WS[pumpdev] BINARY #%d (len=%d): %s",
+                        _ws_debug_count, len(msg.data),
+                        msg.data[:200].hex() if msg.data else "empty",
+                    )
+
             elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                logger.warning("Harvester WS[pumpdev]: connection closed/error")
                 break
 
 
 # ── WebSocket source 2: PumpPortal ──────────────────────────────────────────
 
+_pp_debug_count = 0
+
+
 async def _ws_pumpportal(session: aiohttp.ClientSession) -> None:
     """
     PumpPortal — JSON WebSocket, requires subscription message.
     """
+    global _pp_debug_count
+    _pp_debug_count = 0
+
     logger.info("Harvester WS: trying PumpPortal...")
     async with session.ws_connect(
         PUMPPORTAL_WS,
         timeout=aiohttp.ClientTimeout(total=WS_CONNECT_TIMEOUT),
         heartbeat=25,
     ) as ws:
-        # Subscribe to new token events
         await ws.send_json({"method": "subscribeNewToken"})
 
         state.harvester_ws_connected = True
@@ -194,19 +332,34 @@ async def _ws_pumpportal(session: aiohttp.ClientSession) -> None:
 
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
+                raw_text = msg.data
+
+                if _pp_debug_count < _WS_DEBUG_LIMIT:
+                    _pp_debug_count += 1
+                    logger.info(
+                        "Harvester WS[pumpportal] RAW #%d (len=%d): %s",
+                        _pp_debug_count, len(raw_text), raw_text[:500],
+                    )
+
                 try:
-                    data = json.loads(msg.data)
-                    if isinstance(data, dict):
-                        # PumpPortal sends token data directly or wrapped
-                        token_data = data
-                        if "mint" not in token_data and "token" in token_data:
-                            token_data = token_data["token"]
+                    data = json.loads(raw_text)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+                if isinstance(data, dict):
+                    # Unwrap if nested
+                    token_data = data
+                    if "mint" not in token_data and "token" in token_data:
+                        token_data = token_data["token"]
+                    if isinstance(token_data, dict):
+                        token_data = _normalize_ws_token(token_data)
                         if token_data.get("mint"):
                             saved = await _save_pumpfun_token(token_data, via="pumpportal")
                             if saved:
                                 state.harvester_ws_tokens_today += 1
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                        elif _pp_debug_count <= _WS_DEBUG_LIMIT:
+                            logger.info("Harvester WS[pumpportal]: no mint, keys=%s", list(data.keys())[:20])
+
             elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                 break
 
