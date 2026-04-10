@@ -1180,61 +1180,33 @@ async def cmd_deepanalyze(message: Message):
         liquidity = metrics.get("liquidity_usd", 0) or 0
         created_at_ms = pair.get("pairCreatedAt")
 
-        # ── 2. Get full transaction history from Helius ──────────────────
-        all_sigs = []
-        last_sig = None
-        for _ in range(5):  # up to 2500 sigs
-            payload = {
-                "jsonrpc": "2.0", "id": 1,
-                "method": "getSignaturesForAddress",
-                "params": [address, {"limit": 500, "commitment": "confirmed",
-                                     **({"before": last_sig} if last_sig else {})}],
-            }
-            try:
-                from bot.config import HELIUS_RPC_URL
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-                    async with s.post(HELIUS_RPC_URL, json=payload,
-                                      headers={"Content-Type": "application/json"}) as resp:
-                        if resp.status != 200:
-                            break
-                        data = await resp.json()
-                        batch = data.get("result") or []
-                        if not batch:
-                            break
-                        all_sigs.extend(batch)
-                        last_sig = batch[-1]["signature"]
-                        if len(batch) < 500:
-                            break
-            except Exception:
-                break
+        # ── 2. Find early buyers (retry + pair fallback + DexScreener) ────
+        early_wallet_list = await _get_early_buyers(
+            address, window_minutes=10, created_at_ms=created_at_ms,
+        )
+        early_wallets: set[str] = set(early_wallet_list)
 
+        # Also get sig count + volume via direct Helius call for stats
+        from bot.config import HELIUS_RPC_URL
+        all_sigs = await _get_signatures(address, limit=200)
         valid_sigs = [s for s in all_sigs if s.get("blockTime") and not s.get("err")]
 
-        # ── 3. Launch timestamp + first buyers ───────────────────────────
-        if created_at_ms:
-            launch_ts = created_at_ms // 1000
-        elif valid_sigs:
-            launch_ts = min(s["blockTime"] for s in valid_sigs)
-        else:
-            launch_ts = 0
+        launch_ts = (created_at_ms // 1000) if created_at_ms else (
+            min(s["blockTime"] for s in valid_sigs) if valid_sigs else 0
+        )
 
-        cutoff_10m = launch_ts + 600  # 10 minutes
-        early_sigs = [s for s in valid_sigs if s["blockTime"] <= cutoff_10m]
-
-        # Parse early transactions
-        early_sig_ids = [s["signature"] for s in early_sigs[:100]]
-        early_parsed = await _parse_transactions(early_sig_ids)
-
-        early_wallets: set[str] = set()
+        # Estimate early volume from parsed transactions
         early_sol_volume = 0.0
-        for tx in early_parsed:
-            fp = tx.get("feePayer")
-            if fp:
-                early_wallets.add(fp)
-            for nt in (tx.get("nativeTransfers") or []):
-                early_sol_volume += abs(nt.get("amount", 0)) / 1e9
+        if early_wallet_list:
+            cutoff_10m = launch_ts + 600
+            early_sig_ids = [s["signature"] for s in valid_sigs if s["blockTime"] <= cutoff_10m][:50]
+            if early_sig_ids:
+                early_parsed = await _parse_transactions(early_sig_ids)
+                for tx in early_parsed:
+                    for nt in (tx.get("nativeTransfers") or []):
+                        early_sol_volume += abs(nt.get("amount", 0)) / 1e9
 
-        # ── 4. Check tracked wallets ─────────────────────────────────────
+        # ── 3. Check tracked wallets ─────────────────────────────────────
         tier_wallets = await get_tier_wallets(max_tier=3)
         known_set = {w.address for w in tier_wallets}
         insider_matches = [w for w in early_wallets if w in known_set]
