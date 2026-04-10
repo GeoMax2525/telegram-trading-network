@@ -428,6 +428,13 @@ async def _build_hub_text(autotrade: bool) -> str:
             f"📊 Candidates: `{state.data_points_today}` | Paper trades: `{state.paper_trades_today}`",
         ]
 
+    # MC repair progress
+    if state.backfill_progress and state.backfill_progress != "Not started":
+        bp = state.backfill_progress
+        if len(bp) > 70:
+            bp = bp[:70] + "..."
+        lines += ["", f"🔧 _{bp}_"]
+
     lines += [
         "",
         "📊 *PERFORMANCE*",

@@ -1019,6 +1019,37 @@ async def get_tokens_batch(offset: int, batch_size: int = 200) -> list["Token"]:
         return list(result.scalars().all())
 
 
+async def get_tokens_no_mc(limit: int = 500) -> list["Token"]:
+    """Returns tokens with no market_cap, oldest first."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Token).where(
+                (Token.market_cap.is_(None)) | (Token.market_cap == 0)
+            ).order_by(Token.first_seen_at.asc()).limit(limit)
+        )
+        return list(result.scalars().all())
+
+
+async def count_tokens_no_mc() -> int:
+    async with AsyncSessionLocal() as session:
+        return (await session.execute(
+            select(func.count(Token.mint)).where(
+                (Token.market_cap.is_(None)) | (Token.market_cap == 0)
+            )
+        )).scalar() or 0
+
+
+async def mark_token_dead(mint: str) -> None:
+    """Mark a token as dead (source='dead')."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Token).where(Token.mint == mint))
+        tok = result.scalar_one_or_none()
+        if tok:
+            tok.source = "dead"
+            tok.last_updated_at = datetime.utcnow()
+            await session.commit()
+
+
 async def set_token_launch_mc(mint: str, launch_mc: float) -> None:
     """Sets launch_mc without overwriting if already set."""
     async with AsyncSessionLocal() as session:

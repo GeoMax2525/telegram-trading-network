@@ -28,6 +28,7 @@ from bot.agents.pattern_engine import pattern_engine_loop
 from bot.agents.scanner_agent import scanner_agent_loop
 from bot.agents.learning_loop import learning_loop
 from bot.agents.paper_monitor import paper_monitor_loop
+from bot.agents.mc_repair import mc_repair_loop
 from database.models import init_db, init_agent_params, get_param, compute_paper_balance, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -148,6 +149,7 @@ async def main() -> None:
     asyncio.create_task(scanner_agent_loop())
     asyncio.create_task(learning_loop(bot))
     asyncio.create_task(paper_monitor_loop(bot))
+    asyncio.create_task(mc_repair_loop())
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     try:
