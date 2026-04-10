@@ -264,15 +264,44 @@ def _score_wallet(
     """
     Scores a wallet 0–100 using real trade data.
     Returns (score, tier).
+
+    Components (sum to 100 max):
+      win_rate      × 40  (100% WR = 40 pts)
+      avg_multiple  × 25  (3x = 18.75, 5x = 25, capped at 5x)
+      early_entry   × 15  (100% early = 15 pts)
+      consistency   × 10  (1+ trades = 3, 3+ = 6, 5+ = 8, 10+ = 10)
+      volume        × 10  (1+ wins = 3, 3+ = 6, 5+ = 10)
     """
     win_rate = wins / total_trades if total_trades > 0 else 0.0
 
-    score  = win_rate * 35
-    score += (min(avg_multiple, 10.0) / 10.0) * 25
-    score += early_entry_rate * 20
-    score += 10 if total_trades >= 10 else (5 if total_trades >= 5 else 0)
-    score += 10 if wins >= 5 else (5 if wins >= 3 else 0)
-    score  = round(score, 1)
+    # Win rate: heavily weighted (40 pts max)
+    score = win_rate * 40
+
+    # Avg multiple: capped at 5x for full points (25 pts max)
+    score += (min(avg_multiple, 5.0) / 5.0) * 25
+
+    # Early entry rate (15 pts max)
+    score += early_entry_rate * 15
+
+    # Consistency: graduated from 1 trade (10 pts max)
+    if total_trades >= 10:
+        score += 10
+    elif total_trades >= 5:
+        score += 8
+    elif total_trades >= 3:
+        score += 6
+    elif total_trades >= 1:
+        score += 3
+
+    # Volume/wins (10 pts max)
+    if wins >= 5:
+        score += 10
+    elif wins >= 3:
+        score += 6
+    elif wins >= 1:
+        score += 3
+
+    score = round(score, 1)
 
     tier = (
         1 if score >= 60 else
