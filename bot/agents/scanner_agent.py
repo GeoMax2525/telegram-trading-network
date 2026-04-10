@@ -604,33 +604,48 @@ async def run_once() -> tuple[int, int]:
 
         # Open paper trade if Agent 5 flagged it
         if scored.get("paper_trade"):
-            # Position size: 15% of virtual balance, capped
-            paper_sol = min(state.paper_balance * 0.15, state.paper_balance)
-            if paper_sol < 0.01:
-                logger.info("Scanner: paper balance depleted (%.4f SOL), skipping", state.paper_balance)
+            # Reset balance if depleted
+            if state.paper_balance < 0.05:
+                state.paper_balance = state.PAPER_STARTING_BALANCE
+                state.paper_resets += 1
+                logger.info("Scanner: paper balance reset to %.1f SOL (reset #%d)",
+                            state.paper_balance, state.paper_resets)
+
+            # Confidence-based position sizing (% of virtual balance)
+            conf = scored.get("confidence_score", 0)
+            if conf >= 80:
+                size_pct = 0.20
+            elif conf >= 70:
+                size_pct = 0.15
+            elif conf >= 50:
+                size_pct = 0.10
             else:
-                logger.info(
-                    "Scanner: PAPER TRADE for %s (%s) conf=%.0f sol=%.4f",
-                    scored.get("name", "?"), scored.get("mint", "?")[:12],
-                    scored.get("confidence_score", 0), paper_sol,
+                size_pct = 0.05
+
+            paper_sol = round(min(state.paper_balance * size_pct, state.paper_balance * 0.20), 4)
+
+            logger.info(
+                "Scanner: PAPER TRADE %s conf=%.0f size=%.0f%% sol=%.4f bal=%.4f",
+                scored.get("name", "?")[:20], conf, size_pct * 100,
+                paper_sol, state.paper_balance,
+            )
+            try:
+                pt = await open_paper_trade(
+                    token_address=scored.get("mint", ""),
+                    token_name=scored.get("name"),
+                    entry_mc=scored.get("mcap"),
+                    entry_price=scored.get("mcap"),
+                    paper_sol=paper_sol,
+                    confidence=scored.get("confidence_score", 0),
+                    pattern_type=scored.get("chart_pattern") or scored.get("source"),
+                    tp_x=scored.get("trade_tp_x", 3.0),
+                    sl_pct=scored.get("trade_sl_pct", 30.0),
                 )
-                try:
-                    pt = await open_paper_trade(
-                        token_address=scored.get("mint", ""),
-                        token_name=scored.get("name"),
-                        entry_mc=scored.get("mcap"),
-                        entry_price=scored.get("mcap"),
-                        paper_sol=round(paper_sol, 4),
-                        confidence=scored.get("confidence_score", 0),
-                        pattern_type=scored.get("chart_pattern") or scored.get("source"),
-                        tp_x=scored.get("trade_tp_x", 3.0),
-                        sl_pct=scored.get("trade_sl_pct", 30.0),
-                    )
-                    state.paper_balance -= paper_sol
-                    state.paper_trades_today += 1
-                    logger.info("Scanner: paper trade id=%s bal=%.4f SOL", pt.id, state.paper_balance)
-                except Exception as exc:
-                    logger.error("Scanner: paper trade DB failed for %s: %s", scored.get("mint", "?")[:12], exc)
+                state.paper_balance -= paper_sol
+                state.paper_trades_today += 1
+                logger.info("Scanner: paper trade id=%s bal=%.4f SOL", pt.id, state.paper_balance)
+            except Exception as exc:
+                logger.error("Scanner: paper trade DB failed for %s: %s", scored.get("mint", "?")[:12], exc)
 
         state.pending_candidates.append(scored)
         state.scanner_candidates_today += 1

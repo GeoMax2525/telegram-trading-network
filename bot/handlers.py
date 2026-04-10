@@ -406,9 +406,14 @@ async def _build_hub_text(autotrade: bool) -> str:
         await _chart_detector_line(),
         f"⚡ Trade Mode: *{mode_display}*",
         "",
-        "🔥 *CHAOS MODE — Max data collection*" if state.trade_mode == "paper" else "",
-        f"💰 Virtual balance: `{state.paper_balance:.4f} SOL`" if state.trade_mode == "paper" else "",
-        f"📊 Data points: `{state.data_points_today}` | Paper today: `{state.paper_trades_today}`" if state.trade_mode == "paper" else "",
+        *([
+            "🔥 *CHAOS MODE — Max data collection*",
+            f"💼 Paper Balance: `{state.paper_balance:.2f} SOL` / {state.PAPER_STARTING_BALANCE:.0f} SOL",
+            f"📈 Paper P&L: `{state.paper_balance - state.PAPER_STARTING_BALANCE:+.2f} SOL` "
+            f"(`{((state.paper_balance / state.PAPER_STARTING_BALANCE) - 1) * 100:+.1f}%`)"
+            + (f" | Resets: {state.paper_resets}" if state.paper_resets else ""),
+            f"📊 Data points: `{state.data_points_today}` | Paper today: `{state.paper_trades_today}`",
+        ] if state.trade_mode == "paper" else []),
         "",
         "📊 *PERFORMANCE*",
         f"Today: `{today_pnl:+.4f} SOL` | All Time: `{alltime_pnl:+.4f} SOL`",
