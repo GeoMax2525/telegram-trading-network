@@ -25,6 +25,12 @@ learning_loop_last_run:      datetime | None = None
 learning_loop_last_analyzed: int             = 0
 learning_loop_total_closed:  int             = 0
 learning_loop_weights:       dict            = {}
+learning_loop_last_change:   str             = "No changes yet"
+
+# ── Dynamic parameters (adjusted by Agent 6) ───────────────────────────────
+confidence_thresholds:       dict            = {"execute_full": 80, "execute_half": 70, "monitor": 60}
+market_regime:               str             = "NEUTRAL"   # GOOD / NEUTRAL / BAD
+sol_24h_change:              float           = 0.0
 
 # ── Harvester Agent 1 live stats ────────────────────────────────────────────
 harvester_ws_connected:      bool            = False

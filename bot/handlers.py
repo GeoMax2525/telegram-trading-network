@@ -251,35 +251,37 @@ async def _chart_detector_line() -> str:
 
 
 async def _learning_loop_line() -> str:
-    remaining = max(0, 50 - (state.learning_loop_total_closed - state.learning_loop_last_analyzed))
+    remaining = max(0, 10 - (state.learning_loop_total_closed - state.learning_loop_last_analyzed))
     w = state.learning_loop_weights
+    regime = getattr(state, "market_regime", "NEUTRAL")
+    regime_icon = {"GOOD": "🟢", "NEUTRAL": "🟡", "BAD": "🔴"}.get(regime, "⚪")
+    thresholds = getattr(state, "confidence_thresholds", {})
+    t_full = thresholds.get("execute_full", 80)
+    t_half = thresholds.get("execute_half", 70)
+    sol_chg = getattr(state, "sol_24h_change", 0.0)
+    last_change = getattr(state, "learning_loop_last_change", "No changes yet")
 
     if state.learning_loop_last_run is None and not w:
-        return "✅ Learning Loop — waiting for 50 closed trades..."
+        return f"✅ Learning Loop — {regime_icon} {regime} | waiting for trades..."
 
     if state.learning_loop_last_run is None:
-        return f"✅ Learning Loop — {remaining} trades until next run"
+        return f"✅ Learning Loop — {regime_icon} {regime} | {remaining} trades to next adjust"
 
     elapsed_min = int((datetime.utcnow() - state.learning_loop_last_run).total_seconds() / 60)
-    if elapsed_min < 60:
-        age = f"{elapsed_min}min ago"
-    else:
-        age = f"{elapsed_min // 60}h ago"
+    age = f"{elapsed_min}min ago" if elapsed_min < 60 else f"{elapsed_min // 60}h ago"
 
-    # Show current weights compactly
     w_str = " ".join(f"{k[:3]}={v:.0%}" for k, v in sorted(w.items(), key=lambda x: -x[1]))
 
-    # Show AI params summary
     params = await get_all_trade_params()
-    if params:
-        ai_count = sum(1 for p in params if p.sample_size >= 10)
-        params_str = f" | {ai_count}/{len(params)} AI params active"
-    else:
-        params_str = ""
+    ai_str = f" | {sum(1 for p in params if p.sample_size >= 10)}/{len(params)} AI" if params else ""
+
+    # Truncate last change for display
+    change_short = last_change[:60] + "..." if len(last_change) > 60 else last_change
 
     return (
-        f"✅ Learning Loop — last run {age} | next in {remaining} trades{params_str}\n"
-        f"     Weights: {w_str}"
+        f"✅ Learning Loop — {regime_icon} {regime} | SOL {sol_chg:+.1f}% | last {age}{ai_str}\n"
+        f"     Thresh: full={t_full} half={t_half} | {w_str}\n"
+        f"     Last: {change_short}"
     )
 
 

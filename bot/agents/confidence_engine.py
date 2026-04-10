@@ -238,12 +238,17 @@ async def score_candidate(candidate: dict) -> dict:
     chart_gate_pass = chart >= 50
     gates_pass = rug_gate_pass and chart_gate_pass
 
-    # Decision thresholds
-    if confidence >= 80 and gates_pass:
+    # Dynamic thresholds (adjusted by Agent 6)
+    thresholds = state.confidence_thresholds
+    t_full = thresholds.get("execute_full", 80)
+    t_half = thresholds.get("execute_half", 70)
+    t_monitor = thresholds.get("monitor", 60)
+
+    if confidence >= t_full and gates_pass:
         decision = "execute_full"
-    elif confidence >= 70 and gates_pass:
+    elif confidence >= t_half and gates_pass:
         decision = "execute_half"
-    elif confidence >= 60:
+    elif confidence >= t_monitor:
         decision = "monitor"
     else:
         decision = "discard"
