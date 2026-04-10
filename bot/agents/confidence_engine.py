@@ -285,17 +285,18 @@ async def score_candidate(candidate: dict) -> dict:
     live_gates_pass = rug_gate_pass and chart_gate_pass
 
     logger.info(
-        "Agent5: %s mode=%s conf=%.1f rug=%.0f(%s) chart=%.0f(%s) live_gate=%s",
-        candidate.get("name", "?")[:20], state.trade_mode,
-        confidence, rug, rug_gate_pass, chart, chart_gate_pass, live_gates_pass,
+        "Agent5: %s mode=%s weights=%s conf=%.1f rug=%.0f(%s) chart=%.0f(%s)",
+        candidate.get("name", "?")[:20], state.trade_mode, weight_set,
+        confidence, rug, rug_gate_pass, chart, chart_gate_pass,
     )
 
-    # Dynamic thresholds (adjusted by Agent 6)
+    # Decision thresholds (same for both modes — Agent 6 can adjust)
     thresholds = state.confidence_thresholds
     t_full = thresholds.get("execute_full", 80)
     t_half = thresholds.get("execute_half", 70)
     t_monitor = thresholds.get("monitor", 60)
 
+    # LIVE decision: requires chart + rug hard gates + high threshold
     if confidence >= t_full and live_gates_pass:
         decision = "execute_full"
     elif confidence >= t_half and live_gates_pass:
@@ -305,13 +306,13 @@ async def score_candidate(candidate: dict) -> dict:
     else:
         decision = "discard"
 
-    # Execution: live mode = real trade
+    # LIVE execution
     executed = (
         state.trade_mode == "live"
         and decision in ("execute_full", "execute_half")
     )
 
-    # Paper mode: 45+ confidence, NO hard gates (maximum data collection)
+    # PAPER execution: 45+ confidence, no hard gates
     paper_trade = (
         state.trade_mode == "paper"
         and confidence >= 45
@@ -319,8 +320,8 @@ async def score_candidate(candidate: dict) -> dict:
 
     if paper_trade:
         logger.info(
-            "Agent5: PAPER TRADE triggered — %s confidence=%.1f rug=%.0f chart=%.0f",
-            candidate.get("name", "?"), confidence, rug, chart,
+            "Agent5: PAPER TRADE — %s conf=%.1f weights=%s",
+            candidate.get("name", "?"), confidence, weight_set,
         )
 
     # Look up AI-learned trade params for this source/pattern type
