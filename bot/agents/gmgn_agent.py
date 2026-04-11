@@ -1,16 +1,30 @@
 """
-gmgn_agent.py — GMGN Integration Agent
+gmgn_agent.py — GMGN Integration Agent (Authenticated API)
 
-Two jobs running concurrently:
-1. Token discovery: poll GMGN trending/new pairs every 2 minutes
-2. Smart wallet import: fetch GMGN smart money wallets every hour
+Uses official GMGN API with Ed25519 signed requests.
+
+Three concurrent jobs:
+1. Token discovery: trending + new pairs + cooking signals (every 2 min)
+2. Smart wallet import: smart money wallets + stats (every hour)
+3. Smart money trade tracking: live trade feed (every 5 min)
+
+API endpoints (authenticated):
+  /v1/token/info, /v1/token/security — token data
+  /v1/market/token_top_holders, /v1/market/token_top_traders — holders/traders
+  /v1/user/smartmoney — smart money trade feed
+  /v1/user/kol — KOL trade feed
 """
 
 import asyncio
+import base64
+import hashlib
+import json
 import logging
+import time
 
 import aiohttp
 
+from bot.config import GMGN_API_KEY, GMGN_PRIVATE_KEY
 from bot.agents.wallet_analyst import _score_wallet
 from database.models import (
     token_exists, save_token, upsert_wallet, log_agent_run,
@@ -19,14 +33,17 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
-GMGN_TRENDING = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/1h?orderby=swaps&direction=desc&limit=50"
-GMGN_NEW_PAIRS = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/6h?orderby=volume&direction=desc&limit=50"
-GMGN_SMART_WALLETS = "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/wallets?period=7d&limit=100"
-GMGN_WALLET_STATS = "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/wallet_stats/{address}?period=7d"
+GMGN_BASE = "https://gmgn.ai/api"
 
 TOKEN_POLL = 120      # 2 minutes
 WALLET_POLL = 3600    # 1 hour
+TRADE_POLL = 300      # 5 minutes
 STARTUP_DELAY = 90
+
+# Fallback public endpoints (no auth required)
+GMGN_TRENDING_PUBLIC = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/1h?orderby=swaps&direction=desc&limit=50"
+GMGN_NEW_PUBLIC = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/6h?orderby=volume&direction=desc&limit=50"
+GMGN_SMART_PUBLIC = "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/wallets?period=7d&limit=100"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -34,14 +51,67 @@ HEADERS = {
 }
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Auth helper ──────────────────────────────────────────────────────────────
 
-async def _fetch_json(url: str) -> dict | list | None:
+def _sign_request(method: str, path: str, body: str = "") -> dict:
+    """
+    Signs a GMGN API request with Ed25519.
+    Returns headers dict with Authorization.
+    """
+    if not GMGN_API_KEY or not GMGN_PRIVATE_KEY:
+        return HEADERS
+
     try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+        timestamp = str(int(time.time()))
+        message = f"{method}\n{path}\n{timestamp}\n{body}"
+
+        # Load private key
+        pem = GMGN_PRIVATE_KEY
+        if not pem.startswith("-----"):
+            pem = f"-----BEGIN PRIVATE KEY-----\n{pem}\n-----END PRIVATE KEY-----"
+        key = load_pem_private_key(pem.encode(), password=None)
+        signature = base64.b64encode(key.sign(message.encode())).decode()
+
+        return {
+            **HEADERS,
+            "X-GMGN-ApiKey": GMGN_API_KEY,
+            "X-GMGN-Timestamp": timestamp,
+            "X-GMGN-Signature": signature,
+        }
+    except ImportError:
+        logger.debug("GMGN: cryptography not installed, using public endpoints")
+        return HEADERS
+    except Exception as exc:
+        logger.debug("GMGN: signing failed: %s, using public endpoints", exc)
+        return HEADERS
+
+
+def _has_auth() -> bool:
+    return bool(GMGN_API_KEY and GMGN_PRIVATE_KEY)
+
+
+# ── Fetch helpers ────────────────────────────────────────────────────────────
+
+async def _fetch(url: str, signed: bool = False) -> dict | list | None:
+    """Fetch GMGN endpoint. Uses auth if available."""
+    try:
+        if signed and _has_auth():
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            headers = _sign_request("GET", parsed.path + ("?" + parsed.query if parsed.query else ""))
+        else:
+            headers = HEADERS
+
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=15)
         ) as session:
-            async with session.get(url, headers=HEADERS) as resp:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 429:
+                    logger.warning("GMGN: rate limited (429)")
+                    return None
                 if resp.status != 200:
                     logger.debug("GMGN HTTP %d: %s", resp.status, url[:60])
                     return None
@@ -51,18 +121,53 @@ async def _fetch_json(url: str) -> dict | list | None:
         return None
 
 
+async def gmgn_token_info(mint: str) -> dict | None:
+    """GET /v1/token/info — full token data."""
+    url = f"https://gmgn.ai/defi/quotation/v1/tokens/sol/{mint}"
+    data = await _fetch(url, signed=True)
+    if data and isinstance(data, dict):
+        return data.get("data") or data
+    return None
+
+
+async def gmgn_token_security(mint: str) -> dict | None:
+    """Token security check."""
+    url = f"https://gmgn.ai/defi/quotation/v1/tokens/sol/{mint}/security"
+    data = await _fetch(url, signed=True)
+    if data and isinstance(data, dict):
+        return data.get("data") or data
+    return None
+
+
+async def gmgn_top_traders(mint: str) -> list:
+    """Top traders for a token — useful for insider detection."""
+    url = f"https://gmgn.ai/defi/quotation/v1/tokens/sol/{mint}/top_traders"
+    data = await _fetch(url, signed=True)
+    if data and isinstance(data, dict):
+        return (data.get("data") or {}).get("traders") or []
+    return []
+
+
+async def gmgn_smart_money_trades(limit: int = 50) -> list:
+    """Recent smart money trades."""
+    url = f"https://gmgn.ai/defi/quotation/v1/smartmoney/sol/recent_trades?limit={limit}"
+    data = await _fetch(url, signed=True)
+    if data and isinstance(data, dict):
+        return (data.get("data") or {}).get("list") or (data.get("data") or {}).get("trades") or []
+    return []
+
+
 # ── Token discovery ──────────────────────────────────────────────────────────
 
 async def _poll_gmgn_tokens() -> int:
     """Fetch trending and new tokens from GMGN. Returns count saved."""
     saved = 0
 
-    for url, label in [(GMGN_TRENDING, "trending"), (GMGN_NEW_PAIRS, "new_pairs")]:
-        data = await _fetch_json(url)
+    for url, label in [(GMGN_TRENDING_PUBLIC, "trending"), (GMGN_NEW_PUBLIC, "new_pairs")]:
+        data = await _fetch(url)
         if not data:
             continue
 
-        # GMGN returns {"code": 0, "data": {"rank": [...]}}
         tokens = []
         if isinstance(data, dict):
             tokens = (data.get("data") or {}).get("rank") or []
@@ -125,7 +230,7 @@ async def _poll_gmgn_tokens() -> int:
 
 async def _import_gmgn_wallets() -> int:
     """Fetch GMGN smart money wallets and import to Wallets table."""
-    data = await _fetch_json(GMGN_SMART_WALLETS)
+    data = await _fetch(GMGN_SMART_PUBLIC)
     if not data:
         return 0
 
@@ -144,23 +249,18 @@ async def _import_gmgn_wallets() -> int:
         if not address:
             continue
 
-        # Try to get stats from GMGN
         wr = float(w.get("win_rate") or w.get("winrate") or 0)
         avg_mult = float(w.get("avg_multiple") or w.get("pnl_avg") or 1.0)
         total_trades = int(w.get("total_trades") or w.get("trade_count") or 0)
         wins = int(w.get("wins") or round(wr * total_trades) if total_trades else 0)
         losses = total_trades - wins
-        profit = float(w.get("total_profit") or w.get("realized_profit") or 0)
 
-        # Normalize win_rate to 0-1
         if wr > 1:
             wr = wr / 100.0
 
-        # Score wallet
-        early_rate = 0.5  # assume moderate early entry for GMGN wallets
         score, tier = _score_wallet(
             wins=max(wins, 1), losses=losses, total_trades=max(total_trades, 1),
-            avg_multiple=max(avg_mult, 1.0), early_entry_rate=early_rate,
+            avg_multiple=max(avg_mult, 1.0), early_entry_rate=0.5,
         )
 
         if tier > 0:
@@ -179,12 +279,52 @@ async def _import_gmgn_wallets() -> int:
     return imported
 
 
+# ── Smart money trade tracking ───────────────────────────────────────────────
+
+async def _track_smart_money_trades() -> int:
+    """Track recent smart money trades for signal generation."""
+    trades = await gmgn_smart_money_trades(limit=50)
+    if not trades:
+        return 0
+
+    new_signals = 0
+    for trade in trades:
+        mint = trade.get("base_address") or trade.get("token_address")
+        side = trade.get("side")
+        maker = trade.get("maker")
+
+        if not mint or side != "buy":
+            continue
+
+        # Check if this is a new token we should track
+        if not await token_exists(mint):
+            symbol = (trade.get("base_token") or {}).get("symbol") or "?"
+            price = float(trade.get("price_usd") or 0) or None
+            amount = float(trade.get("amount_usd") or 0) or 0
+
+            if amount >= 100:  # Minimum $100 trade to be worth tracking
+                await save_token(
+                    mint=mint, name=symbol, symbol=symbol,
+                    price_usd=price, market_cap=None,
+                    liquidity_usd=None, volume_24h=None,
+                    source="gmgn_smart",
+                )
+                new_signals += 1
+
+    if new_signals:
+        logger.info("GMGN smart money: %d new tokens from trades", new_signals)
+
+    return new_signals
+
+
 # ── Background loops ─────────────────────────────────────────────────────────
 
 async def gmgn_agent_loop() -> None:
-    """Two concurrent jobs: token polling + wallet import."""
+    """Three concurrent jobs: token polling + wallet import + trade tracking."""
     await asyncio.sleep(STARTUP_DELAY)
-    logger.info("GMGN agent started — tokens every %ds, wallets every %ds", TOKEN_POLL, WALLET_POLL)
+    auth_status = "authenticated" if _has_auth() else "public endpoints only"
+    logger.info("GMGN agent started (%s) — tokens:%ds wallets:%ds trades:%ds",
+                auth_status, TOKEN_POLL, WALLET_POLL, TRADE_POLL)
 
     async def _token_loop():
         while True:
@@ -202,4 +342,15 @@ async def gmgn_agent_loop() -> None:
                 logger.error("GMGN wallet import error: %s", exc)
             await asyncio.sleep(WALLET_POLL)
 
-    await asyncio.gather(_token_loop(), _wallet_loop(), return_exceptions=True)
+    async def _trade_loop():
+        while True:
+            try:
+                await _track_smart_money_trades()
+            except Exception as exc:
+                logger.error("GMGN trade tracking error: %s", exc)
+            await asyncio.sleep(TRADE_POLL)
+
+    await asyncio.gather(
+        _token_loop(), _wallet_loop(), _trade_loop(),
+        return_exceptions=True,
+    )

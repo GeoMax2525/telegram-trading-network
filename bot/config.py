@@ -52,6 +52,10 @@ DEXSCREENER_URL = "https://api.dexscreener.com/latest/dex/tokens/{address}"
 # ── Solana RPC ────────────────────────────────────────────────────────────────
 # Set HELIUS_RPC_URL in Railway env vars for a dedicated key, e.g.:
 #   https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
+# ── GMGN API ─────────────────────────────────────────────────────────────────
+GMGN_API_KEY: str = os.getenv("GMGN_API_KEY", "")
+GMGN_PRIVATE_KEY: str = os.getenv("GMGN_PRIVATE_KEY", "")
+
 HELIUS_RPC_URL: str = os.getenv(
     "HELIUS_RPC_URL",
     "https://mainnet.helius-rpc.com/?api-key=demo",
