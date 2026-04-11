@@ -47,31 +47,71 @@ def _has_auth() -> bool:
 
 
 async def _fetch(path: str, params: dict | None = None) -> dict | None:
-    """Fetch from GMGN OpenAPI. Path starts with /v1/..."""
-    url = f"{GMGN_HOST}{path}"
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as session:
-            async with session.get(url, headers=_headers(), params=params) as resp:
-                if resp.status == 429:
-                    logger.warning("GMGN: rate limited (429) on %s", path)
-                    return None
-                if resp.status == 401:
-                    logger.warning("GMGN: unauthorized (401) — check GMGN_API_KEY")
-                    return None
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.info("GMGN HTTP %d on %s: %s", resp.status, path, body[:200])
-                    return None
-                data = await resp.json(content_type=None)
-                if isinstance(data, dict) and data.get("code") not in (None, 0):
-                    logger.info("GMGN API error code=%s on %s: %s",
-                                data.get("code"), path, data.get("msg", "")[:100])
-                return data
-    except Exception as exc:
-        logger.debug("GMGN fetch %s failed: %s", path, exc)
-        return None
+    """
+    Fetch from GMGN. Tries authenticated OpenAPI first, falls back to public.
+    """
+    # Try 1: Authenticated OpenAPI
+    if _has_auth():
+        url = f"{GMGN_HOST}{path}"
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as session:
+                async with session.get(url, headers=_headers(), params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        if isinstance(data, dict) and data.get("code") in (None, 0):
+                            return data
+                        logger.info("GMGN API code=%s on %s", data.get("code") if isinstance(data, dict) else "?", path)
+                    elif resp.status == 429:
+                        logger.warning("GMGN: rate limited on %s", path)
+                    else:
+                        logger.info("GMGN auth HTTP %d on %s", resp.status, path)
+        except Exception as exc:
+            logger.debug("GMGN auth fetch %s failed: %s", path, exc)
+
+    # Try 2: Public endpoint fallback (with Referer)
+    # Map OpenAPI paths to public paths
+    public_map = {
+        "/v1/market/rank": "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/{interval}",
+        "/v1/user/smartmoney": "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/recent_trades",
+        "/v1/token/info": "https://gmgn.ai/defi/quotation/v1/tokens/sol/{address}",
+    }
+
+    pub_url = None
+    if path in public_map:
+        pub_url = public_map[path]
+        if "{interval}" in pub_url:
+            pub_url = pub_url.format(interval=params.get("interval", "1h") if params else "1h")
+            # Rebuild params for public format
+            params = {k: v for k, v in (params or {}).items()
+                      if k not in ("chain", "interval")}
+        elif "{address}" in pub_url:
+            pub_url = pub_url.format(address=params.get("address", "") if params else "")
+            params = None
+
+    if pub_url:
+        try:
+            pub_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json",
+                "Referer": "https://gmgn.ai/",
+                "Origin": "https://gmgn.ai",
+            }
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as session:
+                async with session.get(pub_url, headers=pub_headers, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        logger.debug("GMGN public fallback OK: %s", path)
+                        return data
+                    else:
+                        logger.info("GMGN public HTTP %d: %s", resp.status, pub_url[:60])
+        except Exception as exc:
+            logger.debug("GMGN public fetch failed: %s", exc)
+
+    return None
 
 
 # ── Public API functions ─────────────────────────────────────────────────────
