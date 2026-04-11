@@ -1628,46 +1628,79 @@ async def cmd_testgmgn(message: Message):
 
     from bot.agents.gmgn_agent import (
         gmgn_token_info, gmgn_token_security, gmgn_top_traders,
-        gmgn_smart_money_trades, _has_auth, _poll_gmgn_tokens,
+        gmgn_smart_money_trades, _has_auth, _poll_gmgn_tokens, _fetch,
+        GMGN_TRENDING_PUBLIC, GMGN_SMART_PUBLIC,
     )
 
     status = await message.reply("Testing GMGN API...", parse_mode=None)
     lines = ["🔬 GMGN API TEST", "━━━━━━━━━━━━━━━━━━━━"]
 
     # Auth status
-    lines.append(f"Auth: {'✅ API key configured' if _has_auth() else '⚠️ No API key — using public endpoints'}")
+    lines.append(f"Auth: {'✅ Key set' if _has_auth() else '⚠️ No key'}")
 
-    # Test trending tokens
+    # Test 1: Raw trending endpoint
     try:
-        saved = await _poll_gmgn_tokens()
-        lines.append(f"Trending poll: {saved} new tokens saved")
+        data = await _fetch(GMGN_TRENDING_PUBLIC)
+        if data and isinstance(data, dict):
+            code = data.get("code")
+            rank = (data.get("data") or {}).get("rank") or []
+            lines.append(f"Trending: code={code} tokens={len(rank)}")
+            if rank:
+                t = rank[0]
+                lines.append(f"  #1: {t.get('symbol')} MC=${t.get('market_cap',0):,.0f} swaps={t.get('swaps',0)}")
+        else:
+            lines.append(f"Trending: returned {type(data).__name__}")
     except Exception as exc:
-        lines.append(f"Trending poll: FAILED — {exc}")
+        lines.append(f"Trending: FAILED — {exc}")
 
-    # Test smart money trades
+    # Test 2: Smart money wallets
+    try:
+        data = await _fetch(GMGN_SMART_PUBLIC)
+        if data and isinstance(data, dict):
+            code = data.get("code")
+            wl = (data.get("data") or {}).get("wallets") or []
+            lines.append(f"Smart wallets: code={code} count={len(wl)}")
+            if wl:
+                w = wl[0]
+                lines.append(f"  #1: {(w.get('address') or '?')[:8]}.. wr={w.get('win_rate')} trades={w.get('total_trades')}")
+        elif data is None:
+            lines.append("Smart wallets: blocked (Cloudflare 403)")
+        else:
+            lines.append(f"Smart wallets: {type(data).__name__}")
+    except Exception as exc:
+        lines.append(f"Smart wallets: FAILED — {exc}")
+
+    # Test 3: Smart money trades
     try:
         trades = await gmgn_smart_money_trades(limit=5)
-        lines.append(f"Smart money trades: {len(trades)} returned")
-        for t in trades[:3]:
+        lines.append(f"Smart trades: {len(trades)} returned")
+        for t in trades[:2]:
             sym = (t.get("base_token") or {}).get("symbol") or "?"
             side = t.get("side") or "?"
             amt = float(t.get("amount_usd") or 0)
-            lines.append(f"  {side.upper()} ${sym} — ${amt:,.0f}")
+            lines.append(f"  {side.upper()} ${sym} ${amt:,.0f}")
     except Exception as exc:
-        lines.append(f"Smart money trades: FAILED — {exc}")
+        lines.append(f"Smart trades: FAILED — {exc}")
 
-    # Test token info on SOL
+    # Test 4: Token info
     try:
         info = await gmgn_token_info("So11111111111111111111111111111111111111112")
         if info:
             price = info.get("price") or info.get("price_usd") or "?"
-            lines.append(f"Token info (SOL): price=${price}")
+            lines.append(f"Token info SOL: price={price}")
         else:
-            lines.append("Token info (SOL): no data returned")
+            lines.append("Token info SOL: no data")
     except Exception as exc:
         lines.append(f"Token info: FAILED — {exc}")
 
-    lines.append(f"\nGMGN tokens today: {state.harvester_gmgn_today}")
+    # Test 5: Poll and save
+    try:
+        saved = await _poll_gmgn_tokens()
+        lines.append(f"Token poll: {saved} new saved")
+    except Exception as exc:
+        lines.append(f"Token poll: FAILED — {exc}")
+
+    lines.append(f"\nGMGN today: {state.harvester_gmgn_today}")
 
     await status.edit_text("\n".join(lines), parse_mode=None)
 

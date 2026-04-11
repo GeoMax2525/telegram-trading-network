@@ -47,8 +47,10 @@ GMGN_NEW_PUBLIC = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/6h?orderby=v
 GMGN_SMART_PUBLIC = "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/wallets?period=7d&limit=100"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept": "application/json",
+    "Referer": "https://gmgn.ai/",
+    "Origin": "https://gmgn.ai",
 }
 
 
@@ -97,26 +99,41 @@ def _has_auth() -> bool:
 # ── Fetch helpers ────────────────────────────────────────────────────────────
 
 async def _fetch(url: str, signed: bool = False) -> dict | list | None:
-    """Fetch GMGN endpoint. Uses auth if available."""
+    """Fetch GMGN endpoint. Uses auth if available, always sends Referer."""
     try:
         if signed and _has_auth():
             from urllib.parse import urlparse
             parsed = urlparse(url)
             headers = _sign_request("GET", parsed.path + ("?" + parsed.query if parsed.query else ""))
         else:
-            headers = HEADERS
+            headers = dict(HEADERS)
+
+        # Always include Referer (required by GMGN Cloudflare)
+        headers["Referer"] = "https://gmgn.ai/"
+        headers["Origin"] = "https://gmgn.ai"
 
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=15)
         ) as session:
             async with session.get(url, headers=headers) as resp:
                 if resp.status == 429:
-                    logger.warning("GMGN: rate limited (429)")
+                    logger.warning("GMGN: rate limited (429) on %s", url[:60])
+                    return None
+                if resp.status == 403:
+                    # Cloudflare block — log for debugging
+                    body = await resp.text()
+                    is_cf = "Cloudflare" in body[:500]
+                    logger.warning("GMGN: 403 %s — %s", url[:60],
+                                   "Cloudflare block" if is_cf else "auth rejected")
                     return None
                 if resp.status != 200:
-                    logger.debug("GMGN HTTP %d: %s", resp.status, url[:60])
+                    logger.info("GMGN HTTP %d: %s", resp.status, url[:60])
                     return None
-                return await resp.json(content_type=None)
+                data = await resp.json(content_type=None)
+                code = data.get("code") if isinstance(data, dict) else None
+                if code is not None and code != 0:
+                    logger.info("GMGN API error code=%s: %s", code, url[:60])
+                return data
     except Exception as exc:
         logger.debug("GMGN fetch failed: %s", exc)
         return None
