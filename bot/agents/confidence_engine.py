@@ -32,6 +32,7 @@ import logging
 
 from bot import state
 from bot.agents.chart_detector import analyze_chart
+from bot.agents.gmgn_agent import gmgn_token_security, gmgn_top_traders
 from database.models import (
     get_pattern_by_type,
     get_tier_wallets,
@@ -139,9 +140,9 @@ async def _score_fingerprint(candidate: dict, pattern) -> float:
 
 
 async def _score_insider(candidate: dict) -> float:
-    """Score 0–100 based on insider wallet activity for this token."""
+    """Score 0–100 based on insider wallet + GMGN smart money activity."""
     insider_count = candidate.get("insider_count", 0)
-    gmgn_boost = candidate.get("gmgn_wallet_boost", 0)  # +20 for T1, +10 for T2
+    gmgn_boost = candidate.get("gmgn_wallet_boost", 0)
 
     base = 30.0  # default no signal
     if insider_count >= 3:
@@ -153,9 +154,23 @@ async def _score_insider(candidate: dict) -> float:
     elif candidate.get("source") == "insider_wallet":
         base = 40.0
 
-    # GMGN wallet boost
+    # Check GMGN top traders for this token
+    mint = candidate.get("mint", "")
+    if mint and base < 80:
+        try:
+            traders = await gmgn_top_traders(mint)
+            smart_count = sum(
+                1 for t in traders
+                if any(tag in (t.get("tags") or []) for tag in ("smart_degen", "smart_money"))
+            )
+            if smart_count >= 3:
+                gmgn_boost += 25
+            elif smart_count >= 1:
+                gmgn_boost += 15
+        except Exception:
+            pass
+
     return min(100.0, base + gmgn_boost)
-    return 30.0  # no insider signal
 
 
 async def _score_chart(candidate: dict) -> tuple[float, str]:
@@ -172,33 +187,44 @@ async def _score_chart(candidate: dict) -> tuple[float, str]:
         return 40.0, "error"
 
 
-def _score_rug(candidate: dict) -> float:
+async def _score_rug(candidate: dict) -> float:
     """
     Returns 1–100 safety score (higher = safer).
-
-    Uses rugcheck_normalised (1-10 risk scale from API) if available,
-    otherwise falls back to raw rugcheck score.
-    Inverts risk into safety: safety = 100 - (risk_normalised * 10).
+    Checks both Rugcheck data and GMGN security.
     """
+    # GMGN security check (if available)
+    gmgn_bonus = 0
+    mint = candidate.get("mint", "")
+    if mint:
+        try:
+            sec = await gmgn_token_security(mint)
+            if sec:
+                # GMGN security flags
+                if sec.get("renounced_mint") and sec.get("renounced_freeze_account"):
+                    gmgn_bonus += 10  # fully renounced = safer
+                rug_ratio = float(sec.get("rug_ratio") or 0)
+                if rug_ratio > 0.3:
+                    gmgn_bonus -= 20  # high rug risk
+                elif rug_ratio < 0.1:
+                    gmgn_bonus += 5   # low rug risk
+        except Exception:
+            pass
+
     rc_norm = candidate.get("rugcheck_normalised")
     rc_raw = candidate.get("rugcheck")
 
     if rc_norm is not None:
-        # score_normalised is 1-10, lower = safer
-        # Convert: 1 → 90, 5 → 50, 10 → 0  then clamp to 1-100
-        safety = max(1.0, min(100.0, 100.0 - (rc_norm * 10.0)))
-        logger.info("Rug score: normalised=%s → safety=%.0f", rc_norm, safety)
+        safety = max(1.0, min(100.0, 100.0 - (rc_norm * 10.0) + gmgn_bonus))
+        logger.info("Rug score: normalised=%s gmgn=%+d → safety=%.0f", rc_norm, gmgn_bonus, safety)
         return safety
 
     if rc_raw is not None:
-        # Raw score is unbounded risk. Map to 1-100 safety.
-        # 0-5 risk → 95, 50 → 70, 100 → 55, 200 → 40, 500+ → 10
-        safety = max(1.0, min(100.0, 100.0 - min(rc_raw, 1000) / 10.0))
+        safety = max(1.0, min(100.0, 100.0 - min(rc_raw, 1000) / 10.0 + gmgn_bonus))
         logger.info("Rug score: raw=%s → safety=%.0f", rc_raw, safety)
         return safety
 
-    logger.debug("Rug score: no rugcheck data — defaulting to 40")
-    return 40.0
+    logger.debug("Rug score: no rugcheck data — defaulting to 40 + gmgn=%+d", gmgn_bonus)
+    return max(1.0, min(100.0, 40.0 + gmgn_bonus))
 
 
 async def _score_caller(candidate: dict) -> float:
@@ -285,7 +311,7 @@ async def score_candidate(candidate: dict) -> dict:
     fingerprint = await _score_fingerprint(candidate, pattern)
     insider     = await _score_insider(candidate)
     chart, chart_pattern = await _score_chart(candidate)
-    rug         = _score_rug(candidate)
+    rug         = await _score_rug(candidate)
     caller      = await _score_caller(candidate)
     market      = _score_market()
 

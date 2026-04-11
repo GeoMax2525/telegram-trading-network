@@ -367,7 +367,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         )
         harvest_line = (
             f"✅ Harvester — {ws_icon} {ws_label} | {token_count} tokens | "
-            f"pump: {pump_today} | pumpswap: {pumpswap_today} | last {elapsed_min}min ago"
+            f"pump: {pump_today} | swap: {pumpswap_today} | gmgn: {state.harvester_gmgn_today} | last {elapsed_min}min ago"
         )
 
     # Wallet Analyst last-run label
@@ -1617,6 +1617,59 @@ async def _run_backfill(bot, status_msg) -> None:
             pass
     finally:
         state.backfill_running = False
+
+
+# ── /testgmgn — Test GMGN API connection ─────────────────────────────────────
+
+@router.message(Command("testgmgn"))
+async def cmd_testgmgn(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    from bot.agents.gmgn_agent import (
+        gmgn_token_info, gmgn_token_security, gmgn_top_traders,
+        gmgn_smart_money_trades, _has_auth, _poll_gmgn_tokens,
+    )
+
+    status = await message.reply("Testing GMGN API...", parse_mode=None)
+    lines = ["🔬 GMGN API TEST", "━━━━━━━━━━━━━━━━━━━━"]
+
+    # Auth status
+    lines.append(f"Auth: {'✅ API key configured' if _has_auth() else '⚠️ No API key — using public endpoints'}")
+
+    # Test trending tokens
+    try:
+        saved = await _poll_gmgn_tokens()
+        lines.append(f"Trending poll: {saved} new tokens saved")
+    except Exception as exc:
+        lines.append(f"Trending poll: FAILED — {exc}")
+
+    # Test smart money trades
+    try:
+        trades = await gmgn_smart_money_trades(limit=5)
+        lines.append(f"Smart money trades: {len(trades)} returned")
+        for t in trades[:3]:
+            sym = (t.get("base_token") or {}).get("symbol") or "?"
+            side = t.get("side") or "?"
+            amt = float(t.get("amount_usd") or 0)
+            lines.append(f"  {side.upper()} ${sym} — ${amt:,.0f}")
+    except Exception as exc:
+        lines.append(f"Smart money trades: FAILED — {exc}")
+
+    # Test token info on SOL
+    try:
+        info = await gmgn_token_info("So11111111111111111111111111111111111111112")
+        if info:
+            price = info.get("price") or info.get("price_usd") or "?"
+            lines.append(f"Token info (SOL): price=${price}")
+        else:
+            lines.append("Token info (SOL): no data returned")
+    except Exception as exc:
+        lines.append(f"Token info: FAILED — {exc}")
+
+    lines.append(f"\nGMGN tokens today: {state.harvester_gmgn_today}")
+
+    await status.edit_text("\n".join(lines), parse_mode=None)
 
 
 # ── /start ────────────────────────────────────────────────────────────────────

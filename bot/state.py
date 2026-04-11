@@ -39,6 +39,7 @@ harvester_ws_source:         str             = "none"  # pumpdev / pumpportal / 
 harvester_ws_tokens_today:   int             = 0
 harvester_poll_tokens_today: int             = 0
 harvester_pumpswap_today:    int             = 0
+harvester_gmgn_today:        int             = 0
 
 # ── Paper trading virtual balance ────────────────────────────────────────────
 PAPER_STARTING_BALANCE:      float           = 10.0

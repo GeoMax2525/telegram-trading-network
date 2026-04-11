@@ -24,6 +24,7 @@ import time
 
 import aiohttp
 
+from bot import state as app_state
 from bot.config import GMGN_API_KEY, GMGN_PRIVATE_KEY
 from bot.agents.wallet_analyst import _score_wallet
 from database.models import (
@@ -220,6 +221,7 @@ async def _poll_gmgn_tokens() -> int:
                 pass
 
             saved += 1
+            app_state.harvester_gmgn_today += 1
 
     if saved:
         logger.info("GMGN tokens: saved %d new tokens", saved)
@@ -310,6 +312,7 @@ async def _track_smart_money_trades() -> int:
                     source="gmgn_smart",
                 )
                 new_signals += 1
+                app_state.harvester_gmgn_today += 1
 
     if new_signals:
         logger.info("GMGN smart money: %d new tokens from trades", new_signals)
