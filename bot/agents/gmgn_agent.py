@@ -48,50 +48,36 @@ def _has_auth() -> bool:
     return bool(GMGN_API_KEY)
 
 
+PUB_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Referer": "https://gmgn.ai/",
+    "Origin": "https://gmgn.ai",
+}
+
+# Public endpoint mapping: OpenAPI path → public URL template
+PUBLIC_URLS = {
+    "/v1/market/rank": "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/{interval}",
+    "/v1/token/info": "https://gmgn.ai/defi/quotation/v1/tokens/sol/{address}",
+    "/v1/token/security": "https://gmgn.ai/defi/quotation/v1/tokens/sol/{address}/security",
+    "/v1/user/smartmoney": "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/recent_trades",
+    "/v1/user/kol": "https://gmgn.ai/defi/quotation/v1/kol/sol/recent_trades",
+    "/v1/market/token_top_traders": "https://gmgn.ai/defi/quotation/v1/tokens/sol/{address}/top_traders",
+    "/v1/user/wallet_stats": "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/wallet_stats/{address}",
+}
+
+
 async def _fetch(path: str, params: dict | None = None) -> dict | None:
     """
-    Fetch from GMGN OpenAPI with proper auth:
-    - X-APIKEY header
-    - timestamp + client_id as query params (required by server)
-    Falls back to public endpoints if no API key.
+    Fetch from GMGN. Uses public endpoints with Referer header (proven working).
+    Falls back to OpenAPI if public fails and API key is set.
     """
     params = dict(params or {})
 
-    # ── Try 1: Authenticated OpenAPI ─────────────────────────────────
-    if _has_auth():
-        # Add required auth query params
-        params["timestamp"] = str(int(time.time()))
-        params["client_id"] = str(uuid.uuid4())
-
-        url = f"{GMGN_HOST}{path}"
-        try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as session:
-                async with session.get(url, headers=_headers(), params=params) as resp:
-                    body = await resp.text()
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None) if body else None
-                        if isinstance(data, dict) and data.get("code") in (None, 0):
-                            return data
-                        logger.info("GMGN API code=%s: %s → %s",
-                                    data.get("code") if isinstance(data, dict) else "?",
-                                    path, body[:200])
-                    else:
-                        logger.info("GMGN HTTP %d %s → %s", resp.status, path, body[:200])
-        except Exception as exc:
-            logger.info("GMGN auth fetch %s error: %s", path, exc)
-
-    # ── Try 2: Public fallback (Referer header) ──────────────────────
-    public_map = {
-        "/v1/market/rank": "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/{interval}",
-        "/v1/token/info": "https://gmgn.ai/defi/quotation/v1/tokens/sol/{address}",
-    }
-
-    pub_template = public_map.get(path)
+    # ── Primary: Public endpoint with Referer ────────────────────────
+    pub_template = PUBLIC_URLS.get(path)
     if pub_template:
-        pub_params = {k: v for k, v in params.items()
-                      if k not in ("chain", "timestamp", "client_id")}
+        pub_params = {k: v for k, v in params.items() if k != "chain"}
         pub_url = pub_template
         if "{interval}" in pub_url:
             pub_url = pub_url.format(interval=pub_params.pop("interval", "1h"))
@@ -99,24 +85,38 @@ async def _fetch(path: str, params: dict | None = None) -> dict | None:
             pub_url = pub_url.format(address=pub_params.pop("address", ""))
 
         try:
-            pub_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json",
-                "Referer": "https://gmgn.ai/",
-                "Origin": "https://gmgn.ai",
-            }
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=15)
             ) as session:
-                async with session.get(pub_url, headers=pub_headers, params=pub_params or None) as resp:
+                async with session.get(pub_url, headers=PUB_HEADERS, params=pub_params or None) as resp:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
-                        logger.debug("GMGN public fallback OK: %s", path)
-                        return data
+                        if isinstance(data, dict) and data.get("code") in (None, 0):
+                            return data
+                    elif resp.status == 403:
+                        logger.debug("GMGN public 403 (Cloudflare): %s", pub_url[:50])
                     else:
-                        logger.debug("GMGN public %d: %s", resp.status, pub_url[:60])
+                        logger.debug("GMGN public %d: %s", resp.status, pub_url[:50])
         except Exception as exc:
-            logger.debug("GMGN public failed: %s", exc)
+            logger.debug("GMGN public error: %s", exc)
+
+    # ── Fallback: Authenticated OpenAPI ──────────────────────────────
+    if _has_auth():
+        params["timestamp"] = str(int(time.time()))
+        params["client_id"] = str(uuid.uuid4())
+        url = f"{GMGN_HOST}{path}"
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as session:
+                async with session.get(url, headers=_headers(), params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        if isinstance(data, dict) and data.get("code") in (None, 0):
+                            return data
+                    logger.debug("GMGN openapi %d: %s", resp.status, path)
+        except Exception as exc:
+            logger.debug("GMGN openapi error: %s", exc)
 
     return None
 
