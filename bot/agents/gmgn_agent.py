@@ -362,8 +362,16 @@ async def _track_smart_money_trades() -> int:
 # ── Background loops ─────────────────────────────────────────────────────────
 
 async def gmgn_agent_loop() -> None:
-    """Three concurrent jobs."""
+    """Three concurrent jobs. Disabled if Cloudflare blocks all endpoints."""
     await asyncio.sleep(STARTUP_DELAY)
+
+    # Quick connectivity test — if Cloudflare blocks us, don't waste cycles
+    test = await _fetch("/v1/market/rank", {"chain": "sol", "interval": "1h", "limit": 1})
+    if test is None:
+        logger.warning("GMGN agent: all endpoints blocked (Cloudflare 403). Disabled.")
+        logger.warning("GMGN agent: to enable, set up a proxy or residential IP.")
+        return
+
     auth = "authenticated" if _has_auth() else "NO API KEY"
     logger.info("GMGN agent started (%s) — host=%s", auth, GMGN_HOST)
 

@@ -386,12 +386,15 @@ async def _build_hub_text(autotrade: bool) -> str:
     # GMGN stats
     try:
         gmgn = await get_gmgn_stats()
-        gmgn_line = (
-            f"✅ GMGN — {gmgn['wallets']} wallets ({gmgn['tier1']} T1) "
-            f"| {gmgn['trending']} trending today"
-        )
+        if gmgn["wallets"] > 0 or gmgn["trending"] > 0:
+            gmgn_line = (
+                f"✅ GMGN — {gmgn['wallets']} wallets ({gmgn['tier1']} T1) "
+                f"| {gmgn['trending']} trending"
+            )
+        else:
+            gmgn_line = "🔴 GMGN — blocked (Cloudflare) — needs proxy"
     except Exception:
-        gmgn_line = "✅ GMGN — waiting for data..."
+        gmgn_line = "🔴 GMGN — blocked (Cloudflare) — needs proxy"
 
     ce_stats = await get_candidate_stats_today()
     ce_icon = "✅" if autotrade else "🔧"
@@ -1695,14 +1698,15 @@ async def cmd_testgmgn(message: Message):
 
     # Test 4: Token info
     try:
+        from bot.agents.gmgn_agent import gmgn_token_info
         info = await gmgn_token_info("So11111111111111111111111111111111111111112")
         if info:
             price = info.get("price") or info.get("price_usd") or "?"
-            lines.append(f"Token info SOL: price={price}")
+            lines.append(f"Token info: price={price}")
         else:
-            lines.append("Token info SOL: no data")
+            lines.append("Token info: no data (CF blocked)")
     except Exception as exc:
-        lines.append(f"Token info: FAILED — {exc}")
+        lines.append(f"Token info: {exc}")
 
     # Test 5: Poll and save
     try:
