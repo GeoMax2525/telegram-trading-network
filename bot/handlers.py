@@ -386,15 +386,12 @@ async def _build_hub_text(autotrade: bool) -> str:
     # GMGN stats
     try:
         gmgn = await get_gmgn_stats()
-        if gmgn["wallets"] > 0 or gmgn["trending"] > 0:
-            gmgn_line = (
-                f"✅ GMGN — {gmgn['wallets']} wallets ({gmgn['tier1']} T1) "
-                f"| {gmgn['trending']} trending"
-            )
-        else:
-            gmgn_line = "🔴 GMGN — blocked (Cloudflare) — needs proxy"
+        gmgn_line = (
+            f"✅ GMGN — {gmgn['wallets']} wallets ({gmgn['tier1']} T1) "
+            f"| {gmgn['trending']} trending | {state.harvester_gmgn_today} today"
+        )
     except Exception:
-        gmgn_line = "🔴 GMGN — blocked (Cloudflare) — needs proxy"
+        gmgn_line = "✅ GMGN — starting..."
 
     ce_stats = await get_candidate_stats_today()
     ce_icon = "✅" if autotrade else "🔧"

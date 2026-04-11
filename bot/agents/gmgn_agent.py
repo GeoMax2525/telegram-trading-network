@@ -1,23 +1,20 @@
 """
-gmgn_agent.py — GMGN Integration Agent (Official OpenAPI)
+gmgn_agent.py — GMGN Integration Agent (via gmgn-cli subprocess)
 
-Uses https://openapi.gmgn.ai with X-APIKEY header.
+Uses gmgn-cli Node.js tool which handles auth + Cloudflare properly.
+Python aiohttp gets Cloudflare-blocked from Railway; gmgn-cli does not.
 
 Three concurrent jobs:
-1. Token discovery: trending + new pairs (every 2 min)
-2. Smart wallet import: smart money wallets + stats (every hour)
+1. Token discovery: trending tokens (every 2 min)
+2. Smart wallet import: smart money wallets from trades (every hour)
 3. Smart money trade tracking: live trade feed (every 5 min)
 """
 
 import asyncio
+import json
 import logging
-import time
-import uuid
-
-import aiohttp
 
 from bot import state as app_state
-from bot.config import GMGN_API_KEY
 from bot.agents.wallet_analyst import _score_wallet
 from database.models import (
     token_exists, save_token, upsert_wallet, log_agent_run,
@@ -26,173 +23,101 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
-# Official authenticated API
-GMGN_HOST = "https://openapi.gmgn.ai"
-
 TOKEN_POLL = 120      # 2 minutes
 WALLET_POLL = 3600    # 1 hour
 TRADE_POLL = 300      # 5 minutes
 STARTUP_DELAY = 90
 
 
-# ── API client ───────────────────────────────────────────────────────────────
+# ── gmgn-cli subprocess wrapper ─────────────────────────────────────────────
 
-def _headers() -> dict:
-    h = {"Content-Type": "application/json"}
-    if GMGN_API_KEY:
-        h["X-APIKEY"] = GMGN_API_KEY
-    return h
+async def _run_cli(*args: str, timeout: int = 30) -> dict | list | None:
+    """Run gmgn-cli command and return parsed JSON output."""
+    cmd = ["npx", "gmgn-cli", *args, "--raw"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        output = stdout.decode().strip()
 
+        if not output:
+            if stderr:
+                err = stderr.decode().strip()
+                if "rate limit" in err.lower() or "429" in err:
+                    logger.warning("GMGN CLI rate limited: %s", err[:100])
+                elif "401" in err or "invalid" in err.lower():
+                    logger.warning("GMGN CLI auth error: %s", err[:100])
+                else:
+                    logger.debug("GMGN CLI stderr: %s", err[:100])
+            return None
 
-def _has_auth() -> bool:
-    return bool(GMGN_API_KEY)
-
-
-PUB_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Referer": "https://gmgn.ai/",
-    "Origin": "https://gmgn.ai",
-}
-
-# Public endpoint mapping: OpenAPI path → public URL template
-PUBLIC_URLS = {
-    "/v1/market/rank": "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/{interval}",
-    "/v1/token/info": "https://gmgn.ai/defi/quotation/v1/tokens/sol/{address}",
-    "/v1/token/security": "https://gmgn.ai/defi/quotation/v1/tokens/sol/{address}/security",
-    "/v1/user/smartmoney": "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/recent_trades",
-    "/v1/user/kol": "https://gmgn.ai/defi/quotation/v1/kol/sol/recent_trades",
-    "/v1/market/token_top_traders": "https://gmgn.ai/defi/quotation/v1/tokens/sol/{address}/top_traders",
-    "/v1/user/wallet_stats": "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/wallet_stats/{address}",
-}
-
-
-async def _fetch(path: str, params: dict | None = None) -> dict | None:
-    """
-    Fetch from GMGN. Tries authenticated OpenAPI first (no Cloudflare),
-    falls back to public endpoints with Referer.
-    """
-    params = dict(params or {})
-
-    # ── Try 1: Authenticated OpenAPI (openapi.gmgn.ai — no Cloudflare) ──
-    if _has_auth():
-        auth_params = dict(params)
-        auth_params["timestamp"] = str(int(time.time()))
-        auth_params["client_id"] = str(uuid.uuid4())
-        url = f"{GMGN_HOST}{path}"
-        try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as session:
-                async with session.get(url, headers=_headers(), params=auth_params) as resp:
-                    body = await resp.text()
-                    if resp.status == 200:
-                        try:
-                            data = __import__("json").loads(body)
-                            if isinstance(data, dict) and data.get("code") in (None, 0):
-                                return data
-                            logger.info("GMGN openapi code=%s: %s", data.get("code"), path)
-                        except Exception:
-                            logger.info("GMGN openapi non-JSON: %s", body[:100])
-                    else:
-                        logger.info("GMGN openapi %d %s: %s", resp.status, path, body[:150])
-        except Exception as exc:
-            logger.info("GMGN openapi error %s: %s", path, exc)
-
-    # ── Try 2: Public endpoint with Referer header ───────────────────
-    pub_template = PUBLIC_URLS.get(path)
-    if pub_template:
-        pub_params = {k: v for k, v in params.items() if k != "chain"}
-        pub_url = pub_template
-        if "{interval}" in pub_url:
-            pub_url = pub_url.format(interval=pub_params.pop("interval", "1h"))
-        if "{address}" in pub_url:
-            pub_url = pub_url.format(address=pub_params.pop("address", ""))
-
-        try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as session:
-                async with session.get(pub_url, headers=PUB_HEADERS, params=pub_params or None) as resp:
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None)
-                        if isinstance(data, dict) and data.get("code") in (None, 0):
-                            return data
-                    logger.debug("GMGN public %d: %s", resp.status, pub_url[:50])
-        except Exception as exc:
-            logger.debug("GMGN public error: %s", exc)
-
-    return None
+        return json.loads(output)
+    except asyncio.TimeoutError:
+        logger.debug("GMGN CLI timeout: %s", " ".join(args[:3]))
+        return None
+    except json.JSONDecodeError:
+        logger.debug("GMGN CLI non-JSON output: %s", output[:100] if output else "empty")
+        return None
+    except FileNotFoundError:
+        logger.warning("GMGN CLI: npx not found — install Node.js")
+        return None
+    except Exception as exc:
+        logger.debug("GMGN CLI error: %s", exc)
+        return None
 
 
 # ── Public API functions ─────────────────────────────────────────────────────
 
-async def gmgn_token_info(mint: str) -> dict | None:
-    """GET /v1/token/info — full token data."""
-    data = await _fetch("/v1/token/info", {"chain": "sol", "address": mint})
-    if data and isinstance(data, dict):
-        return data.get("data") or data
-    return None
-
-
-async def gmgn_token_security(mint: str) -> dict | None:
-    """GET /v1/token/security — contract security."""
-    data = await _fetch("/v1/token/security", {"chain": "sol", "address": mint})
-    if data and isinstance(data, dict):
-        return data.get("data") or data
-    return None
-
-
-async def gmgn_top_traders(mint: str) -> list:
-    """GET /v1/market/token_top_traders — top traders for a token."""
-    data = await _fetch("/v1/market/token_top_traders", {"chain": "sol", "address": mint})
-    if data and isinstance(data, dict):
-        return (data.get("data") or {}).get("traders") or []
-    return []
-
-
 async def gmgn_trending(interval: str = "1h", limit: int = 50) -> list:
-    """GET /v1/market/rank — trending tokens."""
-    data = await _fetch("/v1/market/rank", {
-        "chain": "sol", "interval": interval,
-        "orderby": "swaps", "direction": "desc", "limit": limit,
-    })
-    if data and isinstance(data, dict):
+    data = await _run_cli("market", "trending", "--chain", "sol",
+                          "--interval", interval, "--limit", str(limit))
+    if isinstance(data, dict):
         return (data.get("data") or {}).get("rank") or []
     return []
 
 
 async def gmgn_smart_money_trades(limit: int = 50) -> list:
-    """GET /v1/user/smartmoney — smart money trade feed."""
-    data = await _fetch("/v1/user/smartmoney", {"chain": "sol", "limit": limit})
-    if data and isinstance(data, dict):
-        return (data.get("data") or {}).get("list") or []
+    data = await _run_cli("track", "smartmoney", "--chain", "sol", "--limit", str(limit))
+    if isinstance(data, dict):
+        return data.get("list") or (data.get("data") or {}).get("list") or []
     return []
 
 
-async def gmgn_kol_trades(limit: int = 50) -> list:
-    """GET /v1/user/kol — KOL trade feed."""
-    data = await _fetch("/v1/user/kol", {"chain": "sol", "limit": limit})
-    if data and isinstance(data, dict):
-        return (data.get("data") or {}).get("list") or []
-    return []
-
-
-async def gmgn_wallet_stats(address: str) -> dict | None:
-    """GET /v1/user/wallet_stats — wallet performance stats."""
-    data = await _fetch("/v1/user/wallet_stats", {"chain": "sol", "address": address})
-    if data and isinstance(data, dict):
+async def gmgn_token_info(mint: str) -> dict | None:
+    data = await _run_cli("token", "info", "--chain", "sol", "--address", mint)
+    if isinstance(data, dict):
         return data.get("data") or data
     return None
 
 
-async def gmgn_kline(mint: str, interval: str = "1m", limit: int = 100) -> list:
-    """GET /v1/market/token_kline — OHLCV candle data."""
-    data = await _fetch("/v1/market/token_kline", {
-        "chain": "sol", "address": mint,
-        "interval": interval, "limit": limit,
-    })
-    if data and isinstance(data, dict):
+async def gmgn_token_security(mint: str) -> dict | None:
+    data = await _run_cli("token", "security", "--chain", "sol", "--address", mint)
+    if isinstance(data, dict):
+        return data.get("data") or data
+    return None
+
+
+async def gmgn_top_traders(mint: str) -> list:
+    data = await _run_cli("token", "traders", "--chain", "sol", "--address", mint)
+    if isinstance(data, dict):
+        return (data.get("data") or {}).get("traders") or []
+    return []
+
+
+async def gmgn_wallet_stats(address: str) -> dict | None:
+    data = await _run_cli("portfolio", "stats", "--chain", "sol", "--address", address)
+    if isinstance(data, dict):
+        return data.get("data") or data
+    return None
+
+
+async def gmgn_kline(mint: str, resolution: str = "1m") -> list:
+    data = await _run_cli("market", "kline", "--chain", "sol",
+                          "--address", mint, "--resolution", resolution)
+    if isinstance(data, dict):
         return (data.get("data") or {}).get("klines") or []
     return []
 
@@ -200,9 +125,7 @@ async def gmgn_kline(mint: str, interval: str = "1m", limit: int = 100) -> list:
 # ── Token discovery ──────────────────────────────────────────────────────────
 
 async def _poll_gmgn_tokens() -> int:
-    """Fetch trending tokens from GMGN and save new ones."""
     saved = 0
-
     for interval in ("1h", "6h"):
         tokens = await gmgn_trending(interval=interval, limit=50)
         if not tokens:
@@ -213,7 +136,6 @@ async def _poll_gmgn_tokens() -> int:
             if not mint:
                 continue
             if await token_exists(mint):
-                # Update trending flag
                 try:
                     async with AsyncSessionLocal() as session:
                         result = await session.execute(select(Token).where(Token.mint == mint))
@@ -263,40 +185,28 @@ async def _poll_gmgn_tokens() -> int:
 # ── Smart wallet import ──────────────────────────────────────────────────────
 
 async def _import_gmgn_wallets() -> int:
-    """Import smart money wallets from GMGN trade feed."""
     trades = await gmgn_smart_money_trades(limit=100)
     if not trades:
         return 0
 
-    # Extract unique wallets from trades
-    wallet_map: dict[str, dict] = {}
+    wallet_addrs = set()
     for t in trades:
         maker = t.get("maker")
-        if not maker or maker in wallet_map:
-            continue
-        tags = []
-        mi = t.get("maker_info") or {}
-        tags = mi.get("tags") or []
-        wallet_map[maker] = {
-            "address": maker,
-            "tags": tags,
-            "is_smart": "smart_degen" in tags,
-            "is_kol": "renowned" in tags or "kol" in tags,
-        }
+        if maker:
+            wallet_addrs.add(maker)
 
     imported = 0
-    for address, info in wallet_map.items():
-        # Fetch wallet stats
+    for address in list(wallet_addrs)[:30]:  # cap to avoid rate limits
         stats = await gmgn_wallet_stats(address)
         if not stats:
             continue
 
         wr = float(stats.get("win_rate") or 0)
-        avg_mult = float(stats.get("avg_profit_percent") or 0) / 100 + 1 if stats.get("avg_profit_percent") else 1.0
-        total_trades = int(stats.get("total_trades") or stats.get("buy_count", 0) or 0)
-        wins = int(stats.get("win_count") or round(wr * total_trades / 100) if total_trades else 0)
+        total_trades = int(stats.get("buy_count") or stats.get("total_trades") or 0)
+        realized = float(stats.get("realized_profit") or 0)
+        avg_mult = (realized / max(total_trades, 1) / 100 + 1) if total_trades else 1.0
+        wins = int(round(wr * total_trades / 100)) if total_trades and wr > 1 else int(round(wr * total_trades))
         losses = total_trades - wins
-
         if wr > 1:
             wr = wr / 100.0
 
@@ -314,11 +224,11 @@ async def _import_gmgn_wallets() -> int:
             )
             imported += 1
 
-        await asyncio.sleep(0.5)  # rate limit between wallet stat fetches
+        await asyncio.sleep(1)  # rate limit
 
     if imported:
-        logger.info("GMGN wallets: imported %d from %d trade makers", imported, len(wallet_map))
-        await log_agent_run("gmgn_wallets", tokens_found=len(wallet_map), tokens_saved=imported)
+        logger.info("GMGN wallets: imported %d from %d makers", imported, len(wallet_addrs))
+        await log_agent_run("gmgn_wallets", tokens_found=len(wallet_addrs), tokens_saved=imported)
 
     return imported
 
@@ -326,7 +236,6 @@ async def _import_gmgn_wallets() -> int:
 # ── Smart money trade tracking ───────────────────────────────────────────────
 
 async def _track_smart_money_trades() -> int:
-    """Track recent smart money buys for signal generation."""
     trades = await gmgn_smart_money_trades(limit=50)
     if not trades:
         return 0
@@ -355,25 +264,24 @@ async def _track_smart_money_trades() -> int:
             app_state.harvester_gmgn_today += 1
 
     if new_signals:
-        logger.info("GMGN smart money: %d new tokens from trades", new_signals)
+        logger.info("GMGN smart money: %d new tokens", new_signals)
     return new_signals
 
 
 # ── Background loops ─────────────────────────────────────────────────────────
 
 async def gmgn_agent_loop() -> None:
-    """Three concurrent jobs. Disabled if Cloudflare blocks all endpoints."""
     await asyncio.sleep(STARTUP_DELAY)
 
-    # Quick connectivity test — if Cloudflare blocks us, don't waste cycles
-    test = await _fetch("/v1/market/rank", {"chain": "sol", "interval": "1h", "limit": 1})
-    if test is None:
-        logger.warning("GMGN agent: all endpoints blocked (Cloudflare 403). Disabled.")
-        logger.warning("GMGN agent: to enable, set up a proxy or residential IP.")
+    # Quick test — check if gmgn-cli / npx works on this host
+    test = await gmgn_trending(interval="1h", limit=1)
+    if not test:
+        logger.warning("GMGN agent: gmgn-cli not available (needs Node.js). Disabled on this host.")
+        logger.info("GMGN agent: use /testgmgn in Claude Code session for GMGN data.")
         return
 
-    auth = "authenticated" if _has_auth() else "NO API KEY"
-    logger.info("GMGN agent started (%s) — host=%s", auth, GMGN_HOST)
+    logger.info("GMGN agent started — tokens:%ds wallets:%ds trades:%ds",
+                TOKEN_POLL, WALLET_POLL, TRADE_POLL)
 
     async def _token_loop():
         while True:
