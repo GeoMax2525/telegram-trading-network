@@ -1628,43 +1628,77 @@ async def cmd_testgmgn(message: Message):
 
     from bot.agents.gmgn_agent import (
         gmgn_token_info, gmgn_smart_money_trades,
-        _has_auth, _poll_gmgn_tokens, _fetch, GMGN_HOST,
+        _has_auth, _poll_gmgn_tokens, GMGN_HOST, PUB_HEADERS,
     )
     from bot.config import GMGN_API_KEY
 
     status = await message.reply("Testing GMGN API...", parse_mode=None)
     lines = ["🔬 GMGN API TEST", "━━━━━━━━━━━━━━━━━━━━"]
 
-    # Auth status
-    key_preview = GMGN_API_KEY[:8] + "..." if GMGN_API_KEY else "NOT SET"
-    lines.append(f"API Key: {key_preview}")
-    lines.append(f"Host: {GMGN_HOST}")
+    key_preview = GMGN_API_KEY[:12] + "..." if GMGN_API_KEY else "NOT SET"
+    lines.append(f"Key: {key_preview}")
 
-    # Test 1: Trending via /v1/market/rank
+    # Test 1: Raw aiohttp request to public trending endpoint
+    test_url = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/1h?orderby=swaps&direction=desc&limit=2"
     try:
-        data = await _fetch("/v1/market/rank", {
-            "chain": "sol", "interval": "1h",
-            "orderby": "swaps", "direction": "desc", "limit": 3,
-        })
-        if data and isinstance(data, dict):
-            rank = (data.get("data") or {}).get("rank") or []
-            lines.append(f"Trending: ✅ {len(rank)} tokens")
-            if rank:
-                t = rank[0]
-                lines.append(f"  #1: {t.get('symbol')} MC=${t.get('market_cap',0):,.0f}")
-        else:
-            lines.append("Trending: ❌ no data")
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as s:
+            async with s.get(test_url, headers=PUB_HEADERS) as resp:
+                body = await resp.text()
+                lines.append(f"Raw trending: HTTP {resp.status}")
+                lines.append(f"  Body[0:150]: {body[:150]}")
+                if resp.status == 200:
+                    import json as _j
+                    try:
+                        d = _j.loads(body)
+                        rank = (d.get("data") or {}).get("rank") or []
+                        lines.append(f"  Parsed: {len(rank)} tokens")
+                        if rank:
+                            lines.append(f"  #1: {rank[0].get('symbol')}")
+                    except Exception:
+                        lines.append("  JSON parse failed")
     except Exception as exc:
-        lines.append(f"Trending: ❌ {exc}")
+        lines.append(f"Raw trending: ERROR {exc}")
 
-    # Test 2: Smart money trades
+    # Test 2: curl subprocess (bypasses aiohttp entirely)
     try:
-        trades = await gmgn_smart_money_trades(limit=5)
-        lines.append(f"Smart trades: {'✅' if trades else '❌'} {len(trades)} returned")
-        for t in trades[:2]:
-            sym = (t.get("base_token") or {}).get("symbol") or "?"
-            side = t.get("side") or "?"
-            lines.append(f"  {side.upper()} ${sym}")
+        import subprocess
+        result = subprocess.run(
+            ["curl", "-s", "-w", "\\nHTTP:%{http_code}",
+             "-H", "Referer: https://gmgn.ai/",
+             "-H", "Accept: application/json",
+             "-H", "User-Agent: Mozilla/5.0",
+             test_url],
+            capture_output=True, text=True, timeout=15,
+        )
+        out = result.stdout
+        http_line = [l for l in out.split("\n") if l.startswith("HTTP:")]
+        curl_status = http_line[-1] if http_line else "?"
+        curl_body = out[:150]
+        lines.append(f"Curl: {curl_status}")
+        lines.append(f"  Body[0:100]: {curl_body[:100]}")
+    except Exception as exc:
+        lines.append(f"Curl: ERROR {exc}")
+
+    # Test 3: Via _fetch wrapper
+    try:
+        from bot.agents.gmgn_agent import _fetch
+        data = await _fetch("/v1/market/rank", {
+            "chain": "sol", "interval": "1h", "limit": 2,
+        })
+        if data:
+            rank = (data.get("data") or {}).get("rank") or []
+            lines.append(f"_fetch trending: ✅ {len(rank)} tokens")
+        else:
+            lines.append("_fetch trending: ❌ None returned")
+    except Exception as exc:
+        lines.append(f"_fetch trending: ❌ {exc}")
+
+    # Test 4: Smart money trades
+    try:
+        trades = await gmgn_smart_money_trades(limit=3)
+        lines.append(f"Smart trades: {len(trades)} returned")
     except Exception as exc:
         lines.append(f"Smart trades: ❌ {exc}")
 
