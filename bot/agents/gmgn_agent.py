@@ -69,12 +69,37 @@ PUBLIC_URLS = {
 
 async def _fetch(path: str, params: dict | None = None) -> dict | None:
     """
-    Fetch from GMGN. Uses public endpoints with Referer header (proven working).
-    Falls back to OpenAPI if public fails and API key is set.
+    Fetch from GMGN. Tries authenticated OpenAPI first (no Cloudflare),
+    falls back to public endpoints with Referer.
     """
     params = dict(params or {})
 
-    # ── Primary: Public endpoint with Referer ────────────────────────
+    # ── Try 1: Authenticated OpenAPI (openapi.gmgn.ai — no Cloudflare) ──
+    if _has_auth():
+        auth_params = dict(params)
+        auth_params["timestamp"] = str(int(time.time()))
+        auth_params["client_id"] = str(uuid.uuid4())
+        url = f"{GMGN_HOST}{path}"
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as session:
+                async with session.get(url, headers=_headers(), params=auth_params) as resp:
+                    body = await resp.text()
+                    if resp.status == 200:
+                        try:
+                            data = __import__("json").loads(body)
+                            if isinstance(data, dict) and data.get("code") in (None, 0):
+                                return data
+                            logger.info("GMGN openapi code=%s: %s", data.get("code"), path)
+                        except Exception:
+                            logger.info("GMGN openapi non-JSON: %s", body[:100])
+                    else:
+                        logger.info("GMGN openapi %d %s: %s", resp.status, path, body[:150])
+        except Exception as exc:
+            logger.info("GMGN openapi error %s: %s", path, exc)
+
+    # ── Try 2: Public endpoint with Referer header ───────────────────
     pub_template = PUBLIC_URLS.get(path)
     if pub_template:
         pub_params = {k: v for k, v in params.items() if k != "chain"}
@@ -93,30 +118,9 @@ async def _fetch(path: str, params: dict | None = None) -> dict | None:
                         data = await resp.json(content_type=None)
                         if isinstance(data, dict) and data.get("code") in (None, 0):
                             return data
-                    elif resp.status == 403:
-                        logger.debug("GMGN public 403 (Cloudflare): %s", pub_url[:50])
-                    else:
-                        logger.debug("GMGN public %d: %s", resp.status, pub_url[:50])
+                    logger.debug("GMGN public %d: %s", resp.status, pub_url[:50])
         except Exception as exc:
             logger.debug("GMGN public error: %s", exc)
-
-    # ── Fallback: Authenticated OpenAPI ──────────────────────────────
-    if _has_auth():
-        params["timestamp"] = str(int(time.time()))
-        params["client_id"] = str(uuid.uuid4())
-        url = f"{GMGN_HOST}{path}"
-        try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as session:
-                async with session.get(url, headers=_headers(), params=params) as resp:
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None)
-                        if isinstance(data, dict) and data.get("code") in (None, 0):
-                            return data
-                    logger.debug("GMGN openapi %d: %s", resp.status, path)
-        except Exception as exc:
-            logger.debug("GMGN openapi error: %s", exc)
 
     return None
 

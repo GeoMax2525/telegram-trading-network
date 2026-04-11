@@ -1626,79 +1626,70 @@ async def cmd_testgmgn(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         return
 
+    import time as _time, uuid as _uuid
     from bot.agents.gmgn_agent import (
-        gmgn_token_info, gmgn_smart_money_trades,
-        _has_auth, _poll_gmgn_tokens, GMGN_HOST, PUB_HEADERS,
+        gmgn_smart_money_trades, _has_auth, _poll_gmgn_tokens,
+        GMGN_HOST, _headers, _fetch,
     )
     from bot.config import GMGN_API_KEY
 
     status = await message.reply("Testing GMGN API...", parse_mode=None)
     lines = ["🔬 GMGN API TEST", "━━━━━━━━━━━━━━━━━━━━"]
 
-    key_preview = GMGN_API_KEY[:12] + "..." if GMGN_API_KEY else "NOT SET"
+    key_preview = GMGN_API_KEY[:15] + "..." if GMGN_API_KEY else "NOT SET"
     lines.append(f"Key: {key_preview}")
+    lines.append(f"OpenAPI: {GMGN_HOST}")
 
-    # Test 1: Raw aiohttp request to public trending endpoint
-    test_url = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/1h?orderby=swaps&direction=desc&limit=2"
+    # Test 1: Direct OpenAPI call with YOUR key
     try:
+        ts = str(int(_time.time()))
+        cid = str(_uuid.uuid4())
+        url = f"{GMGN_HOST}/v1/market/rank"
+        params = {"chain": "sol", "interval": "1h", "limit": "2",
+                  "timestamp": ts, "client_id": cid}
+        hdrs = _headers()
+        lines.append(f"Headers: {list(hdrs.keys())}")
+
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=15)
         ) as s:
-            async with s.get(test_url, headers=PUB_HEADERS) as resp:
+            async with s.get(url, headers=hdrs, params=params) as resp:
                 body = await resp.text()
-                lines.append(f"Raw trending: HTTP {resp.status}")
-                lines.append(f"  Body[0:150]: {body[:150]}")
-                if resp.status == 200:
-                    import json as _j
-                    try:
-                        d = _j.loads(body)
-                        rank = (d.get("data") or {}).get("rank") or []
-                        lines.append(f"  Parsed: {len(rank)} tokens")
-                        if rank:
-                            lines.append(f"  #1: {rank[0].get('symbol')}")
-                    except Exception:
-                        lines.append("  JSON parse failed")
+                lines.append(f"OpenAPI trending: HTTP {resp.status}")
+                lines.append(f"  Body: {body[:200]}")
     except Exception as exc:
-        lines.append(f"Raw trending: ERROR {exc}")
+        lines.append(f"OpenAPI: ERROR {exc}")
 
-    # Test 2: curl subprocess (bypasses aiohttp entirely)
+    # Test 2: Public endpoint (Cloudflare — likely 403 from Railway)
     try:
-        import subprocess
-        result = subprocess.run(
-            ["curl", "-s", "-w", "\\nHTTP:%{http_code}",
-             "-H", "Referer: https://gmgn.ai/",
-             "-H", "Accept: application/json",
-             "-H", "User-Agent: Mozilla/5.0",
-             test_url],
-            capture_output=True, text=True, timeout=15,
-        )
-        out = result.stdout
-        http_line = [l for l in out.split("\n") if l.startswith("HTTP:")]
-        curl_status = http_line[-1] if http_line else "?"
-        curl_body = out[:150]
-        lines.append(f"Curl: {curl_status}")
-        lines.append(f"  Body[0:100]: {curl_body[:100]}")
+        pub_url = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/1h?limit=2"
+        pub_h = {"User-Agent": "Mozilla/5.0", "Referer": "https://gmgn.ai/",
+                 "Accept": "application/json"}
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as s:
+            async with s.get(pub_url, headers=pub_h) as resp:
+                lines.append(f"Public: HTTP {resp.status} {'CF block' if resp.status == 403 else 'OK'}")
     except Exception as exc:
-        lines.append(f"Curl: ERROR {exc}")
+        lines.append(f"Public: ERROR {exc}")
 
-    # Test 3: Via _fetch wrapper
+    # Test 3: Full _fetch wrapper
     try:
-        from bot.agents.gmgn_agent import _fetch
-        data = await _fetch("/v1/market/rank", {
-            "chain": "sol", "interval": "1h", "limit": 2,
-        })
+        data = await _fetch("/v1/market/rank", {"chain": "sol", "interval": "1h", "limit": 2})
         if data:
             rank = (data.get("data") or {}).get("rank") or []
-            lines.append(f"_fetch trending: ✅ {len(rank)} tokens")
+            lines.append(f"_fetch: ✅ {len(rank)} tokens")
+            if rank:
+                lines.append(f"  #1: {rank[0].get('symbol')}")
         else:
-            lines.append("_fetch trending: ❌ None returned")
+            lines.append("_fetch: ❌ None")
     except Exception as exc:
-        lines.append(f"_fetch trending: ❌ {exc}")
+        lines.append(f"_fetch: ❌ {exc}")
 
-    # Test 4: Smart money trades
+    # Test 4: Smart money
     try:
         trades = await gmgn_smart_money_trades(limit=3)
-        lines.append(f"Smart trades: {len(trades)} returned")
+        lines.append(f"Smart trades: {len(trades)}")
     except Exception as exc:
         lines.append(f"Smart trades: ❌ {exc}")
 
