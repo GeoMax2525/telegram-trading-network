@@ -28,7 +28,7 @@ from database.models import (
     get_pumpfun_count_today,
     token_exists, save_token, get_token_by_mint,
     get_tier_wallets, get_pattern_by_type, has_caller_scanned,
-    upsert_wallet, get_paper_trade_stats,
+    upsert_wallet, get_paper_trade_stats, get_open_paper_trades,
     get_all_params, get_recent_param_changes,
     upsert_pattern, set_param, compute_paper_balance,
     get_all_tokens, update_token_market_cap,
@@ -451,6 +451,63 @@ async def _build_hub_text(autotrade: bool) -> str:
         f"📋 *PAPER TRADING* ({paper_stats['open_count']} open)",
         f"Today: `{paper_stats['today_count']}` trades | `{paper_stats['today_pnl']:+.4f} SOL`",
         f"All time: `{paper_stats['win_rate']}%` WR | `{paper_stats['total_pnl']:+.4f} SOL`",
+    ]
+
+    # ── Open paper positions (live MC + multiplier) ─────────────────
+    open_trades = await get_open_paper_trades()
+    if open_trades:
+        # Fetch live MC for all open positions in parallel
+        live_mcs = await asyncio.gather(
+            *[fetch_current_market_cap(pt.token_address) for pt in open_trades],
+            return_exceptions=True,
+        )
+
+        lines += ["", "📂 *OPEN PAPER TRADES*"]
+        now = datetime.utcnow()
+        for idx, (pt, live_mc) in enumerate(zip(open_trades, live_mcs), 1):
+            raw_name = pt.token_name or "?"
+            safe_name = raw_name.replace("_", " ").replace("*", "").replace("`", "")
+
+            entry_mc = pt.entry_mc or 0
+            current_mc = live_mc if isinstance(live_mc, (int, float)) and live_mc else 0
+            multiplier = (current_mc / entry_mc) if (entry_mc > 0 and current_mc > 0) else 0
+
+            # Warning flags
+            flag = ""
+            if multiplier >= 2.0:
+                flag = " 🔥"
+            elif 0 < multiplier < 1.0:
+                flag = " ⚠️"
+
+            # TP/SL target MCs derived from entry
+            tp_mc = entry_mc * pt.take_profit_x if entry_mc > 0 else 0
+            sl_mc = entry_mc * (1 - pt.stop_loss_pct / 100) if entry_mc > 0 else 0
+
+            # Time since opened
+            elapsed = now - pt.opened_at
+            mins = int(elapsed.total_seconds() // 60)
+            if mins < 1:
+                age = "just now"
+            elif mins < 60:
+                age = f"{mins}min ago"
+            elif mins < 1440:
+                age = f"{mins // 60}h ago"
+            else:
+                age = f"{mins // 1440}d ago"
+
+            mc_entry_str = _format_usd(entry_mc) if entry_mc else "?"
+            mc_now_str = _format_usd(current_mc) if current_mc else "?"
+            mult_str = f"{multiplier:.2f}x" if multiplier else "?"
+
+            lines.append(f"/{idx} ${safe_name}{flag}")
+            lines.append(f"MC: `{mc_entry_str}` → `{mc_now_str}` | `{mult_str}`")
+            lines.append(
+                f"TP: `{pt.take_profit_x:.0f}x` ({_format_usd(tp_mc)}) | "
+                f"SL: `{pt.stop_loss_pct:.0f}%` ({_format_usd(sl_mc)})"
+            )
+            lines.append(f"Opened: _{age}_")
+
+    lines += [
         "",
         "🔥 *TOP WALLETS*",
     ]
