@@ -23,6 +23,7 @@ Weekly performance report every Monday 9am UTC.
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
 
 import aiohttp
@@ -168,6 +169,52 @@ async def _recent_win_rate(n: int) -> float:
         return 0.5  # neutral if no data
     wins = sum(1 for t in combined if (t.pnl_sol or 0) > 0)
     return wins / len(combined)
+
+
+async def _alltime_win_rate() -> float:
+    """All-time win rate across every closed paper trade + real position.
+
+    Used as an anchor so Agent 6 doesn't overreact to a bad recent streak.
+    """
+    async with AsyncSessionLocal() as session:
+        paper_total = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0
+        paper_wins = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol > 0,
+            )
+        )).scalar() or 0
+        real_total = (await session.execute(
+            select(func.count(Position.id)).where(
+                Position.status == "closed",
+                Position.pnl_sol.is_not(None),
+            )
+        )).scalar() or 0
+        real_wins = (await session.execute(
+            select(func.count(Position.id)).where(
+                Position.status == "closed",
+                Position.pnl_sol > 0,
+            )
+        )).scalar() or 0
+
+    total = paper_total + real_total
+    if total == 0:
+        return 0.5
+    return (paper_wins + real_wins) / total
+
+
+def _compute_effective_wr(recent_wr: float, alltime_wr: float) -> float:
+    """
+    Blended win rate: weights recent performance 60% / all-time 40%.
+    This dampens overreaction to short bad streaks when the long-term
+    trajectory is still healthy.
+    """
+    return (recent_wr * 0.6) + (alltime_wr * 0.4)
 
 
 async def _consecutive_sl_count() -> int:
@@ -432,12 +479,69 @@ async def _classify_batch(batch) -> tuple[list[dict], list[dict]]:
 
 # ── Notify Callers HQ ────────────────────────────────────────────────────────
 
+# Minimum deltas that qualify as a "major" adjustment worth announcing
+MAJOR_WEIGHT_SHIFT     = 0.05   # absolute weight delta
+MAJOR_THRESHOLD_SHIFT  = 3      # integer points on any threshold / conf param
+NOTIFY_COOLDOWN_SEC    = 3600   # max 1 notification per hour even if major
+
+# Matches numeric deltas in change strings like
+#   "conf threshold: 80→83"   "execute_full: 80->83"   "size_80: 18%→21%"
+#   "min_mc: $5000→$4000"
+_DELTA_RE = re.compile(r'(\d+(?:\.\d+)?)\s*%?\s*(?:->|\u2192)\s*\$?\s*(\d+(?:\.\d+)?)')
+
+
+def _is_major_change(
+    all_changes: list[str],
+    current_weights: dict[str, float],
+    new_weights: dict[str, float],
+) -> tuple[bool, str]:
+    """
+    Returns (is_major, reason). Criteria:
+      - Any component weight shifted by >= MAJOR_WEIGHT_SHIFT (absolute)
+      - Any numeric delta in the change strings with magnitude >= MAJOR_THRESHOLD_SHIFT
+      - Autotrade paused (always major)
+    """
+    for ch in all_changes:
+        if "PAUSED" in ch:
+            return True, "autotrade paused"
+
+    max_shift = 0.0
+    top_key = None
+    for k in COMPONENT_KEYS:
+        shift = abs(new_weights.get(k, 0.0) - current_weights.get(k, 0.0))
+        if shift > max_shift:
+            max_shift = shift
+            top_key = k
+    if max_shift >= MAJOR_WEIGHT_SHIFT:
+        return True, f"weight {top_key} shifted {max_shift:.2%}"
+
+    for ch in all_changes:
+        # Weight deltas are already evaluated via the dict comparison above —
+        # skip their string representation to avoid double-counting
+        # (lines that come from the weight section are indented with spaces,
+        #  or are the "Weights adjusted:" header itself).
+        if ch.startswith(" ") or ch.startswith("Weights adjusted"):
+            continue
+        m = _DELTA_RE.search(ch)
+        if not m:
+            continue
+        try:
+            before = float(m.group(1))
+            after = float(m.group(2))
+        except ValueError:
+            continue
+        if abs(after - before) >= MAJOR_THRESHOLD_SHIFT:
+            return True, f"numeric delta {abs(after - before):g} in '{ch.strip()}'"
+
+    return False, ""
+
+
 async def _notify_param_change(bot, changes: list[str], win_rate: float, regime: str):
-    """Posts parameter update to Callers HQ."""
+    """Posts parameter update to Callers HQ. Callers gate this on major + cooldown."""
     text = "\n".join([
         "🧠 AI PARAMETER UPDATE",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"Win rate (last 20): {win_rate * 100:.0f}%",
+        f"Effective win rate: {win_rate * 100:.0f}%",
         f"Market regime: {regime}",
         "",
     ] + changes + [
@@ -645,8 +749,15 @@ async def run_once(bot, force: bool = False) -> bool:
 
     # ── Safety checks ────────────────────────────────────────────────
     consec_sl = await _consecutive_sl_count()
-    recent_wr = await _recent_win_rate(20)
+    recent_wr = await _recent_win_rate(20)      # short window — circuit breaker
+    alltime_wr = await _alltime_win_rate()      # long anchor
+    effective_wr = _compute_effective_wr(recent_wr, alltime_wr)  # 0.6 recent + 0.4 alltime
     all_changes: list[str] = []
+
+    logger.info(
+        "Agent6: wr_recent=%.2f wr_alltime=%.2f wr_effective=%.2f",
+        recent_wr, alltime_wr, effective_wr,
+    )
 
     if consec_sl >= 10 and state.autotrade_enabled:
         state.autotrade_enabled = False
@@ -654,6 +765,9 @@ async def run_once(bot, force: bool = False) -> bool:
         logger.warning("Agent6: PAUSED autotrade — %d consecutive SL", consec_sl)
         await _notify_safety_alert(bot, f"{consec_sl} consecutive stop-loss hits detected.")
 
+    # Safety pause stays on the RECENT window only — this is an emergency
+    # circuit breaker, not a tuning signal. Effective_wr would mask a real
+    # collapse when all-time history is healthy.
     if recent_wr < 0.40 and total_closed >= 20 and state.autotrade_enabled:
         state.autotrade_enabled = False
         all_changes.append(f"PAUSED: win rate {recent_wr*100:.0f}% < 40% (last 20)")
@@ -688,12 +802,15 @@ async def run_once(bot, force: bool = False) -> bool:
     new_analyzed = last_analyzed + len(batch)
 
     # ── Major: full autonomous parameter adjustment ────────────────────
+    # Parameter tuning uses effective_wr (blended 60/40) so that a bad
+    # recent streak can't yank thresholds around when the long-term
+    # trajectory is still healthy.
     if level in ("full", "major"):
-        auto_changes = await _auto_adjust_params(recent_wr, new_analyzed, regime)
+        auto_changes = await _auto_adjust_params(effective_wr, new_analyzed, regime)
         all_changes.extend(auto_changes)
     notes = (
         f"level={level} batch={len(batch)} win={len(winners)} loss={len(losers)} "
-        f"regime={regime} wr20={recent_wr:.2f}"
+        f"regime={regime} wr20={recent_wr:.2f} wr_all={alltime_wr:.2f} wr_eff={effective_wr:.2f}"
     )
     await save_weights(
         fingerprint=new_weights["fingerprint"],
@@ -720,9 +837,31 @@ async def run_once(bot, force: bool = False) -> bool:
         notes=f"{notes} | changes={len(all_changes)}",
     )
 
-    # Notify if significant changes
-    if all_changes and level in ("full", "major"):
-        await _notify_param_change(bot, all_changes, recent_wr, regime)
+    # Notify only on MAJOR changes, and only if we haven't posted in the last hour.
+    # Micro-adjustments still get logged to DB + state, but stay silent in chat.
+    if all_changes:
+        is_major, reason = _is_major_change(all_changes, current_weights, new_weights)
+        now = datetime.utcnow()
+        last_notify = getattr(state, "learning_loop_last_notify", None)
+        cooldown_ok = (
+            last_notify is None
+            or (now - last_notify).total_seconds() >= NOTIFY_COOLDOWN_SEC
+        )
+        if is_major and cooldown_ok:
+            await _notify_param_change(bot, all_changes, effective_wr, regime)
+            state.learning_loop_last_notify = now
+            logger.info("Agent6: posted major update to Callers HQ — %s", reason)
+        elif is_major and not cooldown_ok:
+            remaining = NOTIFY_COOLDOWN_SEC - (now - last_notify).total_seconds()
+            logger.info(
+                "Agent6: major change suppressed by cooldown (%.0fs left) — %s",
+                remaining, reason,
+            )
+        else:
+            logger.info(
+                "Agent6: %d changes this cycle but none qualify as major — staying silent",
+                len(all_changes),
+            )
 
     logger.info(
         "Agent6[%s]: done — batch=%d win=%d loss=%d regime=%s changes=%d",
