@@ -1428,22 +1428,25 @@ async def cmd_resetbalance(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         return
 
-    # Close all open paper trades
-    from database.models import get_open_paper_trades, close_paper_trade
-    open_trades = await get_open_paper_trades()
-    for pt in open_trades:
-        await close_paper_trade(pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple)
+    # Wipe ALL paper trades from database (full clean reset)
+    from database.models import AsyncSessionLocal, PaperTrade
+    from sqlalchemy import delete
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(delete(PaperTrade))
+        deleted = result.rowcount
+        await session.commit()
 
-    # Reset balance
+    # Reset state
     state.paper_balance = state.PAPER_STARTING_BALANCE
     state.paper_resets += 1
     state.paper_trades_today = 0
+    state.data_points_today = 0
 
     bal = state.PAPER_STARTING_BALANCE
     await message.reply(
-        f"✅ Paper balance reset to {bal:.0f} SOL\n"
-        f"Closed {len(open_trades)} open positions\n"
-        f"Total resets: {state.paper_resets}",
+        f"✅ FULL RESET — Paper balance: {bal:.0f} SOL\n"
+        f"Deleted {deleted} paper trades from database\n"
+        f"Clean slate — ready for data collection",
         parse_mode=None,
     )
 
