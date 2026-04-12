@@ -185,34 +185,68 @@ async def _poll_gmgn_tokens() -> int:
 # ── Smart wallet import ──────────────────────────────────────────────────────
 
 async def _import_gmgn_wallets() -> int:
+    """
+    Import smart money wallets:
+    1. Get recent smart money BUY trades → extract unique makers
+    2. Fetch portfolio stats for each maker
+    3. Score and save to Wallets table
+    """
+    # Step 1: Get smart money buy trades
     trades = await gmgn_smart_money_trades(limit=100)
     if not trades:
+        logger.info("GMGN wallets: no smart money trades returned")
         return 0
 
+    # Extract unique wallet addresses from buy trades
     wallet_addrs = set()
     for t in trades:
         maker = t.get("maker")
-        if maker:
+        side = t.get("side")
+        if maker and side == "buy":
             wallet_addrs.add(maker)
 
+    logger.info("GMGN wallets: %d unique buy makers from %d trades", len(wallet_addrs), len(trades))
+
+    # Step 2: Fetch stats for each wallet
     imported = 0
-    for address in list(wallet_addrs)[:30]:  # cap to avoid rate limits
+    for address in list(wallet_addrs)[:20]:  # cap to avoid rate limits
         stats = await gmgn_wallet_stats(address)
         if not stats:
             continue
 
-        wr = float(stats.get("win_rate") or 0)
-        total_trades = int(stats.get("buy_count") or stats.get("total_trades") or 0)
-        realized = float(stats.get("realized_profit") or 0)
-        avg_mult = (realized / max(total_trades, 1) / 100 + 1) if total_trades else 1.0
-        wins = int(round(wr * total_trades / 100)) if total_trades and wr > 1 else int(round(wr * total_trades))
-        losses = total_trades - wins
-        if wr > 1:
-            wr = wr / 100.0
+        # Parse GMGN portfolio stats format:
+        # buy=774, sell=771, pnl_stat.winrate=0.43, pnl_stat.token_num=576
+        pnl = stats.get("pnl_stat") or {}
+        wr = float(pnl.get("winrate") or stats.get("win_rate") or 0)
+        total_trades = int(stats.get("buy") or pnl.get("token_num") or 0)
+        if total_trades < 3:
+            continue  # not enough data
 
+        # Count wins from PnL buckets
+        wins_2x = int(pnl.get("pnl_2x_5x_num") or 0)
+        wins_5x = int(pnl.get("pnl_gt_5x_num") or 0)
+        wins_0x = int(pnl.get("pnl_0x_2x_num") or 0)
+        wins = wins_0x + wins_2x + wins_5x
+        losses = total_trades - wins
+
+        # Avg multiple estimate from win distribution
+        if wins > 0:
+            avg_mult = (wins_0x * 1.5 + wins_2x * 3.5 + wins_5x * 7.0) / wins
+        else:
+            avg_mult = 1.0
+
+        # Tags
+        tags = (stats.get("common") or {}).get("tags") or []
+
+        logger.info(
+            "GMGN wallet %s..%s: trades=%d wr=%.0f%% avg=%.1fx tags=%s",
+            address[:4], address[-4:], total_trades, wr * 100, avg_mult, tags[:3],
+        )
+
+        # Step 3: Score
         score, tier = _score_wallet(
-            wins=max(wins, 1), losses=losses, total_trades=max(total_trades, 1),
-            avg_multiple=max(avg_mult, 1.0), early_entry_rate=0.5,
+            wins=max(wins, 1), losses=losses, total_trades=total_trades,
+            avg_multiple=avg_mult, early_entry_rate=0.5,
         )
 
         if tier > 0:
@@ -224,11 +258,11 @@ async def _import_gmgn_wallets() -> int:
             )
             imported += 1
 
-        await asyncio.sleep(1)  # rate limit
+        await asyncio.sleep(1.5)  # rate limit between portfolio stats calls
 
     if imported:
         logger.info("GMGN wallets: imported %d from %d makers", imported, len(wallet_addrs))
-        await log_agent_run("gmgn_wallets", tokens_found=len(wallet_addrs), tokens_saved=imported)
+    await log_agent_run("gmgn_wallets", tokens_found=len(wallet_addrs), tokens_saved=imported)
 
     return imported
 
