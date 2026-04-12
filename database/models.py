@@ -2048,6 +2048,7 @@ AGENT_PARAM_DEFAULTS = {
     "trade_mode": 1,  # default to paper
     # Paper balance
     "paper_starting_balance": 10.0,
+    "paper_balance_offset": 0.0,
 }
 
 

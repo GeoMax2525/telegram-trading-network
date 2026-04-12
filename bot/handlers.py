@@ -427,9 +427,15 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     # Chaos mode section — only in paper mode
     if state.trade_mode == "paper":
-        # Compute balance from DB (not memory — survives restarts)
-        real_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-        state.paper_balance = real_balance  # sync memory
+        # Compute balance from DB + reset offset
+        raw_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+        try:
+            from database.models import get_param
+            offset = await get_param("paper_balance_offset")
+        except Exception:
+            offset = 0.0
+        real_balance = raw_balance + offset
+        state.paper_balance = real_balance
         pnl_val = real_balance - state.PAPER_STARTING_BALANCE
         pnl_pct = ((real_balance / state.PAPER_STARTING_BALANCE) - 1) * 100 if state.PAPER_STARTING_BALANCE > 0 else 0
         lines += [
@@ -1428,25 +1434,26 @@ async def cmd_resetbalance(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         return
 
-    # Wipe ALL paper trades from database (full clean reset)
-    from database.models import AsyncSessionLocal, PaperTrade
-    from sqlalchemy import delete
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(delete(PaperTrade))
-        deleted = result.rowcount
-        await session.commit()
+    # Close open positions (mark as reset, PnL = 0)
+    from database.models import get_open_paper_trades, close_paper_trade
+    open_trades = await get_open_paper_trades()
+    for pt in open_trades:
+        await close_paper_trade(pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple)
 
-    # Reset state
+    # Store reset offset so compute_paper_balance ignores past losses
+    # balance_offset = how much to add to bring balance back to 10
+    current = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+    offset = state.PAPER_STARTING_BALANCE - current
+    await set_param("paper_balance_offset", offset, "Manual reset via /resetbalance")
+
     state.paper_balance = state.PAPER_STARTING_BALANCE
     state.paper_resets += 1
     state.paper_trades_today = 0
-    state.data_points_today = 0
 
-    bal = state.PAPER_STARTING_BALANCE
     await message.reply(
-        f"✅ FULL RESET — Paper balance: {bal:.0f} SOL\n"
-        f"Deleted {deleted} paper trades from database\n"
-        f"Clean slate — ready for data collection",
+        f"✅ Balance reset to {state.PAPER_STARTING_BALANCE:.0f} SOL\n"
+        f"Closed {len(open_trades)} open positions\n"
+        f"All historical data preserved",
         parse_mode=None,
     )
 
