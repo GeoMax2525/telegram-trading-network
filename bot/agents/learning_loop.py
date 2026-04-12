@@ -71,9 +71,19 @@ FULL_BATCH       = 5     # full review every N trades (chaos: was 50)
 MAJOR_BATCH      = 15    # major recalibration every N trades (chaos: was 100)
 POLL_INTERVAL    = 60    # check every 1 minute (chaos: was 2 min)
 STARTUP_DELAY    = 15    # lowered so heartbeat shows up fast in Railway logs
-MAX_WEIGHT_SHIFT = 0.10  # aggressive tuning (chaos: was 0.05)
+MAX_WEIGHT_SHIFT = 0.10  # normal-mode full/major weight shift cap
 MIN_WEIGHT       = 0.02
 WEEKLY_HOUR      = 9
+
+# ── Dynamic learning mode ───────────────────────────────────────────────────
+# When effective WR tanks, Agent 6 switches into "aggressive" mode: smaller
+# micro batches (tune faster) and a larger weight-shift cap (tune harder).
+# Hysteresis prevents flapping between modes on every cycle.
+AGGRESSIVE_WR_ENTER      = 0.40   # effective_wr below this → go aggressive
+AGGRESSIVE_WR_EXIT       = 0.50   # effective_wr at/above this → back to normal
+AGGRESSIVE_MICRO_BATCH   = 2      # vs normal MICRO_BATCH=3
+AGGRESSIVE_MAX_SHIFT     = 0.20   # vs normal MAX_WEIGHT_SHIFT=0.10
+NORMAL_MICRO_SHIFT_RATIO = 0.20   # micro-level shift = this * max_shift
 
 # Default weights
 DEFAULT_WEIGHTS = {
@@ -215,6 +225,40 @@ def _compute_effective_wr(recent_wr: float, alltime_wr: float) -> float:
     trajectory is still healthy.
     """
     return (recent_wr * 0.6) + (alltime_wr * 0.4)
+
+
+def _learning_mode(effective_wr: float) -> tuple[str, int, float]:
+    """
+    Returns (mode_name, micro_batch, max_weight_shift) for the current cycle.
+
+    Hysteresis band:
+      - effective_wr < AGGRESSIVE_WR_ENTER (0.40) → aggressive mode
+      - effective_wr ≥ AGGRESSIVE_WR_EXIT  (0.50) → normal mode
+      - between 0.40 and 0.50 → stay in whatever mode was active last cycle
+
+    Logs mode transitions so they're visible in Railway. Self-restores to
+    normal as soon as WR climbs back through the exit band.
+    """
+    prev = getattr(state, "learning_loop_mode", "normal")
+
+    if effective_wr < AGGRESSIVE_WR_ENTER:
+        mode = "aggressive"
+    elif effective_wr >= AGGRESSIVE_WR_EXIT:
+        mode = "normal"
+    else:
+        mode = prev  # inside hysteresis band — keep current mode
+
+    if mode != prev:
+        logger.warning(
+            "Agent6: learning mode %s → %s (effective_wr=%.2f)",
+            prev, mode, effective_wr,
+        )
+
+    state.learning_loop_mode = mode
+
+    if mode == "aggressive":
+        return "aggressive", AGGRESSIVE_MICRO_BATCH, AGGRESSIVE_MAX_SHIFT
+    return "normal", MICRO_BATCH, MAX_WEIGHT_SHIFT
 
 
 async def _consecutive_sl_count() -> int:
@@ -711,25 +755,36 @@ async def run_once(bot, force: bool = False) -> bool:
     state.learning_loop_last_analyzed = last_analyzed
     state.learning_loop_total_closed = total_closed
 
-    if pending < MICRO_BATCH and not force:
+    # ── Win rates computed early so learning mode is known before gating ──
+    recent_wr = await _recent_win_rate(20)      # short window — circuit breaker
+    alltime_wr = await _alltime_win_rate()      # long anchor
+    effective_wr = _compute_effective_wr(recent_wr, alltime_wr)
+    mode, dyn_micro, dyn_max_shift = _learning_mode(effective_wr)
+
+    logger.info(
+        "Agent6: wr_recent=%.2f wr_alltime=%.2f wr_effective=%.2f mode=%s (micro=%d shift=%.2f)",
+        recent_wr, alltime_wr, effective_wr, mode, dyn_micro, dyn_max_shift,
+    )
+
+    if pending < dyn_micro and not force:
         return False
 
-    # Determine run level
+    # Determine run level (micro threshold is dynamic)
     if pending >= MAJOR_BATCH:
         level = "major"
         batch_size = MAJOR_BATCH
     elif pending >= FULL_BATCH:
         level = "full"
         batch_size = FULL_BATCH
-    elif pending >= MICRO_BATCH:
+    elif pending >= dyn_micro:
         level = "micro"
-        batch_size = MICRO_BATCH
+        batch_size = dyn_micro
     else:
         level = "forced-micro"
         batch_size = max(1, pending)
 
-    logger.info("Agent6: %d pending trades — running %s adjustment (force=%s)",
-                pending, level, force)
+    logger.info("Agent6: %d pending trades — running %s adjustment (force=%s, mode=%s)",
+                pending, level, force, mode)
 
     # Fetch batch
     positions = await get_closed_positions_since(0, limit=500)
@@ -738,7 +793,7 @@ async def run_once(bot, force: bool = False) -> bool:
         logger.info("Agent6: no unanalyzed trades in fetched window (last_analyzed=%d, fetched=%d)",
                     last_analyzed, len(positions))
         return False
-    if len(batch) < MICRO_BATCH and not force:
+    if len(batch) < dyn_micro and not force:
         return False
 
     # Classify wins/losses
@@ -749,15 +804,7 @@ async def run_once(bot, force: bool = False) -> bool:
 
     # ── Safety checks ────────────────────────────────────────────────
     consec_sl = await _consecutive_sl_count()
-    recent_wr = await _recent_win_rate(20)      # short window — circuit breaker
-    alltime_wr = await _alltime_win_rate()      # long anchor
-    effective_wr = _compute_effective_wr(recent_wr, alltime_wr)  # 0.6 recent + 0.4 alltime
     all_changes: list[str] = []
-
-    logger.info(
-        "Agent6: wr_recent=%.2f wr_alltime=%.2f wr_effective=%.2f",
-        recent_wr, alltime_wr, effective_wr,
-    )
 
     if consec_sl >= 10 and state.autotrade_enabled:
         state.autotrade_enabled = False
@@ -774,8 +821,13 @@ async def run_once(bot, force: bool = False) -> bool:
         logger.warning("Agent6: PAUSED autotrade — win rate %.0f%%", recent_wr * 100)
         await _notify_safety_alert(bot, f"Win rate dropped to {recent_wr*100:.0f}% over last 20 trades.")
 
-    # ── Micro: weight adjustment ─────────────────────────────────────
-    shift = 0.02 if level == "micro" else MAX_WEIGHT_SHIFT
+    # ── Weight adjustment — shift cap scales with learning mode ─────
+    # Micro-level runs use a smaller slice of the cap so individual
+    # cycles don't whipsaw weights; full/major use the full cap.
+    if level == "micro":
+        shift = round(dyn_max_shift * NORMAL_MICRO_SHIFT_RATIO, 4)
+    else:
+        shift = dyn_max_shift
     new_weights = _compute_weight_adjustments(winners, losers, current_weights, max_shift=shift)
 
     weight_changes = []
@@ -1129,9 +1181,11 @@ async def learning_loop(bot) -> None:
             current_row = await get_current_weights()
             analyzed = current_row.trades_analyzed if current_row else 0
             pending = total_closed - analyzed
+            hb_mode = getattr(state, "learning_loop_mode", "normal")
+            hb_micro = AGGRESSIVE_MICRO_BATCH if hb_mode == "aggressive" else MICRO_BATCH
             logger.info(
-                "Agent6 heartbeat: closed_trades=%d analyzed=%d pending=%d (micro=%d)",
-                total_closed, analyzed, pending, MICRO_BATCH,
+                "Agent6 heartbeat: closed_trades=%d analyzed=%d pending=%d mode=%s (micro=%d)",
+                total_closed, analyzed, pending, hb_mode, hb_micro,
             )
 
             # Market regime check every cycle
