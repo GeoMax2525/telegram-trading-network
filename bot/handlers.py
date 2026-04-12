@@ -1458,6 +1458,87 @@ async def cmd_resetbalance(message: Message):
     )
 
 
+# ── /mccheck — Debug MC repair ────────────────────────────────────────────────
+
+@router.message(Command("mccheck"))
+async def cmd_mccheck(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    from database.models import get_tokens_no_mc, count_tokens_no_mc, AsyncSessionLocal, select, func, Token
+    from datetime import datetime, timedelta
+
+    status = await message.reply("Checking 5 tokens with no MC...", parse_mode=None)
+
+    lines = ["🔍 MC CHECK — 5 random tokens", "━━━━━━━━━━━━━━━━━━━━"]
+
+    # Stats
+    no_mc = await count_tokens_no_mc()
+    async with AsyncSessionLocal() as session:
+        total = (await session.execute(select(func.count(Token.mint)))).scalar() or 0
+        dead = (await session.execute(
+            select(func.count(Token.mint)).where(Token.source == "dead")
+        )).scalar() or 0
+    lines.append(f"Total: {total} | No MC: {no_mc} | Dead: {dead}")
+    lines.append("")
+
+    # Get 5 tokens with no MC
+    tokens = await get_tokens_no_mc(limit=5)
+
+    for tok in tokens:
+        name = (tok.name or tok.symbol or "?")[:15]
+        age_days = (datetime.utcnow() - tok.first_seen_at).days if tok.first_seen_at else "?"
+        mint_short = tok.mint[:20] + "..."
+        lines.append(f"Token: {name} | Age: {age_days}d | Src: {tok.source}")
+        lines.append(f"  Mint: {tok.mint}")
+
+        # Try DexScreener v1
+        try:
+            pair = await fetch_token_data(tok.mint)
+            if pair:
+                metrics = parse_token_metrics(pair)
+                mc = metrics.get("market_cap", 0) or 0
+                liq = metrics.get("liquidity_usd", 0) or 0
+                lines.append(f"  DexV1: MC=${mc:,.0f} Liq=${liq:,.0f}")
+            else:
+                lines.append(f"  DexV1: no pairs returned")
+        except Exception as exc:
+            lines.append(f"  DexV1: ERROR {str(exc)[:50]}")
+
+        # Try DexScreener v2
+        try:
+            v2_url = f"https://api.dexscreener.com/tokens/v1/solana/{tok.mint}"
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.get(v2_url) as resp:
+                    if resp.status == 200:
+                        v2 = await resp.json(content_type=None)
+                        if isinstance(v2, list) and v2:
+                            mc2 = (v2[0].get("marketCap") or v2[0].get("fdv") or 0)
+                            lines.append(f"  DexV2: {len(v2)} pairs, MC=${mc2:,.0f}")
+                        else:
+                            lines.append(f"  DexV2: empty list")
+                    else:
+                        lines.append(f"  DexV2: HTTP {resp.status}")
+        except Exception as exc:
+            lines.append(f"  DexV2: ERROR {str(exc)[:50]}")
+
+        # Try GMGN
+        try:
+            from bot.agents.gmgn_agent import gmgn_token_info
+            info = await gmgn_token_info(tok.mint)
+            if info:
+                gmc = info.get("market_cap") or info.get("usd_market_cap") or 0
+                lines.append(f"  GMGN: MC=${float(gmc):,.0f}")
+            else:
+                lines.append(f"  GMGN: no data")
+        except Exception as exc:
+            lines.append(f"  GMGN: ERROR {str(exc)[:50]}")
+
+        lines.append("")
+
+    await status.edit_text("\n".join(lines), parse_mode=None)
+
+
 # ── /backfill — Full token backfill (all tokens, batched) ─────────────────────
 
 @router.message(Command("backfill"))
