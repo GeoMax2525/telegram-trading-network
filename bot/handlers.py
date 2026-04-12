@@ -1626,10 +1626,8 @@ async def cmd_testgmgn(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         return
 
-    import time as _time, uuid as _uuid
     from bot.agents.gmgn_agent import (
-        gmgn_smart_money_trades, _has_auth, _poll_gmgn_tokens,
-        GMGN_HOST, _headers, _fetch,
+        gmgn_trending, gmgn_smart_money_trades, gmgn_token_info, _run_cli,
     )
     from bot.config import GMGN_API_KEY
 
@@ -1638,72 +1636,44 @@ async def cmd_testgmgn(message: Message):
 
     key_preview = GMGN_API_KEY[:15] + "..." if GMGN_API_KEY else "NOT SET"
     lines.append(f"Key: {key_preview}")
-    lines.append(f"OpenAPI: {GMGN_HOST}")
 
-    # Test 1: Direct OpenAPI call with YOUR key
+    # Test 1: gmgn-cli available?
     try:
-        ts = str(int(_time.time()))
-        cid = str(_uuid.uuid4())
-        url = f"{GMGN_HOST}/v1/market/rank"
-        params = {"chain": "sol", "interval": "1h", "limit": "2",
-                  "timestamp": ts, "client_id": cid}
-        hdrs = _headers()
-        lines.append(f"Headers: {list(hdrs.keys())}")
-
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as s:
-            async with s.get(url, headers=hdrs, params=params) as resp:
-                body = await resp.text()
-                lines.append(f"OpenAPI trending: HTTP {resp.status}")
-                lines.append(f"  Body: {body[:200]}")
+        raw = await _run_cli("--version", timeout=10)
+        lines.append(f"gmgn-cli: {'✅ installed' if raw is not None else '❌ not found'}")
     except Exception as exc:
-        lines.append(f"OpenAPI: ERROR {exc}")
+        lines.append(f"gmgn-cli: ❌ {exc}")
 
-    # Test 2: Public endpoint (Cloudflare — likely 403 from Railway)
+    # Test 2: Trending via CLI
     try:
-        pub_url = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/1h?limit=2"
-        pub_h = {"User-Agent": "Mozilla/5.0", "Referer": "https://gmgn.ai/",
-                 "Accept": "application/json"}
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as s:
-            async with s.get(pub_url, headers=pub_h) as resp:
-                lines.append(f"Public: HTTP {resp.status} {'CF block' if resp.status == 403 else 'OK'}")
+        tokens = await gmgn_trending(interval="1h", limit=3)
+        lines.append(f"Trending: {'✅' if tokens else '❌'} {len(tokens)} tokens")
+        if tokens:
+            t = tokens[0]
+            lines.append(f"  #1: {t.get('symbol')} MC=${t.get('market_cap',0):,.0f}")
     except Exception as exc:
-        lines.append(f"Public: ERROR {exc}")
+        lines.append(f"Trending: ❌ {exc}")
 
-    # Test 3: Full _fetch wrapper
-    try:
-        data = await _fetch("/v1/market/rank", {"chain": "sol", "interval": "1h", "limit": 2})
-        if data:
-            rank = (data.get("data") or {}).get("rank") or []
-            lines.append(f"_fetch: ✅ {len(rank)} tokens")
-            if rank:
-                lines.append(f"  #1: {rank[0].get('symbol')}")
-        else:
-            lines.append("_fetch: ❌ None")
-    except Exception as exc:
-        lines.append(f"_fetch: ❌ {exc}")
-
-    # Test 4: Smart money
+    # Test 3: Smart money trades
     try:
         trades = await gmgn_smart_money_trades(limit=3)
-        lines.append(f"Smart trades: {len(trades)}")
+        lines.append(f"Smart trades: {'✅' if trades else '❌'} {len(trades)}")
+        if trades:
+            t = trades[0]
+            sym = (t.get("base_token") or {}).get("symbol") or "?"
+            lines.append(f"  Last: {t.get('side','?').upper()} ${sym}")
     except Exception as exc:
         lines.append(f"Smart trades: ❌ {exc}")
 
     # Test 4: Token info
     try:
-        from bot.agents.gmgn_agent import gmgn_token_info
-        info = await gmgn_token_info("So11111111111111111111111111111111111111112")
+        info = await gmgn_token_info("EgiJdQ8dbQHWu1uKS6cQBPaF2sK3a7WFpkjHEgdDpump")
         if info:
-            price = info.get("price") or info.get("price_usd") or "?"
-            lines.append(f"Token info: price={price}")
+            lines.append(f"Token info: ✅ {info.get('symbol','?')} ${info.get('price',0)}")
         else:
-            lines.append("Token info: no data (CF blocked)")
+            lines.append("Token info: ❌ no data")
     except Exception as exc:
-        lines.append(f"Token info: {exc}")
+        lines.append(f"Token info: ❌ {exc}")
 
     # Test 5: Poll and save
     try:
