@@ -386,25 +386,52 @@ async def _track_smart_money_trades() -> int:
         side = trade.get("side")
         if not mint or side != "buy":
             continue
-        if await token_exists(mint):
-            continue
 
         symbol = (trade.get("base_token") or {}).get("symbol") or "?"
         price = float(trade.get("price_usd") or 0) or None
         amount = float(trade.get("amount_usd") or 0) or 0
 
-        if amount >= 100:
-            await save_token(
-                mint=mint, name=symbol, symbol=symbol,
-                price_usd=price, market_cap=None,
-                liquidity_usd=None, volume_24h=None,
-                source="gmgn_smart",
-            )
-            new_signals += 1
-            app_state.harvester_gmgn_today += 1
+        if amount < 100:
+            continue
+
+        # Upsert Token.gmgn_smart_money = True so scanner candidates can match
+        # the smart_money_gmgn pattern_type at learning time, whether or not
+        # this is a brand-new token or one we've already seen.
+        if await token_exists(mint):
+            try:
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(select(Token).where(Token.mint == mint))
+                    tok = result.scalar_one_or_none()
+                    if tok:
+                        tok.gmgn_smart_money = True
+                        from datetime import datetime
+                        tok.last_updated_at = datetime.utcnow()
+                        await session.commit()
+            except Exception:
+                pass
+            continue
+
+        await save_token(
+            mint=mint, name=symbol, symbol=symbol,
+            price_usd=price, market_cap=None,
+            liquidity_usd=None, volume_24h=None,
+            source="gmgn_smart",
+        )
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(select(Token).where(Token.mint == mint))
+                tok = result.scalar_one_or_none()
+                if tok:
+                    tok.gmgn_smart_money = True
+                    await session.commit()
+        except Exception:
+            pass
+
+        new_signals += 1
+        app_state.harvester_gmgn_today += 1
 
     if new_signals:
-        logger.info("GMGN smart money: %d new tokens", new_signals)
+        logger.info("GMGN smart money: %d new tokens flagged", new_signals)
     return new_signals
 
 

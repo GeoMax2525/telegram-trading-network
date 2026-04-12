@@ -30,6 +30,7 @@ import aiohttp
 
 from bot import state
 from bot.config import CALLER_GROUP_ID
+from bot.agents.trade_profiles import ALL_PATTERN_TYPES as _ALL_PATTERN_TYPES
 from database.models import (
     log_agent_run,
     get_current_weights,
@@ -113,13 +114,9 @@ SCORE_FIELDS = {
     "market":      "market_score",
 }
 
-# Full set of pattern_types Agent 6 learns per — must match
-# bot.agents.trade_profiles.ALL_PATTERN_TYPES
-PATTERN_TYPES = [
-    "new_launch", "insider_wallet", "volume_spike",
-    "low_mc", "mid_mc", "high_mc",
-    "high_chart", "high_caller",
-]
+# Full set of pattern_types Agent 6 learns per. Re-exported from
+# trade_profiles so there's exactly one place to edit when adding more.
+PATTERN_TYPES = _ALL_PATTERN_TYPES
 MIN_SAMPLE_FOR_LEARNING = 5   # was 10 — lowered for faster warm-up
 DEFAULT_TP_X = 3.0
 DEFAULT_SL_PCT = 30.0

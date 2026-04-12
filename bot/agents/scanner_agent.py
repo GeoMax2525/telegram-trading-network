@@ -51,12 +51,15 @@ from database.models import (
     has_open_paper_trade,
     get_params,
     compute_paper_balance,
+    AsyncSessionLocal,
+    select,
+    Token,
 )
 
 logger = logging.getLogger(__name__)
 
 PROFILES_URL    = "https://api.dexscreener.com/token-profiles/latest/v1"
-RUGCHECK_URL    = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
+RUGCHECK_URL    = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 HELIUS_ENHANCED = "https://api.helius.xyz/v0/transactions"
 
 POLL_INTERVAL   = 15     # seconds (chaos mode: was 30)
@@ -98,6 +101,92 @@ async def _fetch_rugcheck(mint: str) -> dict | None:
     except Exception as exc:
         logger.debug("Scanner rugcheck failed for %s: %s", mint[:12], exc)
         return None
+
+
+def _extract_rugcheck_safety(rc: dict | None) -> dict:
+    """
+    Pull the 4 safety signals used by Agent 6 pattern matching out of the
+    rugcheck /report response. Every field is defensively None if we
+    can't find it — matchers treat None as a non-match (no false positives).
+
+    Expected (best-effort) schema from rugcheck.xyz /v1/tokens/{mint}/report:
+      - markets[].lp.lpLockedPct    → LP burn ratio (0–100)
+      - creator (address) + topHolders[].address + topHolders[].pct
+                                    → dev wallet % of supply
+      - totalHolders                 → holder count
+      - topHolders[].pct             → top-10 concentration (sum of first 10)
+    """
+    if not isinstance(rc, dict):
+        return {
+            "lp_burned": None, "dev_wallet_pct": None,
+            "holder_count": None, "top_10_concentration": None,
+        }
+
+    # LP burn — any market with >= 99% LP locked counts as "burned"
+    lp_burned = None
+    markets = rc.get("markets")
+    if isinstance(markets, list) and markets:
+        try:
+            lp_pcts = []
+            for m in markets:
+                if not isinstance(m, dict):
+                    continue
+                lp_obj = m.get("lp") or {}
+                pct = lp_obj.get("lpLockedPct")
+                if pct is None:
+                    continue
+                lp_pcts.append(float(pct))
+            if lp_pcts:
+                lp_burned = max(lp_pcts) >= 99.0
+        except Exception:
+            lp_burned = None
+
+    # Holder count (total wallets holding the token)
+    holder_count = None
+    tc = rc.get("totalHolders")
+    if isinstance(tc, (int, float)):
+        holder_count = int(tc)
+
+    # Top 10 concentration — sum of top 10 holder percentages
+    top_10_concentration = None
+    top_holders = rc.get("topHolders")
+    if isinstance(top_holders, list) and top_holders:
+        try:
+            pcts = []
+            for h in top_holders[:10]:
+                if isinstance(h, dict) and "pct" in h:
+                    pcts.append(float(h["pct"]))
+            if pcts:
+                # Rugcheck returns percentage as 0–100 in newer API versions
+                total = sum(pcts)
+                # Normalize 0–1 → 0–100 if we get a fractional value
+                if total <= 1.0:
+                    total = total * 100
+                top_10_concentration = round(total, 2)
+        except Exception:
+            top_10_concentration = None
+
+    # Dev wallet % — find creator address in topHolders
+    dev_wallet_pct = None
+    creator = rc.get("creator") or rc.get("creatorAddress")
+    if creator and isinstance(top_holders, list):
+        try:
+            for h in top_holders:
+                if isinstance(h, dict) and h.get("address") == creator:
+                    pct = float(h.get("pct") or 0)
+                    if pct <= 1.0:
+                        pct = pct * 100
+                    dev_wallet_pct = round(pct, 2)
+                    break
+        except Exception:
+            dev_wallet_pct = None
+
+    return {
+        "lp_burned": lp_burned,
+        "dev_wallet_pct": dev_wallet_pct,
+        "holder_count": holder_count,
+        "top_10_concentration": top_10_concentration,
+    }
 
 
 def _passes_rug_filter(rc_data: dict | None, mcap: float, liquidity: float) -> bool:
@@ -303,20 +392,20 @@ async def _parse_transactions(sigs: list[str]) -> list[dict]:
 async def _source2_insider_wallets() -> list[dict]:
     """
     Checks recent buys by Tier 1/2 wallets via Helius.
-    Returns list of {mint, source, insider_count}.
+    Returns list of {mint, source, insider_count, insider_tier_1_count, insider_tier_2_count}.
     """
     wallets = await get_tier_wallets(max_tier=2)
     if not wallets:
         return []
 
     since_ts = int(time.time()) - INSIDER_WINDOW
-    mint_counts: dict[str, int] = {}
+    # mint -> {1: count, 2: count}
+    mint_tier_counts: dict[str, dict[int, int]] = {}
 
-    # Check up to 15 wallets
-    async def _check_wallet(wallet_addr: str) -> list[str]:
+    async def _check_wallet(wallet_addr: str, wallet_tier: int) -> tuple[int, list[str]]:
         sigs = await _get_wallet_sigs(wallet_addr, since_ts)
         if not sigs:
-            return []
+            return wallet_tier, []
         parsed = await _parse_transactions(sigs)
         found_mints = []
         for tx in parsed:
@@ -325,21 +414,31 @@ async def _source2_insider_wallets() -> list[dict]:
                     mint = transfer.get("mint")
                     if mint:
                         found_mints.append(mint)
-        return found_mints
+        return wallet_tier, found_mints
 
-    tasks = [_check_wallet(w.address) for w in wallets[:15]]
+    tasks = [_check_wallet(w.address, int(w.tier or 2)) for w in wallets[:15]]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    for mints in results:
-        if isinstance(mints, list):
-            for m in mints:
-                mint_counts[m] = mint_counts.get(m, 0) + 1
+    for res in results:
+        if not isinstance(res, tuple):
+            continue
+        tier, mints = res
+        for m in mints:
+            bucket = mint_tier_counts.setdefault(m, {1: 0, 2: 0})
+            bucket[tier] = bucket.get(tier, 0) + 1
 
     candidates = []
-    for mint, count in mint_counts.items():
-        candidates.append({"mint": mint, "source": "insider_wallet", "insider_count": count})
+    for mint, tc in mint_tier_counts.items():
+        t1 = tc.get(1, 0)
+        t2 = tc.get(2, 0)
+        candidates.append({
+            "mint": mint,
+            "source": "insider_wallet",
+            "insider_count": t1 + t2,
+            "insider_tier_1_count": t1,
+            "insider_tier_2_count": t2,
+        })
 
-    # Sort by most insiders first
     candidates.sort(key=lambda x: x["insider_count"], reverse=True)
     return candidates[:10]
 
@@ -440,14 +539,17 @@ async def _evaluate_candidate(
 
     is_paper = state.trade_mode == "paper"
 
-    if not mcap or not liquidity:
-        pair = await fetch_token_data(mint)
-        if pair is None:
-            logger.info("Scanner REJECTED %s (%s): DexScreener returned no data", name, mint[:12])
-            return None
+    # Always fetch pair so age_minutes + volume_m5/h1 are available for
+    # every candidate regardless of source. pair = None falls back to
+    # raw-dict values below.
+    pair = await fetch_token_data(mint)
+    if pair is None and (not mcap or not liquidity):
+        logger.info("Scanner REJECTED %s (%s): DexScreener returned no data", name, mint[:12])
+        return None
+    if pair is not None:
         metrics   = parse_token_metrics(pair)
-        mcap      = metrics.get("market_cap",    0) or 0
-        liquidity = metrics.get("liquidity_usd", 0) or 0
+        mcap      = mcap      or metrics.get("market_cap",    0) or 0
+        liquidity = liquidity or metrics.get("liquidity_usd", 0) or 0
         name      = metrics.get("name",   name)
         symbol    = metrics.get("symbol", symbol)
 
@@ -506,6 +608,42 @@ async def _evaluate_candidate(
 
     rc_score = (rc_data or {}).get("score")
     rc_norm = (rc_data or {}).get("score_normalised")
+    safety = _extract_rugcheck_safety(rc_data)
+
+    # Age in minutes from DexScreener pairCreatedAt (ms epoch)
+    age_minutes: float | None = None
+    if pair is not None:
+        created_ms = pair.get("pairCreatedAt")
+        if isinstance(created_ms, (int, float)) and created_ms > 0:
+            now_ms = datetime.utcnow().timestamp() * 1000
+            age_minutes = max(0.0, (now_ms - float(created_ms)) / 60_000.0)
+
+    # Volume buckets — universalize across all sources so accelerating_volume
+    # matcher can see them. raw dict takes precedence (source 3 populates
+    # these already); fall back to pair data.
+    volume_m5 = raw.get("volume_m5")
+    volume_h1 = raw.get("volume_h1")
+    if pair is not None:
+        vol = pair.get("volume") or {}
+        if volume_m5 is None:
+            volume_m5 = vol.get("m5") or 0.0
+        if volume_h1 is None:
+            volume_h1 = vol.get("h1") or 0.0
+
+    # GMGN flags from the Token table (set by gmgn_agent background tasks)
+    gmgn_trending = False
+    gmgn_smart_money = False
+    try:
+        async with AsyncSessionLocal() as session:
+            tok_row = (await session.execute(
+                select(Token).where(Token.mint == mint)
+            )).scalar_one_or_none()
+            if tok_row is not None:
+                gmgn_trending = bool(tok_row.gmgn_trending)
+                gmgn_smart_money = bool(getattr(tok_row, "gmgn_smart_money", False))
+    except Exception as exc:
+        logger.debug("Scanner: Token flag lookup failed for %s: %s", mint[:12], exc)
+
     return {
         "mint":                  mint,
         "name":                  name,
@@ -519,6 +657,18 @@ async def _evaluate_candidate(
         "rugcheck_normalised":   rc_norm,
         "found_at":              datetime.utcnow().isoformat(),
         "insider_count":         raw.get("insider_count", 0),
+        # New pattern-matcher inputs
+        "age_minutes":           age_minutes,
+        "volume_m5":             volume_m5,
+        "volume_h1":             volume_h1,
+        "insider_tier_1_count":  raw.get("insider_tier_1_count", 0),
+        "insider_tier_2_count":  raw.get("insider_tier_2_count", 0),
+        "gmgn_trending":         gmgn_trending,
+        "gmgn_smart_money":      gmgn_smart_money,
+        "lp_burned":             safety["lp_burned"],
+        "dev_wallet_pct":        safety["dev_wallet_pct"],
+        "holder_count":          safety["holder_count"],
+        "top_10_concentration":  safety["top_10_concentration"],
     }
 
 

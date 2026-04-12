@@ -73,6 +73,7 @@ class Token(Base):
     reply_count     = Column(Integer,     nullable=True)   # pump.fun social activity
     gmgn_trending   = Column(Boolean,     nullable=True)   # trending on GMGN
     gmgn_rank       = Column(Integer,     nullable=True)   # GMGN rank position
+    gmgn_smart_money = Column(Boolean,    nullable=True)   # flagged by GMGN smart money feed
     first_seen_at   = Column(DateTime,    default=datetime.utcnow, nullable=False)
     last_updated_at = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
@@ -400,6 +401,7 @@ _NEW_TOKEN_COLS = [
     ("launch_mc",       "REAL"),
     ("gmgn_trending",   "BOOLEAN"),
     ("gmgn_rank",       "INTEGER"),
+    ("gmgn_smart_money", "BOOLEAN"),
 ]
 
 _NEW_WALLET_COLS = [
