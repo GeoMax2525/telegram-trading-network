@@ -1,7 +1,11 @@
 """
 mc_repair.py — Background MC repair task
 
-Processes tokens with no market_cap in batches every 10 minutes.
+Processes tokens with no market_cap in batches every 5 minutes.
+Newest tokens are processed first (under-7-day tokens get priority), and
+tokens older than 30 days are skipped entirely at the query level since
+they are almost certainly dead and not worth spending API calls on.
+
 For each token:
   1. Try DexScreener for current MC
   2. If DexScreener fails, try GMGN (works for bonding curve tokens)
@@ -21,9 +25,10 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 200
-POLL_INTERVAL = 600  # 10 minutes
-STARTUP_DELAY = 180  # 3 minutes after boot
+BATCH_SIZE = 2000
+POLL_INTERVAL = 300  # 5 minutes
+STARTUP_DELAY = 60   # 1 minute after boot
+MAX_AGE_DAYS = 30    # skip anything older — likely dead
 
 
 async def _get_mc(mint: str) -> float:
@@ -59,8 +64,8 @@ async def _get_mc(mint: str) -> float:
 
 
 async def _repair_batch() -> dict:
-    """Process one batch of tokens with no MC."""
-    tokens = await get_tokens_no_mc(limit=BATCH_SIZE)
+    """Process one batch of tokens with no MC — newest first, <=30 days old."""
+    tokens = await get_tokens_no_mc(limit=BATCH_SIZE, max_age_days=MAX_AGE_DAYS)
     if not tokens:
         return {"processed": 0}
 
@@ -88,25 +93,28 @@ async def _repair_batch() -> dict:
 
 
 async def mc_repair_loop() -> None:
-    """Background loop: repair MC for tokens with no market cap."""
+    """Background loop: repair MC for tokens with no market cap.
+
+    Runs forever (does not exit when the backlog empties) so new tokens
+    that come in without MC get picked up on the next cycle.
+    """
     await asyncio.sleep(STARTUP_DELAY)
 
-    remaining = await count_tokens_no_mc()
-    if remaining == 0:
-        logger.info("MC repair: no tokens need repair")
-        return
-
-    logger.info("MC repair started — %d tokens need MC data", remaining)
+    remaining = await count_tokens_no_mc(max_age_days=MAX_AGE_DAYS)
+    logger.info(
+        "MC repair started — batch=%d interval=%ds max_age=%dd backlog=%d",
+        BATCH_SIZE, POLL_INTERVAL, MAX_AGE_DAYS, remaining,
+    )
     state.backfill_progress = f"MC repair: {remaining} tokens remaining"
 
     total_processed = 0
 
     while True:
-        remaining = await count_tokens_no_mc()
+        remaining = await count_tokens_no_mc(max_age_days=MAX_AGE_DAYS)
         if remaining == 0:
-            state.backfill_progress = f"MC repair complete: {total_processed} processed"
-            logger.info("MC repair complete: %d total processed", total_processed)
-            break
+            state.backfill_progress = f"MC repair idle: {total_processed} processed total"
+            await asyncio.sleep(POLL_INTERVAL)
+            continue
 
         stats = await _repair_batch()
         total_processed += stats["processed"]

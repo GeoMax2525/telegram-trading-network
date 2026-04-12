@@ -1071,22 +1071,35 @@ async def get_tokens_batch(offset: int, batch_size: int = 200) -> list["Token"]:
         return list(result.scalars().all())
 
 
-async def get_tokens_no_mc(limit: int = 500) -> list["Token"]:
-    """Returns tokens with no market_cap, oldest first."""
+async def get_tokens_no_mc(
+    limit: int = 2000,
+    max_age_days: int = 30,
+) -> list["Token"]:
+    """
+    Returns tokens with no market_cap, newest first (so under-7-day tokens
+    get processed first), and older than `max_age_days` excluded entirely
+    (likely dead — not worth spending API calls on).
+    """
+    cutoff = datetime.utcnow() - timedelta(days=max_age_days)
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(Token).where(
-                (Token.market_cap.is_(None)) | (Token.market_cap == 0)
-            ).order_by(Token.first_seen_at.asc()).limit(limit)
+                (Token.market_cap.is_(None)) | (Token.market_cap == 0),
+                Token.first_seen_at >= cutoff,
+                Token.source != "dead",
+            ).order_by(Token.first_seen_at.desc()).limit(limit)
         )
         return list(result.scalars().all())
 
 
-async def count_tokens_no_mc() -> int:
+async def count_tokens_no_mc(max_age_days: int = 30) -> int:
+    cutoff = datetime.utcnow() - timedelta(days=max_age_days)
     async with AsyncSessionLocal() as session:
         return (await session.execute(
             select(func.count(Token.mint)).where(
-                (Token.market_cap.is_(None)) | (Token.market_cap == 0)
+                (Token.market_cap.is_(None)) | (Token.market_cap == 0),
+                Token.first_seen_at >= cutoff,
+                Token.source != "dead",
             )
         )).scalar() or 0
 
@@ -2029,25 +2042,31 @@ async def get_paper_trade_stats() -> dict:
     }
 
 
-async def compute_paper_balance(starting: float = 10.0) -> float:
+async def compute_paper_balance(starting: float = 20.0) -> float:
     """
     Compute true paper balance from DB:
-    starting - sum(open positions) + sum(closed PnL)
+    starting - sum(open positions) + sum(closed PnL) + paper_balance_offset
+
+    The offset is applied here (single source of truth) so every caller
+    sees the same number without manually re-adding it.
     """
     async with AsyncSessionLocal() as session:
-        # SOL locked in open trades
         open_locked = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_sol_spent), 0.0))
             .where(PaperTrade.status == "open")
         )).scalar() or 0.0
 
-        # Total PnL from closed trades
         closed_pnl = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0))
             .where(PaperTrade.status == "closed", PaperTrade.paper_pnl_sol.is_not(None))
         )).scalar() or 0.0
 
-    return round(starting - float(open_locked) + float(closed_pnl), 4)
+        offset_row = (await session.execute(
+            select(AgentParam.param_value).where(AgentParam.param_name == "paper_balance_offset")
+        )).scalar_one_or_none()
+        offset = float(offset_row) if offset_row is not None else 0.0
+
+    return round(starting - float(open_locked) + float(closed_pnl) + offset, 4)
 
 
 # ── Agent Params helpers ─────────────────────────────────────────────────────
@@ -2086,8 +2105,9 @@ AGENT_PARAM_DEFAULTS = {
     # Trade mode: 0=off, 1=paper, 2=live
     "trade_mode": 1,  # default to paper
     # Paper balance
-    "paper_starting_balance": 10.0,
+    "paper_starting_balance": 20.0,
     "paper_balance_offset": 0.0,
+    "paper_reset_v20_done": 0.0,   # one-shot migration flag
 }
 
 
@@ -2103,6 +2123,73 @@ async def init_agent_params() -> int:
                 session.add(AgentParam(param_name=name, param_value=float(default)))
                 added += 1
         await session.commit()
+
+    # ── One-shot migration: reset paper balance to 20 SOL ────────────────
+    # Runs exactly once per DB (gated by paper_reset_v20_done flag).
+    # Force-sets paper_starting_balance=20 and writes paper_balance_offset
+    # so compute_paper_balance() returns exactly 20 SOL right after boot,
+    # regardless of open trades or historical PnL.
+    async with AsyncSessionLocal() as session:
+        flag_row = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "paper_reset_v20_done")
+        )).scalar_one_or_none()
+        already_done = flag_row is not None and flag_row.param_value >= 1.0
+
+    if not already_done:
+        async with AsyncSessionLocal() as session:
+            # 1. Force starting balance to 20
+            row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "paper_starting_balance")
+            )).scalar_one_or_none()
+            if row is None:
+                session.add(AgentParam(param_name="paper_starting_balance", param_value=20.0))
+            else:
+                row.param_value = 20.0
+                row.updated_at = datetime.utcnow()
+
+            # 2. Zero the offset first so compute_paper_balance reflects pure DB state
+            off_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "paper_balance_offset")
+            )).scalar_one_or_none()
+            if off_row is None:
+                session.add(AgentParam(param_name="paper_balance_offset", param_value=0.0))
+            else:
+                off_row.param_value = 0.0
+                off_row.updated_at = datetime.utcnow()
+
+            await session.commit()
+
+        # 3. Compute current raw balance with offset=0 and write the offset
+        #    that brings it back to exactly 20 SOL
+        raw = await compute_paper_balance(20.0)
+        needed_offset = round(20.0 - raw, 4)
+
+        async with AsyncSessionLocal() as session:
+            off_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "paper_balance_offset")
+            )).scalar_one_or_none()
+            off_row.param_value = needed_offset
+            off_row.updated_at = datetime.utcnow()
+
+            # 4. Flip the flag so this block never runs again
+            flag_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "paper_reset_v20_done")
+            )).scalar_one_or_none()
+            if flag_row is None:
+                session.add(AgentParam(param_name="paper_reset_v20_done", param_value=1.0))
+            else:
+                flag_row.param_value = 1.0
+                flag_row.updated_at = datetime.utcnow()
+
+            await session.commit()
+
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "Paper balance reset to 20 SOL (offset=%+.4f, raw_was=%.4f)",
+            needed_offset, raw,
+        )
+        added += 1
+
     return added
 
 

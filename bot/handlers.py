@@ -421,14 +421,9 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     # Chaos mode section — only in paper mode
     if state.trade_mode == "paper":
-        # Compute balance from DB + reset offset
-        raw_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-        try:
-            from database.models import get_param
-            offset = await get_param("paper_balance_offset")
-        except Exception:
-            offset = 0.0
-        real_balance = raw_balance + offset
+        # compute_paper_balance() now applies paper_balance_offset internally,
+        # so this is the single source of truth for effective balance.
+        real_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
         state.paper_balance = real_balance
         pnl_val = real_balance - state.PAPER_STARTING_BALANCE
         pnl_pct = ((real_balance / state.PAPER_STARTING_BALANCE) - 1) * 100 if state.PAPER_STARTING_BALANCE > 0 else 0
@@ -1434,11 +1429,13 @@ async def cmd_resetbalance(message: Message):
     for pt in open_trades:
         await close_paper_trade(pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple)
 
-    # Store reset offset so compute_paper_balance ignores past losses
-    # balance_offset = how much to add to bring balance back to 10
+    # Store a new offset so effective balance == PAPER_STARTING_BALANCE.
+    # compute_paper_balance() already applies the current offset, so the new
+    # offset we need = current_offset + (starting - current_effective).
     current = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-    offset = state.PAPER_STARTING_BALANCE - current
-    await set_param("paper_balance_offset", offset, "Manual reset via /resetbalance")
+    current_offset = await get_param("paper_balance_offset")
+    new_offset = round(current_offset + (state.PAPER_STARTING_BALANCE - current), 4)
+    await set_param("paper_balance_offset", new_offset, "Manual reset via /resetbalance")
 
     state.paper_balance = state.PAPER_STARTING_BALANCE
     state.paper_resets += 1

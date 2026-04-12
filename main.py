@@ -151,7 +151,7 @@ async def main() -> None:
     asyncio.create_task(learning_loop(bot))
     asyncio.create_task(paper_monitor_loop(bot))
     asyncio.create_task(gmgn_agent_loop())
-    # mc_repair_loop disabled — harvester now only tracks graduated tokens with MC
+    asyncio.create_task(mc_repair_loop())
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     try:

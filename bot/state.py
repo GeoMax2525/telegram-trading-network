@@ -38,11 +38,11 @@ harvester_poll_tokens_today: int             = 0
 harvester_gmgn_today:        int             = 0
 
 # ── Paper trading virtual balance ────────────────────────────────────────────
-PAPER_STARTING_BALANCE:      float           = 10.0
-paper_balance:               float           = 10.0   # virtual SOL
+PAPER_STARTING_BALANCE:      float           = 20.0
+paper_balance:               float           = 20.0   # virtual SOL
 paper_trades_today:          int             = 0
 data_points_today:           int             = 0       # total candidates scored
-paper_resets:                int             = 0       # how many times balance reset to 10
+paper_resets:                int             = 0       # how many times balance reset to starting
 
 # ── Backfill progress ────────────────────────────────────────────────────────
 backfill_running:            bool            = False

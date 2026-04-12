@@ -14,6 +14,8 @@ import asyncio
 import json
 import logging
 
+import aiohttp
+
 from bot import state as app_state
 from bot.agents.wallet_analyst import _score_wallet
 from database.models import (
@@ -84,6 +86,56 @@ async def gmgn_smart_money_trades(limit: int = 50) -> list:
     if isinstance(data, dict):
         return data.get("list") or (data.get("data") or {}).get("list") or []
     return []
+
+
+async def gmgn_kol_trades(limit: int = 100) -> list:
+    """Method B fallback — `gmgn-cli track kol --raw`."""
+    data = await _run_cli("track", "kol", "--chain", "sol", "--limit", str(limit))
+    if isinstance(data, dict):
+        return data.get("list") or (data.get("data") or {}).get("list") or []
+    return []
+
+
+async def _http_get_json(url: str, timeout: int = 15) -> dict | None:
+    """HTTP fallback for methods C and D. May be Cloudflare-blocked from Railway."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://gmgn.ai/",
+    }
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                if resp.status != 200:
+                    logger.debug("GMGN HTTP %d for %s", resp.status, url)
+                    return None
+                return await resp.json(content_type=None)
+    except Exception as exc:
+        logger.debug("GMGN HTTP error (%s): %s", url, exc)
+        return None
+
+
+async def gmgn_http_smartmoney_wallets(limit: int = 100) -> list:
+    """Method C fallback — direct openapi smartmoney wallet list."""
+    url = f"https://openapi.gmgn.ai/defi/quotation/v1/smartmoney/sol/wallets?period=7d&limit={limit}"
+    data = await _http_get_json(url)
+    if not isinstance(data, dict):
+        return []
+    d = data.get("data") or {}
+    # Shape variants observed across versions
+    return d.get("wallets") or d.get("list") or d.get("rank") or []
+
+
+async def gmgn_http_rank_wallets(limit: int = 100) -> list:
+    """Method D fallback — direct openapi rank wallet list."""
+    url = f"https://openapi.gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d?limit={limit}"
+    data = await _http_get_json(url)
+    if not isinstance(data, dict):
+        return []
+    d = data.get("data") or {}
+    return d.get("rank") or d.get("wallets") or d.get("list") or []
 
 
 async def gmgn_token_info(mint: str) -> dict | None:
@@ -184,28 +236,76 @@ async def _poll_gmgn_tokens() -> int:
 
 # ── Smart wallet import ──────────────────────────────────────────────────────
 
+def _extract_buy_makers(trades: list) -> set[str]:
+    """Pull unique maker addresses from buy-side trade rows."""
+    out: set[str] = set()
+    for t in trades or []:
+        if not isinstance(t, dict):
+            continue
+        maker = t.get("maker") or t.get("wallet_address") or t.get("address")
+        side = t.get("side")
+        if maker and (side is None or side == "buy"):
+            out.add(maker)
+    return out
+
+
+def _extract_wallet_addrs(wallets: list) -> set[str]:
+    """Pull wallet addresses from a wallet-ranking list (no side filter)."""
+    out: set[str] = set()
+    for w in wallets or []:
+        if not isinstance(w, dict):
+            continue
+        addr = w.get("wallet_address") or w.get("address") or w.get("maker")
+        if addr:
+            out.add(addr)
+    return out
+
+
+async def _fetch_smart_wallets_fallback() -> tuple[set[str], str]:
+    """
+    Try every known path for discovering smart-money wallets. Returns
+    (addresses, method_label). First method that yields a non-empty set wins.
+    """
+    methods = [
+        ("A: cli track smartmoney",
+         lambda: gmgn_smart_money_trades(limit=100),
+         _extract_buy_makers),
+        ("B: cli track kol",
+         lambda: gmgn_kol_trades(limit=100),
+         _extract_buy_makers),
+        ("C: http smartmoney/sol/wallets",
+         lambda: gmgn_http_smartmoney_wallets(limit=100),
+         _extract_wallet_addrs),
+        ("D: http rank/sol/wallets/7d",
+         lambda: gmgn_http_rank_wallets(limit=100),
+         _extract_wallet_addrs),
+    ]
+    for label, fetch, extract in methods:
+        try:
+            raw = await fetch()
+        except Exception as exc:
+            logger.debug("GMGN wallets fallback %s raised: %s", label, exc)
+            continue
+        addrs = extract(raw)
+        logger.info("GMGN wallets fallback %s: %d rows, %d unique addresses",
+                    label, len(raw) if raw else 0, len(addrs))
+        if addrs:
+            return addrs, label
+    return set(), "none"
+
+
 async def _import_gmgn_wallets() -> int:
     """
-    Import smart money wallets:
-    1. Get recent smart money BUY trades → extract unique makers
-    2. Fetch portfolio stats for each maker
-    3. Score and save to Wallets table
+    Import smart money wallets. Tries 4 fallback methods for address discovery,
+    then fetches portfolio stats, scores, and saves each surviving wallet.
     """
-    # Step 1: Get smart money buy trades
-    trades = await gmgn_smart_money_trades(limit=100)
-    if not trades:
-        logger.info("GMGN wallets: no smart money trades returned")
+    wallet_addrs, method = await _fetch_smart_wallets_fallback()
+    if not wallet_addrs:
+        logger.info("GMGN wallets: all 4 fallback methods returned empty — skipping cycle")
         return 0
 
-    # Extract unique wallet addresses from buy trades
-    wallet_addrs = set()
-    for t in trades:
-        maker = t.get("maker")
-        side = t.get("side")
-        if maker and side == "buy":
-            wallet_addrs.add(maker)
-
-    logger.info("GMGN wallets: %d unique buy makers from %d trades", len(wallet_addrs), len(trades))
+    logger.info("GMGN wallets: using method [%s] — %d candidate addresses",
+                method, len(wallet_addrs))
 
     # Step 2: Fetch stats for each wallet
     imported = 0
@@ -261,8 +361,14 @@ async def _import_gmgn_wallets() -> int:
         await asyncio.sleep(1.5)  # rate limit between portfolio stats calls
 
     if imported:
-        logger.info("GMGN wallets: imported %d from %d makers", imported, len(wallet_addrs))
-    await log_agent_run("gmgn_wallets", tokens_found=len(wallet_addrs), tokens_saved=imported)
+        logger.info("GMGN wallets: imported %d from %d addresses via [%s]",
+                    imported, len(wallet_addrs), method)
+    await log_agent_run(
+        "gmgn_wallets",
+        tokens_found=len(wallet_addrs),
+        tokens_saved=imported,
+        notes=f"method={method}",
+    )
 
     return imported
 
