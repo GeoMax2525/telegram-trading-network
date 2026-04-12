@@ -1421,6 +1421,33 @@ async def cmd_dbcheck(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
+# ── /resetbalance — Reset paper trading virtual balance ───────────────────────
+
+@router.message(Command("resetbalance"))
+async def cmd_resetbalance(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    # Close all open paper trades
+    from database.models import get_open_paper_trades, close_paper_trade
+    open_trades = await get_open_paper_trades()
+    for pt in open_trades:
+        await close_paper_trade(pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple)
+
+    # Reset balance
+    state.paper_balance = state.PAPER_STARTING_BALANCE
+    state.paper_resets += 1
+    state.paper_trades_today = 0
+
+    bal = state.PAPER_STARTING_BALANCE
+    await message.reply(
+        f"✅ Paper balance reset to {bal:.0f} SOL\n"
+        f"Closed {len(open_trades)} open positions\n"
+        f"Total resets: {state.paper_resets}",
+        parse_mode=None,
+    )
+
+
 # ── /backfill — Full token backfill (all tokens, batched) ─────────────────────
 
 @router.message(Command("backfill"))
