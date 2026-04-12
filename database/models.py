@@ -227,6 +227,20 @@ class PaperTrade(Base):
     sold_too_early    = Column(Boolean,     nullable=True)  # price went 50%+ higher after close
     sold_too_late     = Column(Boolean,     nullable=True)  # SL hit but recovered within 1h
 
+    # Aliases so PaperTrade instances can be consumed by code written against Position
+    # (Agent 6 learning loop treats paper trades as first-class learning signal).
+    @property
+    def pnl_sol(self):
+        return self.paper_pnl_sol
+
+    @property
+    def amount_sol_spent(self):
+        return self.paper_sol_spent
+
+    @property
+    def is_paper(self) -> bool:
+        return True
+
 
 # ── AI Trade Params table (Agent 6 — learned TP/SL/size) ────────────────────
 
@@ -1614,32 +1628,57 @@ async def save_weights(
         return row
 
 
-async def get_closed_positions_since(since_id: int, limit: int = 200) -> list["Position"]:
-    """Returns closed positions with id > since_id, oldest first."""
+async def get_closed_positions_since(since_id: int, limit: int = 200) -> list:
+    """
+    Returns a combined list of closed PaperTrades + closed Positions, oldest first.
+    Paper trades are the primary learning substrate; real Positions are included as
+    a fallback/augmentation when they exist. `since_id` is retained for signature
+    compatibility but is ignored — the caller slices from `last_analyzed`.
+    """
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
+        paper_rows = (await session.execute(
+            select(PaperTrade)
+            .where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+            .order_by(PaperTrade.closed_at.asc())
+            .limit(limit)
+        )).scalars().all()
+
+        position_rows = (await session.execute(
             select(Position)
             .where(
                 Position.status == "closed",
                 Position.pnl_sol.is_not(None),
-                Position.id > since_id,
             )
-            .order_by(Position.id.asc())
+            .order_by(Position.closed_at.asc())
             .limit(limit)
-        )
-        return list(result.scalars().all())
+        )).scalars().all()
+
+    combined = list(paper_rows) + list(position_rows)
+    combined.sort(key=lambda t: t.closed_at or datetime.min)
+    return combined[:limit]
 
 
 async def get_total_closed_count() -> int:
-    """Returns total number of closed positions with PnL."""
+    """Returns total number of closed trades (paper + real positions with PnL)."""
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
+        paper_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0
+
+        position_count = (await session.execute(
             select(func.count(Position.id)).where(
                 Position.status == "closed",
                 Position.pnl_sol.is_not(None),
             )
-        )
-        return result.scalar() or 0
+        )).scalar() or 0
+
+        return paper_count + position_count
 
 
 async def get_candidate_by_token(token_address: str) -> "Candidate | None":

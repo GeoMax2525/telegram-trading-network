@@ -69,7 +69,7 @@ MICRO_BATCH      = 3     # micro-adjust every N trades (chaos: was 10)
 FULL_BATCH       = 5     # full review every N trades (chaos: was 50)
 MAJOR_BATCH      = 15    # major recalibration every N trades (chaos: was 100)
 POLL_INTERVAL    = 60    # check every 1 minute (chaos: was 2 min)
-STARTUP_DELAY    = 120
+STARTUP_DELAY    = 15    # lowered so heartbeat shows up fast in Railway logs
 MAX_WEIGHT_SHIFT = 0.10  # aggressive tuning (chaos: was 0.05)
 MIN_WEIGHT       = 0.02
 WEEKLY_HOUR      = 9
@@ -146,34 +146,52 @@ async def _detect_market_regime() -> str:
 
 
 async def _recent_win_rate(n: int) -> float:
-    """Win rate of the last N closed trades."""
+    """Win rate of the last N closed trades (paper trades + real positions)."""
     async with AsyncSessionLocal() as session:
-        positions = (await session.execute(
+        paper = (await session.execute(
+            select(PaperTrade)
+            .where(PaperTrade.status == "closed", PaperTrade.paper_pnl_sol.is_not(None))
+            .order_by(PaperTrade.closed_at.desc())
+            .limit(n)
+        )).scalars().all()
+        real = (await session.execute(
             select(Position)
             .where(Position.status == "closed", Position.pnl_sol.is_not(None))
             .order_by(Position.closed_at.desc())
             .limit(n)
         )).scalars().all()
 
-    if not positions:
+    combined = list(paper) + list(real)
+    combined.sort(key=lambda t: t.closed_at or datetime.min, reverse=True)
+    combined = combined[:n]
+    if not combined:
         return 0.5  # neutral if no data
-    wins = sum(1 for p in positions if p.pnl_sol and p.pnl_sol > 0)
-    return wins / len(positions)
+    wins = sum(1 for t in combined if (t.pnl_sol or 0) > 0)
+    return wins / len(combined)
 
 
 async def _consecutive_sl_count() -> int:
-    """Count consecutive SL hits from most recent trades."""
+    """Count consecutive SL hits from most recent trades (paper + real)."""
     async with AsyncSessionLocal() as session:
-        positions = (await session.execute(
+        paper = (await session.execute(
+            select(PaperTrade)
+            .where(PaperTrade.status == "closed", PaperTrade.paper_pnl_sol.is_not(None))
+            .order_by(PaperTrade.closed_at.desc())
+            .limit(20)
+        )).scalars().all()
+        real = (await session.execute(
             select(Position)
             .where(Position.status == "closed", Position.pnl_sol.is_not(None))
             .order_by(Position.closed_at.desc())
             .limit(20)
         )).scalars().all()
 
+    combined = list(paper) + list(real)
+    combined.sort(key=lambda t: t.closed_at or datetime.min, reverse=True)
+
     count = 0
-    for p in positions:
-        if p.close_reason == "sl_hit":
+    for t in combined[:20]:
+        if t.close_reason == "sl_hit":
             count += 1
         else:
             break
@@ -385,17 +403,27 @@ async def _optimize_trade_params(regime: str) -> int:
 # ── Collect scores from batch ────────────────────────────────────────────────
 
 async def _classify_batch(batch) -> tuple[list[dict], list[dict]]:
-    """Returns (winners_scores, losers_scores)."""
+    """
+    Returns (winners_scores, losers_scores).
+
+    Works for both Position and PaperTrade instances (PaperTrade exposes a
+    `pnl_sol` property alias). If a trade has no matching Candidate row
+    (common for paper trades), component scores default to 50 so the trade
+    still contributes a classification signal rather than being dropped.
+    """
     winners, losers = [], []
     for pos in batch:
         candidate = await get_candidate_by_token(pos.token_address)
-        if candidate is None:
-            continue
-        scores = {
-            SCORE_FIELDS[k]: getattr(candidate, SCORE_FIELDS[k], None) or 50.0
-            for k in COMPONENT_KEYS
-        }
-        if pos.pnl_sol and pos.pnl_sol > 0:
+        if candidate is not None:
+            scores = {
+                SCORE_FIELDS[k]: getattr(candidate, SCORE_FIELDS[k], None) or 50.0
+                for k in COMPONENT_KEYS
+            }
+        else:
+            scores = {SCORE_FIELDS[k]: 50.0 for k in COMPONENT_KEYS}
+
+        pnl = pos.pnl_sol
+        if pnl is not None and pnl > 0:
             winners.append(scores)
         else:
             losers.append(scores)
@@ -555,12 +583,15 @@ async def _auto_adjust_params(
 
 # ── Main run ─────────────────────────────────────────────────────────────────
 
-async def run_once(bot) -> bool:
+async def run_once(bot, force: bool = False) -> bool:
     """
     Tiered analysis:
       - Every 10 trades: micro-adjust weights
       - Every 50 trades: full review (weights + params + wallets)
       - Every 100 trades: major recalibration (thresholds + regime)
+
+    When `force=True` (admin /agent6force), runs one adjustment cycle on whatever
+    unanalyzed trades exist, even if below the normal micro threshold.
     """
     current_row = await get_current_weights()
     last_analyzed = current_row.trades_analyzed if current_row else 0
@@ -576,7 +607,7 @@ async def run_once(bot) -> bool:
     state.learning_loop_last_analyzed = last_analyzed
     state.learning_loop_total_closed = total_closed
 
-    if pending < MICRO_BATCH:
+    if pending < MICRO_BATCH and not force:
         return False
 
     # Determine run level
@@ -586,16 +617,24 @@ async def run_once(bot) -> bool:
     elif pending >= FULL_BATCH:
         level = "full"
         batch_size = FULL_BATCH
-    else:
+    elif pending >= MICRO_BATCH:
         level = "micro"
         batch_size = MICRO_BATCH
+    else:
+        level = "forced-micro"
+        batch_size = max(1, pending)
 
-    logger.info("Agent6: %d pending trades — running %s adjustment", pending, level)
+    logger.info("Agent6: %d pending trades — running %s adjustment (force=%s)",
+                pending, level, force)
 
     # Fetch batch
     positions = await get_closed_positions_since(0, limit=500)
     batch = positions[last_analyzed:last_analyzed + batch_size]
-    if len(batch) < MICRO_BATCH:
+    if not batch:
+        logger.info("Agent6: no unanalyzed trades in fetched window (last_analyzed=%d, fetched=%d)",
+                    last_analyzed, len(positions))
+        return False
+    if len(batch) < MICRO_BATCH and not force:
         return False
 
     # Classify wins/losses
@@ -946,6 +985,16 @@ async def learning_loop(bot) -> None:
 
     while True:
         try:
+            # Heartbeat — confirms the loop is alive in Railway logs
+            total_closed = await get_total_closed_count()
+            current_row = await get_current_weights()
+            analyzed = current_row.trades_analyzed if current_row else 0
+            pending = total_closed - analyzed
+            logger.info(
+                "Agent6 heartbeat: closed_trades=%d analyzed=%d pending=%d (micro=%d)",
+                total_closed, analyzed, pending, MICRO_BATCH,
+            )
+
             # Market regime check every cycle
             await _detect_market_regime()
 

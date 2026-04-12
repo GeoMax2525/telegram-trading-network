@@ -1811,6 +1811,60 @@ async def cmd_scan(message: Message):
     await _do_scan(message, address)
 
 
+# ── /agent6force ──────────────────────────────────────────────────────────────
+
+@router.message(Command("agent6force"))
+async def cmd_agent6force(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply("⛔ Admin only.")
+        return
+
+    from bot.agents.learning_loop import run_once as agent6_run_once
+    from database.models import get_total_closed_count, get_current_weights
+
+    total_before = await get_total_closed_count()
+    row_before = await get_current_weights()
+    analyzed_before = row_before.trades_analyzed if row_before else 0
+
+    await message.reply(
+        f"🧠 Forcing Agent 6 learning cycle…\n"
+        f"Closed trades: `{total_before}` | Already analyzed: `{analyzed_before}` | "
+        f"Pending: `{total_before - analyzed_before}`",
+        parse_mode="Markdown",
+    )
+
+    try:
+        ran = await agent6_run_once(message.bot, force=True)
+    except Exception as exc:
+        logger.exception("agent6force failed")
+        await message.reply(f"❌ Agent 6 run raised: `{exc}`", parse_mode="Markdown")
+        return
+
+    row_after = await get_current_weights()
+    analyzed_after = row_after.trades_analyzed if row_after else 0
+    weights_txt = "—"
+    if row_after:
+        weights_txt = (
+            f"fp={row_after.fingerprint_weight:.2%}  ins={row_after.insider_weight:.2%}  "
+            f"chart={row_after.chart_weight:.2%}  rug={row_after.rug_weight:.2%}  "
+            f"caller={row_after.caller_weight:.2%}  market={row_after.market_weight:.2%}"
+        )
+
+    last_change = getattr(state, "learning_loop_last_change", "—")
+    regime = getattr(state, "market_regime", "—")
+    thresholds = getattr(state, "confidence_thresholds", {})
+
+    lines = [
+        f"{'✅' if ran else 'ℹ️'} Agent 6 cycle {'completed' if ran else 'did not run (nothing to analyze)'}",
+        f"Analyzed: `{analyzed_before}` → `{analyzed_after}`",
+        f"Regime: `{regime}`",
+        f"Weights: `{weights_txt}`",
+        f"Thresholds: `{thresholds}`",
+        f"Changes: _{last_change}_",
+    ]
+    await message.reply("\n".join(lines), parse_mode="Markdown")
+
+
 # ── /addcaller ────────────────────────────────────────────────────────────────
 
 @router.message(Command("addcaller"))
