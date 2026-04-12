@@ -1465,8 +1465,14 @@ async def cmd_mccheck(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         return
 
+    try:
+        await _do_mccheck(message)
+    except Exception as exc:
+        await message.reply(f"mccheck error: {exc}", parse_mode=None)
+
+
+async def _do_mccheck(message: Message):
     from database.models import get_tokens_no_mc, count_tokens_no_mc, AsyncSessionLocal, select, func, Token
-    from datetime import datetime, timedelta
 
     status = await message.reply("Checking 5 tokens with no MC...", parse_mode=None)
 
