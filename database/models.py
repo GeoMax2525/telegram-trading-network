@@ -248,10 +248,16 @@ class AITradeParams(Base):
     __tablename__ = "ai_trade_params"
 
     id                    = Column(Integer,    primary_key=True, autoincrement=True)
-    pattern_type          = Column(String(32), nullable=False, unique=True, index=True)  # new_launch / insider_wallet / volume_spike
+    # Extended pattern_type set — see bot/agents/trade_profiles.ALL_PATTERN_TYPES
+    # Legacy: new_launch / insider_wallet / volume_spike
+    # MC buckets: low_mc / mid_mc / high_mc
+    # Signal quality: high_chart / high_caller
+    pattern_type          = Column(String(32), nullable=False, unique=True, index=True)
     optimal_tp_x          = Column(Float,      nullable=False, default=3.0)
     optimal_sl_pct        = Column(Float,      nullable=False, default=30.0)
     optimal_position_pct  = Column(Float,      nullable=False, default=10.0)   # % of wallet
+    trail_sl_trigger_pct  = Column(Float,      nullable=False, default=0.50)   # fraction above entry
+    trail_sl_enabled      = Column(Integer,    nullable=False, default=0)      # 0 or 1
     sample_size           = Column(Integer,    nullable=False, default=0)
     win_rate              = Column(Float,      nullable=False, default=0.0)
     avg_multiple          = Column(Float,      nullable=False, default=1.0)
@@ -372,11 +378,17 @@ _NEW_CANDIDATE_COLS = [
 
 _NEW_PAPER_TRADE_COLS = [
     ("mc_1h_after",      "REAL"),
+    ("mc_4h_after",      "REAL"),
     ("mc_6h_after",      "REAL"),
     ("mc_24h_after",     "REAL"),
     ("peak_after_close", "REAL"),
     ("sold_too_early",   "BOOLEAN"),
     ("sold_too_late",    "BOOLEAN"),
+]
+
+_NEW_AI_TRADE_PARAMS_COLS = [
+    ("trail_sl_trigger_pct", "REAL"),
+    ("trail_sl_enabled",     "INTEGER"),
 ]
 
 _NEW_TOKEN_COLS = [
@@ -479,6 +491,19 @@ async def init_db() -> None:
                 try:
                     await conn.execute(
                         text(f"ALTER TABLE paper_trades ADD COLUMN {col_name} {col_def}")
+                    )
+                except Exception:
+                    pass
+
+        for col_name, col_def in _NEW_AI_TRADE_PARAMS_COLS:
+            if is_postgres:
+                await conn.execute(
+                    text(f"ALTER TABLE ai_trade_params ADD COLUMN IF NOT EXISTS {col_name} {col_def}")
+                )
+            else:
+                try:
+                    await conn.execute(
+                        text(f"ALTER TABLE ai_trade_params ADD COLUMN {col_name} {col_def}")
                     )
                 except Exception:
                     pass
@@ -1783,13 +1808,21 @@ async def upsert_trade_params(
     pattern_type: str,
     optimal_tp_x: float,
     optimal_sl_pct: float,
-    optimal_position_pct: float,
-    sample_size: int,
-    win_rate: float,
-    avg_multiple: float,
-    confidence: float,
+    optimal_position_pct: float = 10.0,
+    sample_size: int = 0,
+    win_rate: float = 0.0,
+    avg_multiple: float = 1.0,
+    confidence: float = 0.0,
+    trail_sl_trigger_pct: float | None = None,
+    trail_sl_enabled: int | None = None,
 ) -> "AITradeParams":
-    """Creates or updates trade params for a pattern type."""
+    """
+    Creates or updates trade params for a pattern type.
+
+    `trail_sl_trigger_pct` and `trail_sl_enabled` are preserved on existing
+    rows when None is passed — this lets Agent 6 update tp/sl without
+    clobbering trailing-stop config that a human set via /setparam.
+    """
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AITradeParams).where(AITradeParams.pattern_type == pattern_type)
@@ -1803,6 +1836,10 @@ async def upsert_trade_params(
             row.win_rate = win_rate
             row.avg_multiple = avg_multiple
             row.confidence = confidence
+            if trail_sl_trigger_pct is not None:
+                row.trail_sl_trigger_pct = trail_sl_trigger_pct
+            if trail_sl_enabled is not None:
+                row.trail_sl_enabled = int(trail_sl_enabled)
             row.updated_at = datetime.utcnow()
         else:
             row = AITradeParams(
@@ -1814,11 +1851,51 @@ async def upsert_trade_params(
                 win_rate=win_rate,
                 avg_multiple=avg_multiple,
                 confidence=confidence,
+                trail_sl_trigger_pct=trail_sl_trigger_pct if trail_sl_trigger_pct is not None else 0.50,
+                trail_sl_enabled=int(trail_sl_enabled) if trail_sl_enabled is not None else 0,
             )
             session.add(row)
         await session.commit()
         await session.refresh(row)
         return row
+
+
+async def seed_ai_trade_params() -> int:
+    """
+    One-time seed of ai_trade_params with default rows for every known
+    pattern_type so the resolver always finds a row. Only inserts rows that
+    don't already exist — idempotent and safe to run on every boot.
+    Returns count of rows newly inserted.
+    """
+    # Imported here to avoid a circular import at module load
+    from bot.agents.trade_profiles import DEFAULT_AI_TRADE_PARAMS
+
+    inserted = 0
+    async with AsyncSessionLocal() as session:
+        existing = (await session.execute(
+            select(AITradeParams.pattern_type)
+        )).scalars().all()
+        existing_set = set(existing)
+
+        for ptype, defaults in DEFAULT_AI_TRADE_PARAMS.items():
+            if ptype in existing_set:
+                continue
+            session.add(AITradeParams(
+                pattern_type=ptype,
+                optimal_tp_x=float(defaults["tp_x"]),
+                optimal_sl_pct=float(defaults["sl_pct"]),
+                optimal_position_pct=10.0,
+                trail_sl_trigger_pct=float(defaults["trail_trigger"]),
+                trail_sl_enabled=int(defaults["trail_on"]),
+            ))
+            inserted += 1
+
+        if inserted:
+            await session.commit()
+
+    if inserted:
+        logger.info("seed_ai_trade_params: inserted %d default rows", inserted)
+    return inserted
 
 
 async def get_closed_positions_by_source(source: str) -> list["Position"]:
@@ -2108,6 +2185,10 @@ AGENT_PARAM_DEFAULTS = {
     "paper_starting_balance": 20.0,
     "paper_balance_offset": 0.0,
     "paper_reset_v20_done": 0.0,   # one-shot migration flag
+
+    # Global trailing-stop config (per-type triggers live in ai_trade_params)
+    "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
+    "trail_sl_pct":          0.20, # distance from peak when trailing active
 }
 
 
@@ -2282,8 +2363,9 @@ async def get_recently_closed_paper_trades(hours: int = 25) -> list["PaperTrade"
 
 
 async def update_paper_post_close(
-    trade_id: int, mc_1h: float | None = None, mc_6h: float | None = None,
-    mc_24h: float | None = None, peak_after: float | None = None,
+    trade_id: int, mc_1h: float | None = None, mc_4h: float | None = None,
+    mc_6h: float | None = None, mc_24h: float | None = None,
+    peak_after: float | None = None,
     sold_too_early: bool | None = None, sold_too_late: bool | None = None,
 ) -> None:
     async with AsyncSessionLocal() as session:
@@ -2293,6 +2375,8 @@ async def update_paper_post_close(
             return
         if mc_1h is not None:
             pt.mc_1h_after = mc_1h
+        if mc_4h is not None:
+            pt.mc_4h_after = mc_4h
         if mc_6h is not None:
             pt.mc_6h_after = mc_6h
         if mc_24h is not None:

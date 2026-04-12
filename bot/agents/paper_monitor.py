@@ -24,6 +24,7 @@ from database.models import (
     update_paper_post_close,
     compute_paper_balance,
 )
+from bot.agents.trade_profiles import resolve_trade_params
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,13 @@ STARTUP_DELAY      = 60
 
 
 # ── Open trade monitoring ────────────────────────────────────────────────────
+
+def _parse_pattern_tags(pattern_type: str | None) -> list[str]:
+    """pattern_type stores a comma-separated list at open time."""
+    if not pattern_type:
+        return []
+    return [t.strip() for t in pattern_type.split(",") if t.strip()]
+
 
 async def _check_open_trades(bot) -> None:
     trades = await get_open_paper_trades()
@@ -59,13 +67,22 @@ async def _check_open_trades(bot) -> None:
             name = (pt.token_name or "Unknown").replace("_", " ")
             sol = pt.paper_sol_spent
 
+            # Resolve trailing-stop config at tick time so Agent 6 adjustments
+            # take effect on open trades mid-flight. Cheap: one DB round-trip
+            # per open trade per 5 min.
+            tags = _parse_pattern_tags(pt.pattern_type)
+            resolved = await resolve_trade_params(tags) if tags else None
+
             # Check TP
             if current_mult >= pt.take_profit_x:
                 pnl = round(sol * (current_mult - 1), 4)
                 await close_paper_trade(pt.id, "tp_hit", pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_balance = bal
-                logger.info("Paper: TP hit %s — %.1fx +%.4f SOL bal=%.4f", name, current_mult, pnl, bal)
+                logger.info(
+                    "Paper: TP hit %s — %.1fx +%.4f SOL bal=%.4f tags=%s",
+                    name, current_mult, pnl, bal, ",".join(tags) or "-",
+                )
                 try:
                     await bot.send_message(CALLER_GROUP_ID, "\n".join([
                         f"✅ PAPER TRADE WIN",
@@ -77,14 +94,44 @@ async def _check_open_trades(bot) -> None:
                     pass
                 continue
 
-            # Check SL
+            # Trailing stop: once peak_mult crosses (1 + trail_trigger),
+            # abandon the fixed SL and follow the peak down by trail_pct.
+            if resolved and resolved["trail_enabled"]:
+                trigger_mult = 1.0 + float(resolved["trail_trigger"])
+                if peak_mult >= trigger_mult:
+                    trail_stop_mult = peak_mult * (1.0 - float(resolved["trail_pct"]))
+                    if current_mult <= trail_stop_mult:
+                        pnl = round(sol * (current_mult - 1), 4)
+                        await close_paper_trade(pt.id, "trail_hit", pnl, peak_mc, peak_mult)
+                        bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+                        state.paper_balance = bal
+                        logger.info(
+                            "Paper: TRAIL hit %s — peak=%.2fx now=%.2fx pnl=%+.4f bal=%.4f tags=%s",
+                            name, peak_mult, current_mult, pnl, bal, ",".join(tags) or "-",
+                        )
+                        try:
+                            msg_icon = "✅" if pnl > 0 else "❌"
+                            await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                                f"{msg_icon} PAPER TRADE — TRAIL STOP",
+                                f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
+                                f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
+                                f"Balance: {bal:.2f} SOL",
+                            ]))
+                        except Exception:
+                            pass
+                        continue
+
+            # Check fixed SL
             sl_threshold = 1.0 - (pt.stop_loss_pct / 100.0)
             if current_mult <= sl_threshold:
                 pnl = round(-sol * (1.0 - current_mult), 4)
                 await close_paper_trade(pt.id, "sl_hit", pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_balance = bal
-                logger.info("Paper: SL hit %s — %.2fx %.4f SOL bal=%.4f", name, current_mult, pnl, bal)
+                logger.info(
+                    "Paper: SL hit %s — %.2fx %.4f SOL bal=%.4f tags=%s",
+                    name, current_mult, pnl, bal, ",".join(tags) or "-",
+                )
                 try:
                     await bot.send_message(CALLER_GROUP_ID, "\n".join([
                         f"❌ PAPER TRADE LOSS",
@@ -134,11 +181,14 @@ async def _track_post_close() -> None:
 
             # Fill in time-based snapshots
             mc_1h = pt.mc_1h_after
+            mc_4h = getattr(pt, "mc_4h_after", None)
             mc_6h = pt.mc_6h_after
             mc_24h = pt.mc_24h_after
 
             if mc_1h is None and hours_since_close >= 1:
                 mc_1h = current_mc
+            if mc_4h is None and hours_since_close >= 4:
+                mc_4h = current_mc
             if mc_6h is None and hours_since_close >= 6:
                 mc_6h = current_mc
             if mc_24h is None and hours_since_close >= 24:
@@ -152,20 +202,27 @@ async def _track_post_close() -> None:
             # Determine sold_too_late: SL hit but recovered within 1h
             sold_too_late = False
             if pt.close_reason == "sl_hit" and mc_1h is not None:
-                # If 1h after SL, MC recovered above entry
                 if mc_1h > entry_mc:
                     sold_too_late = True
 
             await update_paper_post_close(
-                trade_id=pt.id, mc_1h=mc_1h, mc_6h=mc_6h, mc_24h=mc_24h,
+                trade_id=pt.id, mc_1h=mc_1h, mc_4h=mc_4h, mc_6h=mc_6h, mc_24h=mc_24h,
                 peak_after=peak_after,
                 sold_too_early=sold_too_early, sold_too_late=sold_too_late,
             )
 
+            # Structured per-close log line for Agent 6 to grep and for humans
+            # to spot-check. Fires once per closed trade per tick that adds
+            # new data (mc_1h or mc_4h newly filled).
             name = (pt.token_name or "?")[:15]
-            logger.debug(
-                "Post-close %s: %.1fh since close, peak_after=%.0f, early=%s late=%s",
-                name, hours_since_close, peak_after, sold_too_early, sold_too_late,
+            logger.info(
+                "Agent6-signal close=%s tags=%s peak=%.2fx mc1h=%s mc4h=%s early=%s late=%s",
+                pt.close_reason or "?",
+                pt.pattern_type or "-",
+                pt.peak_multiple or 1.0,
+                f"{mc_1h/entry_mc:.2f}x" if mc_1h and entry_mc else "-",
+                f"{mc_4h/entry_mc:.2f}x" if mc_4h and entry_mc else "-",
+                sold_too_early, sold_too_late,
             )
 
         except Exception as exc:

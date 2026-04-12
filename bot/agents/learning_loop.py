@@ -42,6 +42,7 @@ from database.models import (
     get_weekly_performance,
     get_closed_positions_by_source,
     upsert_trade_params,
+    get_trade_params,
     get_all_trade_params,
     Wallet,
     AsyncSessionLocal,
@@ -112,7 +113,14 @@ SCORE_FIELDS = {
     "market":      "market_score",
 }
 
-PATTERN_TYPES = ["new_launch", "insider_wallet", "volume_spike"]
+# Full set of pattern_types Agent 6 learns per — must match
+# bot.agents.trade_profiles.ALL_PATTERN_TYPES
+PATTERN_TYPES = [
+    "new_launch", "insider_wallet", "volume_spike",
+    "low_mc", "mid_mc", "high_mc",
+    "high_chart", "high_caller",
+]
+MIN_SAMPLE_FOR_LEARNING = 5   # was 10 — lowered for faster warm-up
 DEFAULT_TP_X = 3.0
 DEFAULT_SL_PCT = 30.0
 DEFAULT_POSITION_PCT = 10.0
@@ -419,50 +427,125 @@ async def _adjust_wallet_tiers() -> tuple[int, int]:
     return promoted, demoted
 
 
-# ── Trade params optimization ────────────────────────────────────────────────
+# ── Trade params optimization (per pattern_type, from PaperTrade) ────────────
+
+def _parse_pattern_tags(pattern_type: str | None) -> list[str]:
+    """pattern_type on a PaperTrade is a comma-separated list of matched tags."""
+    if not pattern_type:
+        return []
+    return [t.strip() for t in pattern_type.split(",") if t.strip()]
+
+
+async def _fetch_closed_paper_trades(limit: int = 500) -> list:
+    """All closed PaperTrade rows with PnL, newest first."""
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(PaperTrade)
+            .where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+            .order_by(PaperTrade.closed_at.desc())
+            .limit(limit)
+        )).scalars().all()
+    return list(rows)
+
 
 async def _optimize_trade_params(regime: str) -> int:
+    """
+    Learn per-pattern_type TP and SL from closed PaperTrade outcomes.
+
+    Each closed PaperTrade is assigned to every pattern_type it matched at
+    entry (comma-separated `pattern_type` column → split). For each group
+    with >= MIN_SAMPLE_FOR_LEARNING samples we analyze four signals and
+    adjust the row in ai_trade_params via upsert_trade_params (which goes
+    through set_param's audit trail? no — upsert_trade_params writes
+    ai_trade_params directly, so we also fall back to set_param for the
+    param_changes log). Trail config is preserved (None = no-op).
+
+    Signal → action rules (applied independently, clamped per step):
+      1. sl_hit_rate > 0.50            → widen sl_pct by +5 points
+      2. peak_exceeds_tp_rate > 0.60   → raise tp_x by +0.5
+      3. avg_peak_mult < current_tp*0.80 → lower tp_x by -0.3
+      4. avg(mc_1h_after / close_mc) > 1.20 → raise tp_x by +0.3
+                                              (price kept running — we
+                                              sold too early)
+
+    Hard bounds: tp_x ∈ [1.5, 10.0], sl_pct ∈ [10.0, 50.0].
+    """
+    all_trades = await _fetch_closed_paper_trades(limit=500)
+    if not all_trades:
+        return 0
+
+    # Bucket trades by pattern_type. One trade contributes to every tag it matched.
+    groups: dict[str, list] = {ptype: [] for ptype in PATTERN_TYPES}
+    for pt in all_trades:
+        for tag in _parse_pattern_tags(pt.pattern_type):
+            if tag in groups:
+                groups[tag].append(pt)
+
     updated = 0
-    for ptype in PATTERN_TYPES:
-        positions = await get_closed_positions_by_source(ptype)
-        if not positions:
+    for ptype, trades in groups.items():
+        if len(trades) < MIN_SAMPLE_FOR_LEARNING:
             continue
 
-        sample_size = len(positions)
-        wins = [p for p in positions if p.pnl_sol and p.pnl_sol > 0]
-        losses = [p for p in positions if p.pnl_sol and p.pnl_sol <= 0]
-        win_rate = len(wins) / sample_size if sample_size > 0 else 0.0
+        # Load current row so we know what to compare the signals against
+        current = await get_trade_params(ptype)
+        cur_tp  = float(current.optimal_tp_x)  if current else DEFAULT_TP_X
+        cur_sl  = float(current.optimal_sl_pct) if current else DEFAULT_SL_PCT
 
-        multiples = []
-        for p in positions:
-            if p.entry_mc and p.entry_mc > 0 and p.pnl_sol is not None:
-                if p.close_reason == "tp_hit" and p.take_profit_x:
-                    multiples.append(p.take_profit_x)
-                elif p.pnl_sol > 0 and p.amount_sol_spent > 0:
-                    multiples.append(1.0 + p.pnl_sol / p.amount_sol_spent)
-                else:
-                    multiples.append(max(0.1, 1.0 + p.pnl_sol / max(p.amount_sol_spent, 0.01)))
+        n = len(trades)
+        sl_hits = sum(1 for t in trades if t.close_reason == "sl_hit")
+        tp_hits = sum(1 for t in trades if t.close_reason == "tp_hit")
+        wins    = sum(1 for t in trades if (t.paper_pnl_sol or 0) > 0)
+        win_rate = wins / n
 
-        avg_multiple = sum(multiples) / len(multiples) if multiples else 1.0
+        peaks = [float(t.peak_multiple or 1.0) for t in trades]
+        avg_peak = sum(peaks) / len(peaks) if peaks else 1.0
+        peak_exceeds_tp = sum(1 for p in peaks if p > cur_tp) / n
 
-        winner_multiples = sorted([m for m in multiples if m > 1.0])
-        if len(winner_multiples) >= 3:
-            optimal_tp = round(winner_multiples[int(len(winner_multiples) * 0.75)], 1)
-        else:
-            optimal_tp = DEFAULT_TP_X
-        optimal_tp = max(1.5, min(10.0, optimal_tp))
+        sl_hit_rate = sl_hits / n
 
-        loss_pcts = []
-        for p in losses:
-            if p.amount_sol_spent and p.amount_sol_spent > 0 and p.pnl_sol:
-                loss_pcts.append(abs(p.pnl_sol / p.amount_sol_spent) * 100)
-        if len(loss_pcts) >= 3:
-            optimal_sl = round(sorted(loss_pcts)[int(len(loss_pcts) * 0.25)], 0)
-        else:
-            optimal_sl = DEFAULT_SL_PCT
-        optimal_sl = max(10.0, min(50.0, optimal_sl))
+        # Sold-too-early signal: across trades with a 1h-after snapshot,
+        # did price trend higher than exit?
+        runup_samples: list[float] = []
+        for t in trades:
+            mc_1h = getattr(t, "mc_1h_after", None)
+            close_mc = t.peak_mc or t.entry_mc or 0  # approximate close MC
+            if mc_1h and close_mc and close_mc > 0:
+                runup_samples.append(mc_1h / close_mc)
+        avg_runup = sum(runup_samples) / len(runup_samples) if runup_samples else 1.0
 
-        # Position sizing: based on win rate + market regime
+        # Apply adjustment rules
+        new_tp = cur_tp
+        new_sl = cur_sl
+        reasons: list[str] = []
+
+        if sl_hit_rate > 0.50:
+            new_sl = min(50.0, cur_sl + 5.0)
+            reasons.append(f"sl_hit_rate={sl_hit_rate:.0%}>50%")
+
+        if peak_exceeds_tp > 0.60:
+            new_tp = min(10.0, new_tp + 0.5)
+            reasons.append(f"peak>tp in {peak_exceeds_tp:.0%}")
+
+        if avg_peak < cur_tp * 0.80:
+            new_tp = max(1.5, new_tp - 0.3)
+            reasons.append(f"avg_peak={avg_peak:.2f}x<tp*0.8")
+
+        if avg_runup > 1.20 and runup_samples:
+            new_tp = min(10.0, new_tp + 0.3)
+            reasons.append(f"1h_runup={avg_runup:.2f}x (sold early)")
+
+        # Clamp just in case
+        new_tp = round(max(1.5, min(10.0, new_tp)), 2)
+        new_sl = round(max(10.0, min(50.0, new_sl)), 1)
+
+        changed = (abs(new_tp - cur_tp) >= 0.01) or (abs(new_sl - cur_sl) >= 0.1)
+        if not changed:
+            continue
+
+        # Position sizing follows win_rate + regime (legacy behavior)
         if win_rate >= 0.70:
             optimal_pos = 15.0
         elif win_rate >= 0.55:
@@ -471,20 +554,47 @@ async def _optimize_trade_params(regime: str) -> int:
             optimal_pos = 10.0
         else:
             optimal_pos = 7.0
-
-        # Market regime modifier
         if regime == "BAD":
             optimal_pos = round(optimal_pos * 0.5, 1)
         elif regime == "NEUTRAL":
             optimal_pos = round(optimal_pos * 0.75, 1)
 
-        confidence = min(100.0, sample_size * 2.0)
+        # avg_multiple from PnL
+        mults = []
+        for t in trades:
+            if t.paper_sol_spent and t.paper_sol_spent > 0 and t.paper_pnl_sol is not None:
+                mults.append(max(0.1, 1.0 + t.paper_pnl_sol / max(t.paper_sol_spent, 0.01)))
+        avg_multiple = sum(mults) / len(mults) if mults else 1.0
+        confidence = min(100.0, n * 2.0)
 
         await upsert_trade_params(
-            pattern_type=ptype, optimal_tp_x=optimal_tp,
-            optimal_sl_pct=optimal_sl, optimal_position_pct=optimal_pos,
-            sample_size=sample_size, win_rate=round(win_rate, 4),
-            avg_multiple=round(avg_multiple, 2), confidence=round(confidence, 1),
+            pattern_type=ptype,
+            optimal_tp_x=new_tp,
+            optimal_sl_pct=new_sl,
+            optimal_position_pct=optimal_pos,
+            sample_size=n,
+            win_rate=round(win_rate, 4),
+            avg_multiple=round(avg_multiple, 2),
+            confidence=round(confidence, 1),
+            # trail config preserved (None = keep existing)
+        )
+
+        # Also route through set_param so /params audit log surfaces the change
+        reason_str = "; ".join(reasons) or "batch refresh"
+        if abs(new_tp - cur_tp) >= 0.01:
+            await set_param(
+                f"ai_trade_params.{ptype}.optimal_tp_x", new_tp,
+                reason=f"[{ptype}] {reason_str}", trades=n, win_rate=win_rate,
+            )
+        if abs(new_sl - cur_sl) >= 0.1:
+            await set_param(
+                f"ai_trade_params.{ptype}.optimal_sl_pct", new_sl,
+                reason=f"[{ptype}] {reason_str}", trades=n, win_rate=win_rate,
+            )
+
+        logger.info(
+            "Agent6: %s tp %.2f→%.2f sl %.1f→%.1f n=%d wr=%.0f%% avg_peak=%.2f [%s]",
+            ptype, cur_tp, new_tp, cur_sl, new_sl, n, win_rate * 100, avg_peak, reason_str,
         )
         updated += 1
 
@@ -704,27 +814,10 @@ async def _auto_adjust_params(
                             f"Low WR {recent_wr:.0%} — decreasing high-conf size", total_analyzed, recent_wr)
             changes.append(f"size_80: {cur80:.0f}%→{new80:.0f}%")
 
-    # ── Post-close learning: sold too early / too late ───────────────
-    pc = await get_post_close_stats()
-    if pc["total_tracked"] >= 5:
-        # If selling too early > 40%: increase TP
-        if pc["early_pct"] > 40:
-            for ptype in PATTERN_TYPES:
-                tp_params = await get_all_trade_params()
-                for tp_p in tp_params:
-                    if tp_p.pattern_type == ptype:
-                        new_tp = min(10.0, tp_p.optimal_tp_x + 0.5)
-                        if new_tp != tp_p.optimal_tp_x:
-                            await set_param(f"tp_adjust_{ptype}", new_tp,
-                                            f"Sold too early {pc['early_pct']}% — raising TP",
-                                            total_analyzed, recent_wr)
-                            changes.append(f"TP {ptype}: +0.5x (sold early {pc['early_pct']}%)")
-                        break
-
-        # If selling too late > 30%: tighten SL
-        if pc["late_pct"] > 30:
-            cur_sl = await get_param("scanner_rugcheck_max_risk")
-            changes.append(f"Sold too late {pc['late_pct']}% — consider tighter trailing stop")
+    # Post-close TP/SL learning now lives in _optimize_trade_params which
+    # reads sold_too_early directly from the mc_1h_after column. The old
+    # tp_adjust_{ptype} write path was dead code — nothing ever read those
+    # params — so it has been removed.
 
     return changes
 

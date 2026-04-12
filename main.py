@@ -30,7 +30,7 @@ from bot.agents.learning_loop import learning_loop
 from bot.agents.paper_monitor import paper_monitor_loop
 from bot.agents.mc_repair import mc_repair_loop
 from bot.agents.gmgn_agent import gmgn_agent_loop
-from database.models import init_db, init_agent_params, get_param, compute_paper_balance, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses
+from database.models import init_db, init_agent_params, get_param, compute_paper_balance, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses, seed_ai_trade_params
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -118,6 +118,10 @@ async def main() -> None:
     added = await init_agent_params()
     if added:
         logger.info("Initialized %d agent params with defaults", added)
+
+    seeded = await seed_ai_trade_params()
+    if seeded:
+        logger.info("Seeded %d ai_trade_params rows", seeded)
 
     # Restore trade mode from DB (survives restarts)
     from bot import state as _state

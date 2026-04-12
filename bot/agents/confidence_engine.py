@@ -39,10 +39,10 @@ from database.models import (
     save_candidate,
     log_agent_run,
     get_current_weights,
-    get_trade_params,
     get_token_by_mint,
     get_params,
 )
+from bot.agents.trade_profiles import match_pattern_types, resolve_trade_params
 
 logger = logging.getLogger(__name__)
 
@@ -395,22 +395,32 @@ async def score_candidate(candidate: dict) -> dict:
             candidate.get("name", "?"), confidence, state.trade_mode,
         )
 
-    # Look up AI-learned trade params for this source/pattern type
-    source = candidate.get("source", "unknown")
-    ai_params = await get_trade_params(source)
+    # Match every pattern_type this candidate belongs to, then resolve
+    # combined TP/SL/trailing from ai_trade_params. The matcher also
+    # reads insider_score/chart_score/caller_score from the candidate dict
+    # so we merge the just-computed scores in before matching.
+    matchable = {
+        **candidate,
+        "insider_score": insider,
+        "chart_score":   chart,
+        "caller_score":  caller,
+    }
+    pattern_tags = match_pattern_types(matchable)
+    resolved = await resolve_trade_params(pattern_tags)
 
-    if ai_params and ai_params.sample_size >= 10:
-        # Enough data — use AI-learned params
-        trade_tp_x = ai_params.optimal_tp_x
-        trade_sl_pct = ai_params.optimal_sl_pct
-        trade_position_pct = ai_params.optimal_position_pct
-        params_source = "ai_learned"
-    else:
-        # Not enough data — use keybot defaults
-        trade_tp_x = 3.0
-        trade_sl_pct = 30.0
-        trade_position_pct = 10.0
-        params_source = "keybot_default"
+    trade_tp_x         = resolved["tp_x"]
+    trade_sl_pct       = resolved["sl_pct"]
+    trade_position_pct = 10.0  # kept for back-compat; actual sizing lives in scanner_agent
+    trail_enabled      = resolved["trail_enabled"]
+    trail_trigger      = resolved["trail_trigger"]
+    trail_pct          = resolved["trail_pct"]
+    profile_tag_csv    = ",".join(pattern_tags)
+    params_source = (
+        f"ai_learned({resolved['matched_rows']}/{len(pattern_tags)})"
+        if resolved["matched_rows"] > 0
+        else "defaults_fallback"
+    )
+    source = candidate.get("source", "unknown")
 
     # Save to database silently — no Telegram messages
     await save_candidate(
@@ -456,4 +466,9 @@ async def score_candidate(candidate: dict) -> dict:
         "trade_sl_pct":      trade_sl_pct,
         "trade_position_pct": trade_position_pct,
         "params_source":     params_source,
+        "pattern_tags":      pattern_tags,
+        "profile_tag":       profile_tag_csv,
+        "trail_enabled":     trail_enabled,
+        "trail_trigger":     trail_trigger,
+        "trail_pct":         trail_pct,
     }

@@ -656,6 +656,9 @@ async def run_once() -> tuple[int, int]:
                 paper_sol, state.paper_balance,
             )
             try:
+                # pattern_type now stores the COMMA-SEPARATED list of matched
+                # ai_trade_params keys so Agent 6 can learn per-bucket from a
+                # single PaperTrade row. See trade_profiles.match_pattern_types.
                 pt = await open_paper_trade(
                     token_address=scored.get("mint", ""),
                     token_name=scored.get("name"),
@@ -663,7 +666,7 @@ async def run_once() -> tuple[int, int]:
                     entry_price=scored.get("mcap"),
                     paper_sol=paper_sol,
                     confidence=scored.get("confidence_score", 0),
-                    pattern_type=scored.get("chart_pattern") or scored.get("source"),
+                    pattern_type=scored.get("profile_tag") or scored.get("source"),
                     tp_x=scored.get("trade_tp_x", 3.0),
                     sl_pct=scored.get("trade_sl_pct", 30.0),
                 )
