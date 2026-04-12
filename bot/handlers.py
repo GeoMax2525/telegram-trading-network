@@ -1324,7 +1324,7 @@ async def cmd_deepanalyze(message: Message):
             "",
             "👛 FIRST 10 MIN BUYERS",
             f"  Unique wallets: {len(early_wallets)}",
-            f"  Early tx count: {len(early_sigs)}",
+            f"  Early buyers: {len(early_wallets)}",
             f"  Est. early volume: {early_sol_volume:.1f} SOL",
             f"  Known insiders: {len(insider_matches)}",
             *([f"    {a[:6]}..{a[-4:]}" for a in insider_matches[:5]] if insider_matches else []),
