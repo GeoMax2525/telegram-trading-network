@@ -645,13 +645,13 @@ async def run_once(bot) -> bool:
         if params_updated:
             all_changes.append(f"Trade params updated for {params_updated} pattern types")
 
+    # ── Save weights ─────────────────────────────────────────────────
+    new_analyzed = last_analyzed + len(batch)
+
     # ── Major: full autonomous parameter adjustment ────────────────────
     if level in ("full", "major"):
         auto_changes = await _auto_adjust_params(recent_wr, new_analyzed, regime)
         all_changes.extend(auto_changes)
-
-    # ── Save weights ─────────────────────────────────────────────────
-    new_analyzed = last_analyzed + len(batch)
     notes = (
         f"level={level} batch={len(batch)} win={len(winners)} loss={len(losers)} "
         f"regime={regime} wr20={recent_wr:.2f}"
@@ -682,7 +682,7 @@ async def run_once(bot) -> bool:
     )
 
     # Notify if significant changes
-    if all_changes and (level in ("full", "major") or threshold_changes):
+    if all_changes and level in ("full", "major"):
         await _notify_param_change(bot, all_changes, recent_wr, regime)
 
     logger.info(
