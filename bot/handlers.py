@@ -1627,7 +1627,8 @@ async def cmd_testgmgn(message: Message):
         return
 
     from bot.agents.gmgn_agent import (
-        gmgn_trending, gmgn_smart_money_trades, gmgn_token_info, _run_cli,
+        gmgn_trending, gmgn_smart_money_trades, gmgn_token_info,
+        _run_cli, _poll_gmgn_tokens,
     )
     from bot.config import GMGN_API_KEY
 
@@ -1639,8 +1640,13 @@ async def cmd_testgmgn(message: Message):
 
     # Test 1: gmgn-cli available?
     try:
-        raw = await _run_cli("--version", timeout=10)
-        lines.append(f"gmgn-cli: {'✅ installed' if raw is not None else '❌ not found'}")
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "gmgn-cli", "--version",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        ver = stdout.decode().strip()
+        lines.append(f"gmgn-cli: ✅ v{ver}" if ver else "gmgn-cli: ✅ installed")
     except Exception as exc:
         lines.append(f"gmgn-cli: ❌ {exc}")
 
