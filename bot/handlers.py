@@ -1865,6 +1865,79 @@ async def cmd_scan(message: Message):
     await _do_scan(message, address)
 
 
+# ── /settradeparam — edit a row in ai_trade_params ───────────────────────────
+
+_SETTRADEPARAM_FIELDS = {
+    "optimal_tp_x":         float,
+    "optimal_sl_pct":       float,
+    "trail_sl_trigger_pct": float,
+    "trail_sl_enabled":     int,   # 0 or 1
+}
+
+
+@router.message(Command("settradeparam"))
+async def cmd_settradeparam(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply("⛔ Admin only.")
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) != 4:
+        await message.reply(
+            "⚠️ Usage: `/settradeparam <pattern_type> <field> <value>`\n\n"
+            f"Fields: `{', '.join(_SETTRADEPARAM_FIELDS.keys())}`\n"
+            "Pattern types: `new_launch, insider_wallet, volume_spike, "
+            "low_mc, mid_mc, high_mc, high_chart, high_caller`\n\n"
+            "Example: `/settradeparam high_chart trail_sl_enabled 1`",
+            parse_mode="Markdown",
+        )
+        return
+
+    _, ptype, field, raw_value = parts
+
+    if field not in _SETTRADEPARAM_FIELDS:
+        await message.reply(
+            f"⚠️ Unknown field `{field}`. Allowed: `{', '.join(_SETTRADEPARAM_FIELDS.keys())}`",
+            parse_mode="Markdown",
+        )
+        return
+
+    try:
+        value = _SETTRADEPARAM_FIELDS[field](raw_value)
+    except ValueError:
+        await message.reply(f"⚠️ Could not parse `{raw_value}` as {_SETTRADEPARAM_FIELDS[field].__name__}",
+                            parse_mode="Markdown")
+        return
+
+    if field == "trail_sl_enabled" and value not in (0, 1):
+        await message.reply("⚠️ `trail_sl_enabled` must be 0 or 1.", parse_mode="Markdown")
+        return
+
+    from database.models import AsyncSessionLocal, AITradeParams, select as _select
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(
+            _select(AITradeParams).where(AITradeParams.pattern_type == ptype)
+        )).scalar_one_or_none()
+        if row is None:
+            await message.reply(
+                f"⚠️ No `ai_trade_params` row for `{ptype}`. Known rows are seeded on boot.",
+                parse_mode="Markdown",
+            )
+            return
+
+        old_value = getattr(row, field)
+        setattr(row, field, value)
+        row.updated_at = datetime.utcnow()
+        await session.commit()
+
+    await message.reply(
+        f"✅ `{ptype}.{field}`: `{old_value}` → `{value}`",
+        parse_mode="Markdown",
+    )
+    logger.info("settradeparam: %s.%s %s -> %s by admin %d",
+                ptype, field, old_value, value, message.from_user.id)
+
+
 # ── /agent6force ──────────────────────────────────────────────────────────────
 
 @router.message(Command("agent6force"))
