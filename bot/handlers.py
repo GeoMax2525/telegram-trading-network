@@ -25,7 +25,7 @@ from database.models import (
     get_any_open_position_by_token, get_hub_stats, get_top_wallets,
     get_candidate_stats_today, get_all_trade_params,
     get_chart_pattern_stats_today, get_chart_pattern_win_rates,
-    get_pumpfun_count_today, get_pumpswap_count_today,
+    get_pumpfun_count_today,
     token_exists, save_token, get_token_by_mint,
     get_tier_wallets, get_pattern_by_type, has_caller_scanned,
     upsert_wallet, get_paper_trade_stats,
@@ -351,23 +351,17 @@ async def _build_hub_text(autotrade: bool) -> str:
         )
 
     # Harvester last-run label
-    pump_today = await get_pumpfun_count_today()
-    pumpswap_today = await get_pumpswap_count_today()
-    ws_connected = state.harvester_ws_connected
-    ws_source = state.harvester_ws_source
-    ws_icon = "🟢" if ws_connected else "🔴"
-    ws_label = ws_source if ws_connected else "Polling"
-    ws_count = state.harvester_ws_tokens_today
-    ps_count = state.harvester_pumpswap_today
+    new_today = state.harvester_poll_tokens_today + state.harvester_gmgn_today
     if last_harvest is None:
-        harvest_line = f"✅ Harvester — {ws_icon} {ws_label} | waiting for first run..."
+        harvest_line = "✅ Harvester — graduated tokens | waiting for first run..."
     else:
         elapsed_min = int(
             (datetime.utcnow() - last_harvest.run_at).total_seconds() / 60
         )
         harvest_line = (
-            f"✅ Harvester — {ws_icon} {ws_label} | {token_count} tokens | "
-            f"pump: {pump_today} | swap: {pumpswap_today} | gmgn: {state.harvester_gmgn_today} | last {elapsed_min}min ago"
+            f"✅ Harvester — {token_count} tokens | "
+            f"+{new_today} today (dex:{state.harvester_poll_tokens_today} gmgn:{state.harvester_gmgn_today}) "
+            f"| last {elapsed_min}min ago"
         )
 
     # Wallet Analyst last-run label

@@ -34,11 +34,7 @@ market_regime:               str             = "NEUTRAL"   # GOOD / NEUTRAL / BA
 sol_24h_change:              float           = 0.0
 
 # ── Harvester Agent 1 live stats ────────────────────────────────────────────
-harvester_ws_connected:      bool            = False
-harvester_ws_source:         str             = "none"  # pumpdev / pumpportal / helius / none
-harvester_ws_tokens_today:   int             = 0
 harvester_poll_tokens_today: int             = 0
-harvester_pumpswap_today:    int             = 0
 harvester_gmgn_today:        int             = 0
 
 # ── Paper trading virtual balance ────────────────────────────────────────────
