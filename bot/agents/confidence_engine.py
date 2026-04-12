@@ -32,7 +32,6 @@ import logging
 
 from bot import state
 from bot.agents.chart_detector import analyze_chart
-from bot.agents.gmgn_agent import gmgn_token_security, gmgn_top_traders
 from database.models import (
     get_pattern_by_type,
     get_tier_wallets,
@@ -158,6 +157,7 @@ async def _score_insider(candidate: dict) -> float:
     mint = candidate.get("mint", "")
     if mint and base < 80:
         try:
+            from bot.agents.gmgn_agent import gmgn_top_traders
             traders = await gmgn_top_traders(mint)
             smart_count = sum(
                 1 for t in traders
@@ -197,6 +197,7 @@ async def _score_rug(candidate: dict) -> float:
     mint = candidate.get("mint", "")
     if mint:
         try:
+            from bot.agents.gmgn_agent import gmgn_token_security
             sec = await gmgn_token_security(mint)
             if sec:
                 # GMGN security flags
