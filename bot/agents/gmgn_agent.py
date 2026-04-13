@@ -34,8 +34,15 @@ STARTUP_DELAY = 90
 # ── gmgn-cli subprocess wrapper ─────────────────────────────────────────────
 
 async def _run_cli(*args: str, timeout: int = 30) -> dict | list | None:
-    """Run gmgn-cli command and return parsed JSON output."""
+    """Run gmgn-cli command and return parsed JSON output.
+
+    Stderr and non-JSON output are logged at INFO on failure so that
+    CLI flag / schema mismatches surface in Railway logs immediately
+    instead of silently returning None. Rate-limit and auth errors
+    stay at WARNING to avoid flooding.
+    """
     cmd = ["npx", "gmgn-cli", *args, "--raw"]
+    cmd_label = " ".join(args[:4])
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -46,28 +53,31 @@ async def _run_cli(*args: str, timeout: int = 30) -> dict | list | None:
         output = stdout.decode().strip()
 
         if not output:
-            if stderr:
-                err = stderr.decode().strip()
-                if "rate limit" in err.lower() or "429" in err:
-                    logger.warning("GMGN CLI rate limited: %s", err[:100])
-                elif "401" in err or "invalid" in err.lower():
-                    logger.warning("GMGN CLI auth error: %s", err[:100])
-                else:
-                    logger.debug("GMGN CLI stderr: %s", err[:100])
+            err = stderr.decode().strip() if stderr else ""
+            err_lower = err.lower()
+            if "rate limit" in err_lower or "429" in err:
+                logger.warning("GMGN CLI rate limited (%s): %s", cmd_label, err[:150])
+            elif "401" in err or "403" in err or "unauthorized" in err_lower:
+                logger.warning("GMGN CLI auth error (%s): %s", cmd_label, err[:150])
+            else:
+                # Surface at INFO so flag/arg mismatches don't hide forever
+                logger.info("GMGN CLI empty stdout (%s) — stderr: %s",
+                            cmd_label, err[:200] if err else "<empty>")
             return None
 
         return json.loads(output)
     except asyncio.TimeoutError:
-        logger.debug("GMGN CLI timeout: %s", " ".join(args[:3]))
+        logger.info("GMGN CLI timeout (%s)", cmd_label)
         return None
     except json.JSONDecodeError:
-        logger.debug("GMGN CLI non-JSON output: %s", output[:100] if output else "empty")
+        logger.info("GMGN CLI non-JSON output (%s): %s",
+                    cmd_label, output[:200] if output else "empty")
         return None
     except FileNotFoundError:
         logger.warning("GMGN CLI: npx not found — install Node.js")
         return None
     except Exception as exc:
-        logger.debug("GMGN CLI error: %s", exc)
+        logger.info("GMGN CLI error (%s): %s", cmd_label, exc)
         return None
 
 
@@ -160,7 +170,12 @@ async def gmgn_top_traders(mint: str) -> list:
 
 
 async def gmgn_wallet_stats(address: str) -> dict | None:
-    data = await _run_cli("portfolio", "stats", "--chain", "sol", "--address", address)
+    # NB: the CLI flag is --wallet, not --address (confirmed against
+    # .agents/skills/gmgn-portfolio/SKILL.md). Passing --address causes
+    # the CLI to reject the call silently and return empty stdout, which
+    # _run_cli turns into None, which in turn was the silent-failure
+    # pathway for every GMGN wallet import since 2026-04-12.
+    data = await _run_cli("portfolio", "stats", "--chain", "sol", "--wallet", address)
     if isinstance(data, dict):
         return data.get("data") or data
     return None
