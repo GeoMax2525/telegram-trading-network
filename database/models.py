@@ -2306,6 +2306,85 @@ async def get_recent_paper_trades(limit: int = 10) -> list["PaperTrade"]:
         )).scalars().all())
 
 
+async def nuke_paper_trades() -> dict:
+    """
+    DESTRUCTIVE: wipe every row from paper_trades. Returns a dict with
+    counts deleted per status (so the caller can log what was removed)
+    plus the offset/starting values that were reset.
+
+    Intended for admin use via /nukepaper confirm when pre-cap bug-era
+    data has polluted the learning substrate and a clean slate is the
+    cheapest path to honest numbers.
+    """
+    async with AsyncSessionLocal() as session:
+        open_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+        )).scalar() or 0
+        closed_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(PaperTrade.status == "closed")
+        )).scalar() or 0
+        total = open_count + closed_count
+
+        await session.execute(
+            PaperTrade.__table__.delete()
+        )
+
+        # Reset balance bookkeeping so compute_paper_balance reads
+        # exactly the starting balance after the wipe
+        off_row = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "paper_balance_offset")
+        )).scalar_one_or_none()
+        if off_row is None:
+            session.add(AgentParam(param_name="paper_balance_offset", param_value=0.0))
+        else:
+            off_row.param_value = 0.0
+            off_row.updated_at = datetime.utcnow()
+
+        start_row = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "paper_starting_balance")
+        )).scalar_one_or_none()
+        starting = 20.0
+        if start_row is not None:
+            start_row.param_value = starting
+            start_row.updated_at = datetime.utcnow()
+        else:
+            session.add(AgentParam(param_name="paper_starting_balance", param_value=starting))
+
+        await session.commit()
+
+    return {
+        "deleted_total": int(total),
+        "deleted_open": int(open_count),
+        "deleted_closed": int(closed_count),
+        "starting_reset_to": starting,
+        "offset_reset_to": 0.0,
+    }
+
+
+async def reset_ai_trade_params_samples() -> int:
+    """
+    Zero out sample_size / wins / losses / win_rate / avg_multiple /
+    confidence on every ai_trade_params row. Preserves tp/sl/trail
+    config so the seeded defaults remain, but tells Agent 6 there is
+    no data to learn from yet — forces it to re-accumulate samples
+    from post-nuke trades only.
+
+    Returns the number of rows updated.
+    """
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(select(AITradeParams))).scalars().all()
+        count = 0
+        for r in rows:
+            r.sample_size = 0
+            r.win_rate = 0.0
+            r.avg_multiple = 1.0
+            r.confidence = 0.0
+            r.updated_at = datetime.utcnow()
+            count += 1
+        await session.commit()
+    return count
+
+
 async def close_paper_trade(
     trade_id: int, close_reason: str, pnl_sol: float, peak_mc: float | None, peak_mult: float | None,
 ) -> None:

@@ -903,6 +903,122 @@ async def cmd_autotrade(message: Message):
 
 # ── /papertrades ──────────────────────────────────────────────────────────────
 
+# ── /nukepaper — DESTRUCTIVE full paper trade wipe ─────────────────────────
+
+@router.message(Command("nukepaper"))
+async def cmd_nukepaper(message: Message):
+    """
+    DESTRUCTIVE: wipe all paper_trades rows, reset balance to 20 SOL,
+    zero ai_trade_params sample counts. Use only when the historical
+    data has been polluted (compounding-size bug, manual-close lookahead,
+    etc.) and a clean slate is cheaper than filtering.
+
+    Dry-run default — shows what would be deleted without touching the
+    DB. Pass `confirm` as the argument to actually do it.
+
+    Usage:
+      /nukepaper            → dry-run preview
+      /nukepaper confirm    → actually wipe
+    """
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    parts = (message.text or "").split()
+    confirmed = len(parts) >= 2 and parts[1].lower() == "confirm"
+
+    from database.models import (
+        AsyncSessionLocal, select, func,
+        PaperTrade, AITradeParams,
+        nuke_paper_trades, reset_ai_trade_params_samples,
+    )
+
+    # Always show the preview counts first
+    async with AsyncSessionLocal() as session:
+        open_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+        )).scalar() or 0
+        closed_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(PaperTrade.status == "closed")
+        )).scalar() or 0
+        atp_count = (await session.execute(
+            select(func.count(AITradeParams.id))
+        )).scalar() or 0
+
+    total = open_count + closed_count
+
+    if not confirmed:
+        lines = [
+            "🔥 NUKE PAPER (DRY RUN — nothing deleted)",
+            "━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            f"Would delete {total} paper_trades rows:",
+            f"  {open_count} open",
+            f"  {closed_count} closed",
+            "",
+            f"Would zero sample_size / win_rate / avg_multiple / "
+            f"confidence on {atp_count} ai_trade_params rows",
+            "(preserves tp/sl/trail config — just tells Agent 6 'no data')",
+            "",
+            "Would reset:",
+            "  paper_starting_balance → 20.0",
+            "  paper_balance_offset   → 0.0",
+            "  state.paper_balance    → 20.0",
+            "  state.pending_candidates cleared",
+            "",
+            "⚠️ This is destructive and cannot be undone.",
+            "Run `/nukepaper confirm` to actually execute.",
+        ]
+        await message.reply("\n".join(lines), parse_mode=None)
+        return
+
+    # Confirmed — execute
+    try:
+        nuke_result = await nuke_paper_trades()
+        atp_reset = await reset_ai_trade_params_samples()
+    except Exception as exc:
+        logger.exception("nukepaper failed")
+        await message.reply(f"❌ nukepaper error: {exc}", parse_mode=None)
+        return
+
+    # Clear in-memory state so the next scanner tick doesn't
+    # dedupe against stale mints
+    state.pending_candidates.clear()
+    state.paper_balance = 20.0
+    state.PAPER_STARTING_BALANCE = 20.0
+    state.learning_loop_last_analyzed = 0
+    state.paper_trades_today = 0
+
+    # Safety refresh of the computed balance so /hub reads clean
+    try:
+        state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+    except Exception:
+        pass
+
+    lines = [
+        "🔥 NUKE PAPER — EXECUTED",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"Deleted {nuke_result['deleted_total']} paper_trades rows",
+        f"  {nuke_result['deleted_open']} open",
+        f"  {nuke_result['deleted_closed']} closed",
+        "",
+        f"Zeroed samples on {atp_reset} ai_trade_params rows",
+        "",
+        f"Balance reset: {state.paper_balance:.4f} SOL / "
+        f"{state.PAPER_STARTING_BALANCE:.0f} SOL",
+        f"pending_candidates: cleared",
+        f"learning_loop_last_analyzed: 0",
+        "",
+        "Next scanner tick will treat every candidate as fresh.",
+        "Agent 6 will start learning from a clean slate.",
+    ]
+    logger.warning(
+        "NUKE PAPER executed by %s: deleted=%d, atp_reset=%d",
+        message.from_user.id, nuke_result["deleted_total"], atp_reset,
+    )
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /closedcheck — Raw state of the last 10 paper_trades rows ─────────────
 
 @router.message(Command("closedcheck"))
