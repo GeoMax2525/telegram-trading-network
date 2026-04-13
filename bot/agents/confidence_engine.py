@@ -449,6 +449,17 @@ async def score_candidate(candidate: dict) -> dict:
     )
     source = candidate.get("source", "unknown")
 
+    # Diagnostic: show exactly which ai_trade_params rows fed the
+    # final tp/sl. Used to verify learning is actually reaching the
+    # opener — if tp/sl stays at baseline forever, this log shows it.
+    logger.info(
+        "Agent5 resolve [%s]: tags=%s matched=%s → tp=%.2fx sl=%.0f%%",
+        candidate.get("name", "?")[:20],
+        ",".join(pattern_tags) or "-",
+        ",".join(resolved.get("matched_types") or []) or "none",
+        trade_tp_x, trade_sl_pct,
+    )
+
     # Save to database silently — no Telegram messages
     await save_candidate(
         token_address=candidate.get("mint", ""),

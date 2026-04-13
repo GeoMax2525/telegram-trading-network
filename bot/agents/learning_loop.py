@@ -486,11 +486,15 @@ async def _optimize_trade_params(regime: str) -> int:
                 groups[tag].append(pt)
 
     updated = 0
+    skipped_low_sample: list[tuple[str, int]] = []
+
     for ptype, trades in groups.items():
         # dead_token is an outcome tag, not an entry tag — handled below
         if ptype == "dead_token":
             continue
         if len(trades) < MIN_SAMPLE_FOR_LEARNING:
+            if len(trades) > 0:
+                skipped_low_sample.append((ptype, len(trades)))
             continue
 
         # Load current row so we know what to compare the signals against
@@ -522,23 +526,34 @@ async def _optimize_trade_params(regime: str) -> int:
                 runup_samples.append(mc_1h / close_mc)
         avg_runup = sum(runup_samples) / len(runup_samples) if runup_samples else 1.0
 
+        # Full-fat diagnostic log — shows exactly what the calculator
+        # saw for this pattern_type group on this cycle
+        logger.info(
+            "Agent6 tune %s: n=%d wins=%d sl=%d tp=%d dead=%d "
+            "sl_rate=%.0f%% dead_rate=%.0f%% avg_peak=%.2fx "
+            "peak>tp=%.0f%% 1h_runup=%.2fx cur_tp=%.2fx cur_sl=%.0f%%",
+            ptype, n, wins, sl_hits, tp_hits, dead_hits,
+            sl_hit_rate * 100, dead_hit_rate * 100, avg_peak,
+            peak_exceeds_tp * 100, avg_runup, cur_tp, cur_sl,
+        )
+
         # Apply adjustment rules
         new_tp = cur_tp
         new_sl = cur_sl
         reasons: list[str] = []
 
+        # FLIPPED from previous implementation: widening SL when we're
+        # getting stopped out is the wrong direction. User wants losses
+        # to be smaller — tighten SL so we exit faster on bad trades.
         if sl_hit_rate > 0.50:
-            new_sl = min(50.0, cur_sl + 5.0)
-            reasons.append(f"sl_hit_rate={sl_hit_rate:.0%}>50%")
+            new_sl = max(10.0, cur_sl - 5.0)
+            reasons.append(f"sl_hit_rate={sl_hit_rate:.0%}>50% → tighten SL")
 
-        # Dead hits are a different failure mode than SL hits — the price
-        # didn't crash, it went stale. A wider SL won't help but a smaller
-        # position or earlier exit would. For now we also widen SL by a
-        # smaller step (+3) so Agent 6 at least registers the pattern as
-        # unfavorable.
+        # Dead hits: same failure family (losing trade that didn't rebound).
+        # Also tighten, smaller step than sl_hit since it's a different mode.
         if dead_hit_rate > 0.40:
-            new_sl = min(50.0, new_sl + 3.0)
-            reasons.append(f"dead_hit_rate={dead_hit_rate:.0%}>40%")
+            new_sl = max(10.0, new_sl - 3.0)
+            reasons.append(f"dead_hit_rate={dead_hit_rate:.0%}>40% → tighten SL")
 
         if peak_exceeds_tp > 0.60:
             new_tp = min(10.0, new_tp + 0.5)
@@ -558,6 +573,10 @@ async def _optimize_trade_params(regime: str) -> int:
 
         changed = (abs(new_tp - cur_tp) >= 0.01) or (abs(new_sl - cur_sl) >= 0.1)
         if not changed:
+            logger.info(
+                "Agent6 tune %s: no change (tp=%.2f sl=%.0f) — rules didn't fire",
+                ptype, cur_tp, cur_sl,
+            )
             continue
 
         # Position sizing follows win_rate + regime (legacy behavior)
@@ -608,10 +627,20 @@ async def _optimize_trade_params(regime: str) -> int:
             )
 
         logger.info(
-            "Agent6: %s tp %.2f→%.2f sl %.1f→%.1f n=%d wr=%.0f%% avg_peak=%.2f [%s]",
+            "Agent6 tune %s: tp %.2f→%.2f sl %.1f→%.1f n=%d wr=%.0f%% avg_peak=%.2f [%s]",
             ptype, cur_tp, new_tp, cur_sl, new_sl, n, win_rate * 100, avg_peak, reason_str,
         )
         updated += 1
+
+    # Summary of pattern groups that don't have enough samples yet — useful
+    # to see "low_mc needs 3 more trades" / "insider_wallet has 12 already"
+    # kind of visibility
+    if skipped_low_sample:
+        summary = ", ".join(f"{p}={n}" for p, n in sorted(skipped_low_sample)[:10])
+        logger.info(
+            "Agent6 tune: %d groups below MIN_SAMPLE_FOR_LEARNING=%d — %s",
+            len(skipped_low_sample), MIN_SAMPLE_FOR_LEARNING, summary,
+        )
 
     # ── dead_token outcome row ──────────────────────────────────────
     # Purely a stats/reporting row: aggregates every paper trade that
@@ -1201,16 +1230,31 @@ async def run_once(bot, force: bool = False) -> bool:
         all_changes.append("Weights adjusted:")
         all_changes.extend(weight_changes)
 
-    # ── Full: TP/SL/position + wallet tiers ──────────────────────────
+    # ── TP/SL refresh — runs EVERY cycle, not just full/major ─────────
+    # Previously gated on `level in ("full", "major")`, which meant
+    # _optimize_trade_params never fired because pending rarely reaches
+    # FULL_BATCH=5 (trades trickle in 1-2 at a time, micro catches them
+    # immediately). After 73 closed trades, the function had been
+    # called ZERO times. TP/SL tuning is a global recompute anyway —
+    # no reason to batch it.
     params_updated = 0
-    promoted = demoted = 0
-    if level in ("full", "major"):
-        promoted, demoted = await _adjust_wallet_tiers()
+    try:
         params_updated = await _optimize_trade_params(regime)
-        if promoted or demoted:
-            all_changes.append(f"Wallets: +{promoted} promoted, -{demoted} demoted")
         if params_updated:
             all_changes.append(f"Trade params updated for {params_updated} pattern types")
+    except Exception as exc:
+        logger.error("_optimize_trade_params error: %s", exc)
+
+    # Wallet tiers stay batched (expensive Helius calls) — only run at
+    # full/major level to avoid hammering the API every 60s.
+    promoted = demoted = 0
+    if level in ("full", "major"):
+        try:
+            promoted, demoted = await _adjust_wallet_tiers()
+            if promoted or demoted:
+                all_changes.append(f"Wallets: +{promoted} promoted, -{demoted} demoted")
+        except Exception as exc:
+            logger.error("_adjust_wallet_tiers error: %s", exc)
 
     # ── Save weights ─────────────────────────────────────────────────
     new_analyzed = last_analyzed + len(batch)

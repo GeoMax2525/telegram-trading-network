@@ -892,6 +892,63 @@ async def cmd_autotrade(message: Message):
 
 # ── /papertrades ──────────────────────────────────────────────────────────────
 
+# ── /tradeparams — Dump ai_trade_params table ───────────────────────────────
+
+@router.message(Command("tradeparams"))
+async def cmd_tradeparams(message: Message):
+    """
+    Dumps the current contents of ai_trade_params so you can verify
+    whether Agent 6 is actually mutating TP/SL per pattern_type. Shows
+    sample_size, tp_x, sl_pct, win_rate, avg_multiple, updated_at for
+    every row sorted by most-recently-updated.
+    """
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    from database.models import AsyncSessionLocal, select, AITradeParams
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(AITradeParams).order_by(AITradeParams.updated_at.desc())
+        )).scalars().all()
+
+    if not rows:
+        await message.reply("No ai_trade_params rows yet.", parse_mode=None)
+        return
+
+    now = datetime.utcnow()
+    lines = [
+        "🎯 AI TRADE PARAMS (per pattern_type)",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    for r in rows:
+        age_min = 0
+        if r.updated_at:
+            age_min = int((now - r.updated_at).total_seconds() / 60)
+        if age_min < 1:
+            age = "just now"
+        elif age_min < 60:
+            age = f"{age_min}m"
+        elif age_min < 1440:
+            age = f"{age_min // 60}h{age_min % 60:02d}m"
+        else:
+            age = f"{age_min // 1440}d"
+
+        trail_str = ""
+        if int(getattr(r, "trail_sl_enabled", 0) or 0) == 1:
+            trail_str = f" trail@{(r.trail_sl_trigger_pct or 0.5) * 100:.0f}%"
+
+        lines.append(
+            f"{r.pattern_type:<20} tp={r.optimal_tp_x:.2f}x sl={r.optimal_sl_pct:.0f}% "
+            f"n={r.sample_size} wr={r.win_rate * 100:.0f}% "
+            f"avg={r.avg_multiple:.2f}x{trail_str} ({age})"
+        )
+
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /whyloss — Diagnostic: why did the last N closed paper trades lose? ────
 
 @router.message(Command("whyloss"))
