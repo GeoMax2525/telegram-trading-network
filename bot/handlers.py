@@ -2107,10 +2107,6 @@ async def handle_analyze_address(message: Message):
 
 @router.message(Command("params"))
 async def cmd_params(message: Message):
-    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        await message.reply("⛔ /params is only available in Callers HQ.")
-        return
-
     params = await get_all_params()
     changes = await get_recent_param_changes(10)
 
