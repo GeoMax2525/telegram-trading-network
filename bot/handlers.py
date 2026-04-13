@@ -1130,6 +1130,55 @@ async def cmd_forcenuke(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
+# ── /forcecheck — Trigger paper_monitor._check_open_trades immediately ────
+
+@router.message(Command("forcecheck"))
+async def cmd_forcecheck(message: Message):
+    """
+    Kicks paper_monitor._check_open_trades() right now instead of waiting
+    for the next POLL_INTERVAL tick. Fetches live MC for every open paper
+    trade and evaluates TP/trail/SL/dead checks. Reports how many closed.
+    Use when you suspect SL isn't firing between ticks.
+    """
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    try:
+        from bot.agents.paper_monitor import _check_open_trades
+        from database.models import AsyncSessionLocal, select, func, PaperTrade
+
+        async with AsyncSessionLocal() as session:
+            before = (await session.execute(
+                select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+            )).scalar() or 0
+
+        await _check_open_trades(message.bot)
+
+        async with AsyncSessionLocal() as session:
+            after = (await session.execute(
+                select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+            )).scalar() or 0
+
+    except Exception as exc:
+        logger.exception("forcecheck failed")
+        await message.reply(f"❌ forcecheck error: {exc}", parse_mode=None)
+        return
+
+    closed_count = before - after
+    lines = [
+        "🔄 PAPER MONITOR FORCE CHECK",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"Open trades before: {before}",
+        f"Open trades after : {after}",
+        f"Closed this run   : {closed_count}",
+        "",
+        "Check Railway logs for per-trade 'Paper check id=...' lines",
+        "showing current_mult vs sl_threshold for every open trade.",
+    ]
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /scannerwhy — Diagnose why scanner isn't opening paper trades ─────────
 
 @router.message(Command("scannerwhy"))

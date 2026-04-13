@@ -51,6 +51,8 @@ from database.models import (
     has_open_paper_trade,
     has_open_paper_trade_by_name,
     has_recent_manual_close,
+    has_recent_close,
+    count_open_paper_trades,
     get_params,
     compute_paper_balance,
     AsyncSessionLocal,
@@ -898,20 +900,46 @@ async def run_once() -> tuple[int, int]:
 
         # Open paper trade if Agent 5 flagged it
         if scored.get("paper_trade"):
-            # Check for duplicate — one position per token
             mint_addr = scored.get("mint", "")
             token_name = scored.get("name")
+
+            # Hard cap on concurrent open positions. Runs BEFORE any
+            # other gate so we never waste cycles evaluating when full.
+            risk_cfg = await get_params("max_open_paper_trades", "close_cooldown_hours")
+            max_open = int(risk_cfg.get("max_open_paper_trades") or 5)
+            open_count = await count_open_paper_trades()
+            if open_count >= max_open:
+                logger.info(
+                    "Scanner: skip paper trade %s — max_open_paper_trades reached (%d/%d)",
+                    (token_name or "?")[:20], open_count, max_open,
+                )
+                continue
+
+            # Duplicate guards (by mint + by display name)
             if mint_addr and await has_open_paper_trade(mint_addr):
                 logger.info("Scanner: skip paper trade %s — already have open position (mint match)",
                             (token_name or "?")[:20])
                 continue
-            # Secondary guard by display name: pump.fun lets anyone mint
-            # a token with any name, so two different mints can share
-            # the same display name and the mint check won't catch it.
             if token_name and await has_open_paper_trade_by_name(token_name):
                 logger.info("Scanner: skip paper trade %s — already have open position (name match)",
                             token_name[:20])
                 continue
+
+            # Re-entry cooldown: if this mint was closed (any reason —
+            # sl / tp / trail / dead / manual) within the cooldown window,
+            # don't reopen immediately. Prevents the DexScreener trending
+            # loop from churning the same handful of tokens repeatedly.
+            close_cooldown = float(risk_cfg.get("close_cooldown_hours") or 2.0)
+            if close_cooldown > 0 and mint_addr:
+                try:
+                    if await has_recent_close(mint_addr, within_hours=close_cooldown):
+                        logger.info(
+                            "Scanner: skip paper trade %s — re-entry cooldown (%.1fh since any close)",
+                            (token_name or "?")[:20], close_cooldown,
+                        )
+                        continue
+                except Exception as exc:
+                    logger.debug("Scanner: re-entry cooldown check failed: %s", exc)
 
             # "Rage quit" cooldown — if the user recently manually closed
             # this token, don't reopen it just because DexScreener still

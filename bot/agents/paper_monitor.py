@@ -37,7 +37,10 @@ STALE_MULT_THRESHOLD   = 0.5
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL      = 300   # 5 minutes — open trade checks
+POLL_INTERVAL      = 60    # 1 minute — open trade checks (was 5 min,
+                           #   too long for pump.fun volatility; trades
+                           #   could drop below SL and recover between
+                           #   ticks so SL never fired at check time)
 POST_CLOSE_INTERVAL = 600  # 10 minutes — post-close tracking
 STARTUP_DELAY      = 60
 
@@ -164,10 +167,18 @@ async def _check_open_trades(bot) -> None:
         try:
             live = await fetch_live_data(pt.token_address)
             if not live:
+                logger.info(
+                    "Paper check id=%s %s: fetch_live_data returned None — skipping tick",
+                    pt.id, (pt.token_name or "?")[:18],
+                )
                 continue
 
             current_mc = live.get("market_cap") or 0
             if current_mc <= 0:
+                logger.info(
+                    "Paper check id=%s %s: current_mc=0 — skipping tick",
+                    pt.id, (pt.token_name or "?")[:18],
+                )
                 continue
 
             entry_mc = pt.entry_mc or 1
@@ -179,6 +190,18 @@ async def _check_open_trades(bot) -> None:
 
             name = (pt.token_name or "Unknown").replace("_", " ")
             sol = pt.paper_sol_spent
+
+            # Full per-tick diagnostic so "SL not hitting" can be
+            # verified at a glance. Shows the exact comparison
+            # values for every trade on every tick.
+            tp_threshold = pt.take_profit_x or 3.0
+            sl_threshold = 1.0 - ((pt.stop_loss_pct or 30.0) / 100.0)
+            logger.info(
+                "Paper check id=%s %s: mc=%.0f→%.0f mult=%.3fx "
+                "tp=%.2fx sl@%.3fx (stop_loss_pct=%.1f) peak=%.2fx",
+                pt.id, name[:18], entry_mc, current_mc, current_mult,
+                tp_threshold, sl_threshold, pt.stop_loss_pct or 0, peak_mult,
+            )
 
             # Resolve trailing-stop config at tick time so Agent 6 adjustments
             # take effect on open trades mid-flight. Cheap: one DB round-trip

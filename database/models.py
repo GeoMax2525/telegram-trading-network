@@ -2277,6 +2277,35 @@ async def has_open_paper_trade(token_address: str) -> bool:
         return (result.scalar() or 0) > 0
 
 
+async def count_open_paper_trades() -> int:
+    """Total number of paper trades currently in status='open'."""
+    async with AsyncSessionLocal() as session:
+        return (await session.execute(
+            select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+        )).scalar() or 0
+
+
+async def has_recent_close(token_address: str, within_hours: float = 2.0) -> bool:
+    """
+    Returns True if this mint has ANY closed paper trade (any reason)
+    within the last `within_hours`. Used as a re-entry cooldown so the
+    scanner doesn't immediately reopen a token that just hit SL / TP /
+    dead / manual / etc.
+    """
+    if not token_address:
+        return False
+    cutoff = datetime.utcnow() - timedelta(hours=within_hours)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.token_address == token_address,
+                PaperTrade.status == "closed",
+                PaperTrade.closed_at >= cutoff,
+            )
+        )
+        return (result.scalar() or 0) > 0
+
+
 async def has_open_paper_trade_by_name(token_name: str | None) -> bool:
     """
     Secondary duplicate guard: returns True if there's already an open
@@ -2661,6 +2690,10 @@ AGENT_PARAM_DEFAULTS = {
     "sl_floor_20_applied":  0.0,   # raise learned SLs to >=20% once
     "force_reset_v4_done":  0.0,   # v4: nuke all paper trades + reset on boot
     "force_reset_v5_done":  0.0,   # v5: wrapped in defensive try/except
+
+    # Paper trading risk caps
+    "max_open_paper_trades": 5.0,    # hard max concurrent open positions
+    "close_cooldown_hours":  2.0,    # re-entry cooldown after ANY close
 
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
     "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
