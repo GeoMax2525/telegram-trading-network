@@ -892,6 +892,139 @@ async def cmd_autotrade(message: Message):
 
 # ── /papertrades ──────────────────────────────────────────────────────────────
 
+# ── /balancecheck — Audit paper balance math + show today's closes ─────────
+
+@router.message(Command("balancecheck"))
+async def cmd_balancecheck(message: Message):
+    """
+    Full audit of the paper balance calculation. Shows the exact math:
+      starting − sum(open.paper_sol_spent) + sum(closed.paper_pnl_sol) + offset
+
+    Then dumps every paper trade that closed today, sorted by PnL, so
+    the +X SOL today figure can be verified against the underlying rows.
+    Useful when the balance makes a suspicious jump.
+    """
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    from database.models import (
+        AsyncSessionLocal, select, func, PaperTrade, AgentParam,
+    )
+
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    async with AsyncSessionLocal() as session:
+        # Math inputs — query the same fields compute_paper_balance uses
+        starting_row = (await session.execute(
+            select(AgentParam.param_value).where(
+                AgentParam.param_name == "paper_starting_balance"
+            )
+        )).scalar_one_or_none()
+        starting = float(starting_row) if starting_row is not None else state.PAPER_STARTING_BALANCE
+
+        offset_row = (await session.execute(
+            select(AgentParam.param_value).where(
+                AgentParam.param_name == "paper_balance_offset"
+            )
+        )).scalar_one_or_none()
+        offset = float(offset_row) if offset_row is not None else 0.0
+
+        open_locked = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_sol_spent), 0.0))
+            .where(PaperTrade.status == "open")
+        )).scalar() or 0.0
+        open_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+        )).scalar() or 0
+
+        closed_pnl_total = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0))
+            .where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0.0
+        closed_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0
+
+        today_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0))
+            .where(
+                PaperTrade.closed_at >= today_start,
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0.0
+
+        today_trades = (await session.execute(
+            select(PaperTrade)
+            .where(
+                PaperTrade.closed_at >= today_start,
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+            .order_by(PaperTrade.paper_pnl_sol.desc())
+        )).scalars().all()
+
+    computed_balance = round(
+        float(starting) - float(open_locked) + float(closed_pnl_total) + float(offset),
+        4,
+    )
+
+    lines = [
+        "💰 PAPER BALANCE AUDIT",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "Formula: starting − open_locked + closed_pnl + offset",
+        "",
+        f"  starting     = {float(starting):>10.4f} SOL  (from agent_params)",
+        f"  open_locked  = {float(open_locked):>10.4f} SOL  ({open_count} open trades)",
+        f"  closed_pnl   = {float(closed_pnl_total):>+10.4f} SOL  ({closed_count} closed trades)",
+        f"  offset       = {float(offset):>+10.4f} SOL",
+        f"  ─────────────────────────────",
+        f"  computed     = {computed_balance:>10.4f} SOL",
+        "",
+        f"In-memory state.paper_balance = {state.paper_balance:.4f} SOL",
+        "",
+        f"Today's closed trades: {len(today_trades)} trades, total = {float(today_pnl):+.4f} SOL",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    if today_trades:
+        # Sanity-check: running sum should equal today_pnl
+        running_sum = 0.0
+        for pt in today_trades:
+            pnl = pt.paper_pnl_sol or 0
+            running_sum += pnl
+            sol = pt.paper_sol_spent or 0
+            entry_mc = pt.entry_mc or 0
+            peak_mc = pt.peak_mc or 0
+            peak_mult = pt.peak_multiple or 0
+            # Re-derive what pnl "should" be based on peak vs entry for sanity
+            if entry_mc > 0 and peak_mc > 0:
+                implied_mult = peak_mc / entry_mc
+            else:
+                implied_mult = 0
+            name = (pt.token_name or "?")[:20]
+            icon = "✅" if pnl > 0 else "❌"
+            lines.append(
+                f"{icon} {name:<20} sol={sol:>6.3f} peak={peak_mult:>5.2f}x "
+                f"impl={implied_mult:>5.2f}x {pt.close_reason or '?':<12} "
+                f"pnl={pnl:>+8.4f}"
+            )
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"Sum of above:  {running_sum:+.4f} SOL")
+        if abs(running_sum - float(today_pnl)) > 0.001:
+            lines.append(f"⚠️ MISMATCH with today_pnl query: {float(today_pnl):+.4f}")
+        else:
+            lines.append("✅ Row sum matches query aggregate")
+
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /tradeparams — Dump ai_trade_params table ───────────────────────────────
 
 @router.message(Command("tradeparams"))
