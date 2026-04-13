@@ -55,6 +55,9 @@ from database.models import (
     get_all_params,
     get_recent_param_changes,
     get_post_close_stats,
+    MC_WEIGHT_DEFAULTS,
+    MC_WEIGHT_MIN,
+    MC_WEIGHT_MAX,
     get_paper_trade_stats,
     get_token_count,
     get_top_wallets,
@@ -819,25 +822,66 @@ async def _auto_adjust_params(
             changes.append(f"min_mc: ${cur_min_mc:.0f}→${new_min_mc:.0f} (bad WR)")
 
     # ── MC weight adjustment (most/least predictive) ─────────────────
+    # Adjust the best/worst component per bucket by ±0.02, THEN clamp
+    # every weight to [MC_WEIGHT_MIN, MC_WEIGHT_MAX] and normalize the
+    # whole bucket to sum = 1.0. Without this normalization step the
+    # previous implementation drifted buckets toward 0.45/0.02 extremes
+    # over many cycles (insider=45% caller=45% rest=2% bug).
     for prefix, label in [("low_mc_", "low"), ("mid_mc_", "mid"), ("high_mc_", "high")]:
         keys = {k: f"{prefix}{k}" for k in COMPONENT_KEYS}
         cur = {}
         for short, full in keys.items():
             cur[short] = await get_param(full)
 
-        # Find best/worst by current weight
         best_k = max(cur, key=cur.get)
         worst_k = min(cur, key=cur.get)
 
-        if cur[best_k] < 0.45 and cur[worst_k] > 0.02:
-            new_best = min(0.45, cur[best_k] + 0.02)
-            new_worst = max(0.02, cur[worst_k] - 0.02)
-            if new_best != cur[best_k]:
-                await set_param(keys[best_k], new_best,
-                                f"{label} MC: boosting top signal", total_analyzed, recent_wr)
-                await set_param(keys[worst_k], new_worst,
-                                f"{label} MC: reducing weakest signal", total_analyzed, recent_wr)
-                changes.append(f"{label} weights: {best_k}↑{new_best:.2f} {worst_k}↓{new_worst:.2f}")
+        # Only bump if there's room in both directions
+        bumped = False
+        if cur[best_k] < MC_WEIGHT_MAX and cur[worst_k] > MC_WEIGHT_MIN:
+            cur[best_k]  = min(MC_WEIGHT_MAX, cur[best_k]  + 0.02)
+            cur[worst_k] = max(MC_WEIGHT_MIN, cur[worst_k] - 0.02)
+            bumped = True
+
+        # Project onto the bounded simplex: every weight in [MIN, MAX] and
+        # sum = 1.0. Plain clamp-then-normalize can push a capped value
+        # back above the cap (e.g. input 0.50 → clamp 0.45 → ÷0.95 → 0.47),
+        # so we instead clamp once then spread the remaining deficit/excess
+        # only across components that have headroom in the needed direction.
+        working = {k: max(MC_WEIGHT_MIN, min(MC_WEIGHT_MAX, v)) for k, v in cur.items()}
+        for _ in range(20):
+            total = sum(working.values())
+            diff = 1.0 - total
+            if abs(diff) < 1e-6:
+                break
+            if diff > 0:
+                movable = [k for k, v in working.items() if v < MC_WEIGHT_MAX]
+            else:
+                movable = [k for k, v in working.items() if v > MC_WEIGHT_MIN]
+            if not movable:
+                break
+            step = diff / len(movable)
+            for k in movable:
+                working[k] = max(MC_WEIGHT_MIN, min(MC_WEIGHT_MAX, working[k] + step))
+        normalized = {k: round(v, 4) for k, v in working.items()}
+
+        # Persist any key that moved meaningfully
+        any_change = False
+        for short, full in keys.items():
+            old = await get_param(full)
+            new = normalized[short]
+            if abs(new - old) >= 0.0005:
+                reason = f"{label} MC: bucket clamp+normalize"
+                if bumped and short == best_k:
+                    reason = f"{label} MC: boosting top signal"
+                elif bumped and short == worst_k:
+                    reason = f"{label} MC: reducing weakest signal"
+                await set_param(full, new, reason, total_analyzed, recent_wr)
+                any_change = True
+
+        if any_change:
+            bucket_str = " ".join(f"{k}={normalized[k]:.2f}" for k in COMPONENT_KEYS)
+            changes.append(f"{label} weights [{bucket_str}]")
 
     # ── Position sizing ──────────────────────────────────────────────
     if recent_wr > 0.70:
@@ -1310,6 +1354,13 @@ async def learning_loop(bot) -> None:
 
     while True:
         try:
+            # Update last_run on EVERY poll tick, not just when run_once
+            # actually produced changes. Previously last_run only advanced
+            # inside successful adjustment cycles, so in low-volume periods
+            # /hub and /agent_status reported "last run never" forever even
+            # though the loop was alive. The heartbeat itself IS a run.
+            state.learning_loop_last_run = datetime.utcnow()
+
             # Heartbeat — confirms the loop is alive in Railway logs
             total_closed = await get_total_closed_count()
             current_row = await get_current_weights()

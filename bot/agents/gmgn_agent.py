@@ -307,11 +307,19 @@ async def _import_gmgn_wallets() -> int:
     logger.info("GMGN wallets: using method [%s] — %d candidate addresses",
                 method, len(wallet_addrs))
 
-    # Step 2: Fetch stats for each wallet
+    # Skip reason counters for end-of-cycle summary
+    skip_stats_none   = 0
+    skip_few_trades   = 0
+    skip_tier_zero    = 0
+
     imported = 0
     for address in list(wallet_addrs)[:20]:  # cap to avoid rate limits
+        short = f"{address[:4]}..{address[-4:]}"
         stats = await gmgn_wallet_stats(address)
         if not stats:
+            skip_stats_none += 1
+            logger.info("GMGN wallet %s: SKIP stats=None (portfolio lookup returned nothing)", short)
+            await asyncio.sleep(1.5)
             continue
 
         # Parse GMGN portfolio stats format:
@@ -320,7 +328,10 @@ async def _import_gmgn_wallets() -> int:
         wr = float(pnl.get("winrate") or stats.get("win_rate") or 0)
         total_trades = int(stats.get("buy") or pnl.get("token_num") or 0)
         if total_trades < 3:
-            continue  # not enough data
+            skip_few_trades += 1
+            logger.info("GMGN wallet %s: SKIP total_trades=%d < 3", short, total_trades)
+            await asyncio.sleep(1.5)
+            continue
 
         # Count wins from PnL buckets
         wins_2x = int(pnl.get("pnl_2x_5x_num") or 0)
@@ -335,13 +346,7 @@ async def _import_gmgn_wallets() -> int:
         else:
             avg_mult = 1.0
 
-        # Tags
         tags = (stats.get("common") or {}).get("tags") or []
-
-        logger.info(
-            "GMGN wallet %s..%s: trades=%d wr=%.0f%% avg=%.1fx tags=%s",
-            address[:4], address[-4:], total_trades, wr * 100, avg_mult, tags[:3],
-        )
 
         # Step 3: Score
         score, tier = _score_wallet(
@@ -349,25 +354,52 @@ async def _import_gmgn_wallets() -> int:
             avg_multiple=avg_mult, early_entry_rate=0.5,
         )
 
-        if tier > 0:
-            await upsert_wallet(
-                address=address, score=score, tier=tier,
-                win_rate=round(wr, 4), avg_multiple=round(avg_mult, 2),
-                wins=wins, losses=losses, total_trades=total_trades,
-                avg_entry_mcap=None, source="gmgn",
+        logger.info(
+            "GMGN wallet %s: trades=%d wr=%.0f%% avg=%.2fx score=%.1f tier=%d tags=%s",
+            short, total_trades, wr * 100, avg_mult, score, tier, tags[:3],
+        )
+
+        if tier <= 0:
+            skip_tier_zero += 1
+            # Explain WHY tier=0 (the three gates in _score_wallet)
+            gate_fail = []
+            if score < 40:
+                gate_fail.append(f"score {score:.0f}<40")
+            if avg_mult < 1.5:
+                gate_fail.append(f"avg_mult {avg_mult:.2f}<1.5")
+            if total_trades < 2:
+                gate_fail.append(f"trades {total_trades}<2")
+            logger.info(
+                "GMGN wallet %s: SKIP tier=0 — %s",
+                short, ", ".join(gate_fail) or "unknown",
             )
-            imported += 1
+            await asyncio.sleep(1.5)
+            continue
+
+        await upsert_wallet(
+            address=address, score=score, tier=tier,
+            win_rate=round(wr, 4), avg_multiple=round(avg_mult, 2),
+            wins=wins, losses=losses, total_trades=total_trades,
+            avg_entry_mcap=None, source="gmgn",
+        )
+        imported += 1
 
         await asyncio.sleep(1.5)  # rate limit between portfolio stats calls
 
-    if imported:
-        logger.info("GMGN wallets: imported %d from %d addresses via [%s]",
-                    imported, len(wallet_addrs), method)
+    logger.info(
+        "GMGN wallets: imported=%d skipped(stats_none=%d, few_trades=%d, tier_zero=%d) "
+        "from %d addresses via [%s]",
+        imported, skip_stats_none, skip_few_trades, skip_tier_zero,
+        len(wallet_addrs), method,
+    )
     await log_agent_run(
         "gmgn_wallets",
         tokens_found=len(wallet_addrs),
         tokens_saved=imported,
-        notes=f"method={method}",
+        notes=(
+            f"method={method} "
+            f"skip(stats={skip_stats_none}, few={skip_few_trades}, tier0={skip_tier_zero})"
+        ),
     )
 
     return imported

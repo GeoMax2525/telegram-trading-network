@@ -2230,11 +2230,32 @@ AGENT_PARAM_DEFAULTS = {
     "paper_starting_balance": 20.0,
     "paper_balance_offset": 0.0,
     "paper_reset_v20_done": 0.0,   # one-shot migration flag
+    "mc_weights_reset_v2_done": 0.0,  # one-shot MC weight reset flag
 
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
     "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
     "trail_sl_pct":          0.20, # distance from peak when trailing active
 }
+
+
+# Baseline MC-bucket weights (also the reset target). Each bucket sums to 1.0.
+# Enforced by _clamp_and_normalize_bucket in learning_loop.
+MC_WEIGHT_DEFAULTS = {
+    "low_mc_": {
+        "insider": 0.35, "fingerprint": 0.28, "chart": 0.05,
+        "rug": 0.20, "caller": 0.08, "market": 0.04,
+    },
+    "mid_mc_": {
+        "insider": 0.30, "fingerprint": 0.25, "chart": 0.15,
+        "rug": 0.18, "caller": 0.08, "market": 0.04,
+    },
+    "high_mc_": {
+        "insider": 0.20, "fingerprint": 0.20, "chart": 0.30,
+        "rug": 0.15, "caller": 0.10, "market": 0.05,
+    },
+}
+MC_WEIGHT_MIN = 0.02
+MC_WEIGHT_MAX = 0.45
 
 
 async def init_agent_params() -> int:
@@ -2314,6 +2335,47 @@ async def init_agent_params() -> int:
             "Paper balance reset to 20 SOL (offset=%+.4f, raw_was=%.4f)",
             needed_offset, raw,
         )
+        added += 1
+
+    # ── One-shot migration: reset MC weights to safe defaults ───────────
+    # Prior versions of _auto_adjust_params polarized weights toward 0.45/0.02
+    # without normalizing the bucket, yielding insider=45%, caller=45%,
+    # rest=2% by the time enough cycles ran. This block force-writes the
+    # user-approved baseline values so Agent 6 starts from a known state.
+    async with AsyncSessionLocal() as session:
+        mc_flag = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "mc_weights_reset_v2_done")
+        )).scalar_one_or_none()
+        mc_already_done = mc_flag is not None and mc_flag.param_value >= 1.0
+
+    if not mc_already_done:
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        async with AsyncSessionLocal() as session:
+            for prefix, weights in MC_WEIGHT_DEFAULTS.items():
+                for component, value in weights.items():
+                    pname = f"{prefix}{component}"
+                    row = (await session.execute(
+                        select(AgentParam).where(AgentParam.param_name == pname)
+                    )).scalar_one_or_none()
+                    if row is None:
+                        session.add(AgentParam(param_name=pname, param_value=float(value)))
+                    else:
+                        row.param_value = float(value)
+                        row.updated_at = datetime.utcnow()
+
+            flag_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "mc_weights_reset_v2_done")
+            )).scalar_one_or_none()
+            if flag_row is None:
+                session.add(AgentParam(param_name="mc_weights_reset_v2_done", param_value=1.0))
+            else:
+                flag_row.param_value = 1.0
+                flag_row.updated_at = datetime.utcnow()
+
+            await session.commit()
+
+        _log.info("MC weights reset to safe defaults (18 params force-written)")
         added += 1
 
     return added
