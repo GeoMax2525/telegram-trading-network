@@ -2032,8 +2032,7 @@ async def cmd_settradeparam(message: Message):
 
 @router.message(Command("agent6force"))
 async def cmd_agent6force(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.reply("⛔ Admin only.")
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         return
 
     from bot.agents.learning_loop import run_once as agent6_run_once
@@ -2080,6 +2079,141 @@ async def cmd_agent6force(message: Message):
         f"Changes: _{last_change}_",
     ]
     await message.reply("\n".join(lines), parse_mode="Markdown")
+
+
+# ── /healthcheck — Quick system summary ──────────────────────────────────────
+
+@router.message(Command("healthcheck"))
+async def cmd_healthcheck(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    from database.models import (
+        AsyncSessionLocal,
+        get_total_closed_count,
+        get_open_paper_trades,
+        get_token_count,
+    )
+    from sqlalchemy import text as _text
+
+    now = datetime.utcnow()
+    db_ok = False
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(_text("SELECT 1"))
+        db_ok = True
+    except Exception as exc:
+        logger.error("healthcheck DB probe failed: %s", exc)
+
+    open_paper = await get_open_paper_trades()
+    closed_count = await get_total_closed_count()
+    token_count = await get_token_count()
+    balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+
+    def _ago(ts):
+        if ts is None:
+            return "never"
+        mins = int((now - ts).total_seconds() / 60)
+        if mins < 1:
+            return "just now"
+        if mins < 60:
+            return f"{mins}m ago"
+        return f"{mins // 60}h{mins % 60:02d}m ago"
+
+    scanner_age = _ago(state.scanner_last_run)
+    learning_age = _ago(state.learning_loop_last_run)
+
+    lines = [
+        "🩺 *HEALTHCHECK*",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"DB: {'✅' if db_ok else '❌ UNREACHABLE'}",
+        f"Mode: `{state.trade_mode}` | Autotrade: `{state.autotrade_enabled}`",
+        f"Paper balance: `{balance:.4f} SOL` / `{state.PAPER_STARTING_BALANCE:.0f} SOL`",
+        f"Open paper: `{len(open_paper)}` | Closed: `{closed_count}`",
+        f"Tokens tracked: `{token_count}`",
+        "",
+        "*Agent liveness*",
+        f"Scanner last run: `{scanner_age}` ({state.scanner_status})",
+        f"Learning loop last run: `{learning_age}`",
+        f"Market regime: `{state.market_regime}` | SOL 24h: `{state.sol_24h_change:+.1f}%`",
+        "",
+        f"_Checked {now.strftime('%H:%M:%S')} UTC_",
+    ]
+    try:
+        await message.reply("\n".join(lines), parse_mode="Markdown")
+    except Exception:
+        await message.reply("\n".join(lines).replace("*", "").replace("`", ""), parse_mode=None)
+
+
+# ── /agent_status — Per-agent last run table ─────────────────────────────────
+
+@router.message(Command("agent_status"))
+async def cmd_agent_status(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    from database.models import AsyncSessionLocal, AgentLog
+    from sqlalchemy import select as _select, func as _func
+
+    # Pull latest row per agent_name (max run_at)
+    async with AsyncSessionLocal() as session:
+        subq = (
+            _select(AgentLog.agent_name, _func.max(AgentLog.run_at).label("last"))
+            .group_by(AgentLog.agent_name)
+            .subquery()
+        )
+        rows = (await session.execute(
+            _select(AgentLog)
+            .join(subq, (AgentLog.agent_name == subq.c.agent_name) & (AgentLog.run_at == subq.c.last))
+            .order_by(AgentLog.run_at.desc())
+        )).scalars().all()
+
+    now = datetime.utcnow()
+
+    def _ago(ts):
+        if ts is None:
+            return "never"
+        secs = int((now - ts).total_seconds())
+        if secs < 60:
+            return f"{secs}s ago"
+        mins = secs // 60
+        if mins < 60:
+            return f"{mins}m ago"
+        return f"{mins // 60}h{mins % 60:02d}m ago"
+
+    lines = [
+        "🤖 *AGENT STATUS*",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    if not rows:
+        lines.append("_No agent runs logged yet._")
+    else:
+        for r in rows:
+            notes = (r.notes or "")[:40]
+            lines.append(
+                f"`{r.agent_name:<16}` {_ago(r.run_at)} | "
+                f"found={r.tokens_found} saved={r.tokens_saved}"
+                + (f" | {notes}" if notes else "")
+            )
+
+    # Also show the live in-memory stats that aren't always logged to agent_logs
+    lines += [
+        "",
+        "*Live state*",
+        f"Scanner: `{state.scanner_status}` | last tick {_ago(state.scanner_last_run)}",
+        f"Agent 6: analyzed={state.learning_loop_last_analyzed}"
+        f" closed={state.learning_loop_total_closed}"
+        f" | last run {_ago(state.learning_loop_last_run)}",
+        f"Regime: `{state.market_regime}` | SOL 24h: `{state.sol_24h_change:+.1f}%`",
+        "",
+        f"_Checked {now.strftime('%H:%M:%S')} UTC_",
+    ]
+
+    try:
+        await message.reply("\n".join(lines), parse_mode="Markdown")
+    except Exception:
+        await message.reply("\n".join(lines).replace("*", "").replace("`", ""), parse_mode=None)
 
 
 # ── /addcaller ────────────────────────────────────────────────────────────────
