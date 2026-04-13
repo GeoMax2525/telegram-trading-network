@@ -1641,6 +1641,24 @@ async def get_closed_scans_for_analysis() -> list["Scan"]:
         return list(result.scalars().all())
 
 
+async def get_closed_paper_trades_for_analysis() -> list["PaperTrade"]:
+    """
+    Returns closed paper trades (status='closed') with entry + peak data.
+    Used by Pattern Engine as its learning corpus — the previous scans
+    table was fed by manual caller pastes and had no connection to what
+    the bot actually trades.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.entry_mc.is_not(None),
+                PaperTrade.peak_multiple.is_not(None),
+            ).order_by(PaperTrade.opened_at.asc())
+        )
+        return list(result.scalars().all())
+
+
 async def get_tokens_by_mints(mints: list[str]) -> "dict[str, Token]":
     """Batch-fetch Token rows by mint address. Returns {mint: Token}."""
     if not mints:

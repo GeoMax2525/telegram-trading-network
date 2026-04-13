@@ -32,12 +32,58 @@ from collections import Counter, defaultdict
 from statistics import mean, median
 
 from database.models import (
-    get_closed_scans_for_analysis,
+    get_closed_paper_trades_for_analysis,
     get_tokens_by_mints,
     upsert_pattern,
     log_agent_run,
     get_last_agent_run,
 )
+
+
+class _PaperTradeScanAdapter:
+    """
+    Shim that exposes a PaperTrade row under the attribute names the
+    pattern engine's fingerprint code was originally written for (scans
+    table). Keeps _compute_fingerprint / _compute_best_time_pattern /
+    _compute_caller_reliability untouched.
+    """
+    __slots__ = ("_pt",)
+
+    def __init__(self, pt):
+        self._pt = pt
+
+    @property
+    def contract_address(self):
+        return self._pt.token_address
+
+    @property
+    def entry_price(self):
+        # Misnomer from the scans table — this is market cap, not price.
+        return self._pt.entry_mc
+
+    @property
+    def entry_liquidity(self):
+        return None  # not tracked on paper trades
+
+    @property
+    def ai_score(self):
+        return self._pt.confidence_score
+
+    @property
+    def scanned_at(self):
+        return self._pt.opened_at
+
+    @property
+    def peak_multiplier(self):
+        return self._pt.peak_multiple
+
+    @property
+    def close_reason(self):
+        return self._pt.close_reason
+
+    @property
+    def scanned_by(self):
+        return None  # no caller attribution on paper trades
 
 logger = logging.getLogger(__name__)
 
@@ -221,16 +267,17 @@ async def run_once() -> tuple[int, int]:
     """
     Single engine tick. Returns (scans_analyzed, patterns_saved).
     """
-    scans = await get_closed_scans_for_analysis()
-    if not scans:
+    paper_trades = await get_closed_paper_trades_for_analysis()
+    if not paper_trades:
         await log_agent_run(
             "pattern_engine", tokens_found=0, tokens_saved=0,
-            notes="no closed scans with outcome data",
+            notes="no closed paper trades with outcome data",
         )
-        logger.info("Pattern Engine: no closed scans to analyze")
+        logger.info("Pattern Engine: no closed paper trades to analyze")
         return 0, 0
 
-    logger.info("Pattern Engine: analyzing %d closed scan(s)", len(scans))
+    scans = [_PaperTradeScanAdapter(pt) for pt in paper_trades]
+    logger.info("Pattern Engine: analyzing %d closed paper trade(s)", len(scans))
 
     # Join with Token table for rugcheck scores
     mints     = [s.contract_address for s in scans]
@@ -240,11 +287,12 @@ async def run_once() -> tuple[int, int]:
     winners_2x  = [s for s in scans if (s.peak_multiplier or 0) >= 2]
     winners_5x  = [s for s in scans if (s.peak_multiplier or 0) >= 5]
     winners_10x = [s for s in scans if (s.peak_multiplier or 0) >= 10]
+    # Paper-trade "rug" equivalent: SL hit with almost no upside (peak <1.5x).
     rugs        = [
         s for s in scans
-        if s.close_reason in ("rug_mc", "rug_liquidity")
+        if s.close_reason == "sl_hit" and (s.peak_multiplier or 0) < 1.5
     ]
-    losses      = [s for s in scans if (s.peak_multiplier or 0) < 2 and s.close_reason not in ("rug_mc", "rug_liquidity")]
+    losses      = [s for s in scans if (s.peak_multiplier or 0) < 2 and s not in rugs]
 
     logger.info(
         "Pattern Engine: %d scans → %d winners(2x) %d winners(5x) %d winners(10x) %d rugs %d losses",
