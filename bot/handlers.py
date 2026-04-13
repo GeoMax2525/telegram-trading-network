@@ -257,9 +257,9 @@ def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="⚙️ Settings",      callback_data="hub:settings"),
     )
 
-    # Row 5: Manual dead-position sweep
+    # Row 5: Manual close-all button
     builder.row(
-        InlineKeyboardButton(text="🗑️ Close Dead", callback_data="hub:close_dead"),
+        InlineKeyboardButton(text="🗑️ Close All", callback_data="hub:close_all"),
     )
     return builder.as_markup()
 
@@ -322,13 +322,12 @@ async def _learning_loop_line() -> str:
     )
 
 
-async def _manual_close_dead(bot) -> int:
+async def _manual_close_all_open(bot) -> int:
     """
-    Iterate every open paper trade, check the SAME dead-detection rules
-    the auto monitor uses, and close any that match. Returns the number
-    of positions closed. Used by /hub's "🗑️ Close Dead" button.
+    Close every open paper trade at its current market price, regardless
+    of dead-detection rules. Used by /hub's "🗑️ Close All" button.
+    Close reason is "manual_close". Broadcasts one summary line per kill.
     """
-    from bot.agents.paper_monitor import _check_dead, _update_dead_tracking
     from bot.scanner import fetch_live_data
     from database.models import (
         get_open_paper_trades, close_paper_trade, compute_paper_balance,
@@ -338,56 +337,47 @@ async def _manual_close_dead(bot) -> int:
     if not trades:
         return 0
 
-    now = datetime.utcnow()
-    killed = 0
+    closed = 0
     for pt in trades:
         try:
             live = await fetch_live_data(pt.token_address)
-            if not live:
-                continue
-            current_mc = live.get("market_cap") or 0
-            if current_mc <= 0:
-                continue
+            current_mc = (live or {}).get("market_cap") or 0
 
             entry_mc = pt.entry_mc or 1
+            # If we can't get a live price, close at entry (0 PnL) rather
+            # than skipping — user asked for all positions closed.
+            if current_mc <= 0:
+                current_mc = entry_mc
             current_mult = current_mc / entry_mc if entry_mc > 0 else 1.0
             peak_mc = max(pt.peak_mc or 0, current_mc)
             peak_mult = max(pt.peak_multiple or 1.0, current_mult)
 
-            zero_vol_since, last_move_at, _ = await _update_dead_tracking(
-                pt, live, current_mc, now,
-            )
-            is_dead, reason = _check_dead(
-                pt, live, current_mc, zero_vol_since, last_move_at, now,
-            )
-            if not is_dead:
-                continue
-
             sol = pt.paper_sol_spent
             pnl = round(sol * (current_mult - 1), 4)
-            await close_paper_trade(pt.id, "dead_token", pnl, peak_mc, peak_mult)
-            killed += 1
+            await close_paper_trade(pt.id, "manual_close", pnl, peak_mc, peak_mult)
+            closed += 1
 
             name = (pt.token_name or "Unknown").replace("_", " ")
-            loss_pct = (current_mult - 1) * 100
+            pct = (current_mult - 1) * 100
+            icon = "✅" if pnl > 0 else ("🟡" if pnl == 0 else "❌")
             try:
                 await bot.send_message(CALLER_GROUP_ID, "\n".join([
-                    "💀 DEAD POSITION CLOSED (manual)",
-                    f"🪙 ${name} | {reason} | {loss_pct:+.0f}%",
+                    f"{icon} PAPER TRADE CLOSED (manual)",
+                    f"🪙 ${name} | {current_mult:.2f}x | {pct:+.0f}%",
                     f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
                     f"PnL: {pnl:+.4f} SOL",
                 ]))
             except Exception:
                 pass
         except Exception as exc:
-            logger.debug("manual close_dead error on %s: %s",
+            logger.debug("manual close_all error on %s: %s",
                          (pt.token_address or "?")[:12], exc)
 
-    if killed:
+    if closed:
         state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-        logger.info("Manual close_dead: killed %d positions", killed)
+        logger.info("Manual close_all: closed %d positions", closed)
 
-    return killed
+    return closed
 
 
 async def _build_hub_text(autotrade: bool) -> str:
@@ -703,14 +693,14 @@ async def cb_hub(callback: CallbackQuery):
             show_alert=True,
         )
 
-    elif action == "close_dead":
-        await callback.answer("🗑️ Scanning open positions…")
-        killed = await _manual_close_dead(callback.bot)
-        if killed == 0:
-            await callback.message.reply("✅ No dead positions detected.")
+    elif action == "close_all":
+        await callback.answer("🗑️ Closing all open positions…")
+        closed = await _manual_close_all_open(callback.bot)
+        if closed == 0:
+            await callback.message.reply("ℹ️ No open positions to close.")
         else:
-            await callback.message.reply(f"🗑️ Closed {killed} dead position(s).")
-        # Refresh the hub so /hub Open Paper Trades reflects the closures
+            await callback.message.reply(f"🗑️ Closed {closed} open position(s).")
+        # Refresh the hub so Open Paper Trades block reflects the closures
         try:
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(
