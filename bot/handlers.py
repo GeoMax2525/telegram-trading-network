@@ -386,15 +386,17 @@ async def _manual_close_all_open(bot) -> int:
 
 
 async def _build_hub_text(autotrade: bool) -> str:
-    stats = await get_hub_stats()
+    """
+    Revolt Agent Hub — scannable plain-text dashboard.
+    Renders with parse_mode=None, so no markdown escaping needed.
+    """
+    DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    scans_today  = stats["scans_today"]
-    trades_today = stats["trades_today"]
-    today_pnl    = stats["today_pnl"]
-    alltime_pnl  = stats["alltime_pnl"]
-    win_rate     = stats["win_rate"]
-    total_closed = stats["total_closed"]
-    recent       = stats["recent_trades"]
+    stats = await get_hub_stats()
+    today_pnl           = stats["today_pnl"]
+    alltime_pnl         = stats["alltime_pnl"]
+    win_rate            = stats["win_rate"]
+    total_closed        = stats["total_closed"]
     token_count         = stats["token_count"]
     last_harvest        = stats["last_harvest"]
     wallet_total        = stats["wallet_total"]
@@ -402,68 +404,13 @@ async def _build_hub_text(autotrade: bool) -> str:
     wallet_tier2        = stats["wallet_tier2"]
     last_analyst        = stats["last_analyst"]
     pattern_total       = stats["pattern_total"]
-    pattern_winners     = stats["pattern_winners"]
-    pattern_rugs        = stats["pattern_rugs"]
     last_pattern_engine = stats["last_pattern_engine"]
 
-    at_status = "ON 🟢" if autotrade else "OFF 🔴"
-
-    # Scanner (Agent 4) line — always running
-    if state.scanner_last_run is None:
-        scanner_line = "✅ Scanner — always on | waiting for first run..."
-    else:
-        elapsed_s = int((datetime.utcnow() - state.scanner_last_run).total_seconds())
-        scanner_line = (
-            f"✅ Scanner — always on | {state.scanner_candidates_today} logged today "
-            f"| last scan {elapsed_s}s ago"
-        )
-
-    # Harvester last-run label
-    new_today = state.harvester_poll_tokens_today + state.harvester_gmgn_today
-    if last_harvest is None:
-        harvest_line = "✅ Harvester — graduated tokens | waiting for first run..."
-    else:
-        elapsed_min = int(
-            (datetime.utcnow() - last_harvest.run_at).total_seconds() / 60
-        )
-        harvest_line = (
-            f"✅ Harvester — {token_count} tokens | "
-            f"+{new_today} today (dex:{state.harvester_poll_tokens_today} gmgn:{state.harvester_gmgn_today}) "
-            f"| last {elapsed_min}min ago"
-        )
-
-    # Wallet Analyst last-run label
-    if last_analyst is None:
-        analyst_line = "✅ Wallet Analyst — waiting for first run..."
-    else:
-        elapsed_min = int(
-            (datetime.utcnow() - last_analyst.run_at).total_seconds() / 60
-        )
-        analyst_line = (
-            f"✅ Wallet Analyst — {wallet_total} wallets scored "
-            f"({wallet_tier1} T1 / {wallet_tier2} T2) "
-            f"| last run {elapsed_min}min ago"
-        )
-
-    # GMGN stats
     try:
-        gmgn = await get_gmgn_stats()
-        gmgn_line = (
-            f"✅ GMGN — {gmgn['wallets']} wallets ({gmgn['tier1']} T1) "
-            f"| {gmgn['trending']} trending | {state.harvester_gmgn_today} today"
-        )
+        ce_stats = await get_candidate_stats_today()
     except Exception:
-        gmgn_line = "✅ GMGN — starting..."
+        ce_stats = {"scored_today": 0, "high_conf": 0, "executed_today": 0}
 
-    ce_stats = await get_candidate_stats_today()
-    ce_icon = "✅" if autotrade else "🔧"
-    ce_line = (
-        f"{ce_icon} Confidence Engine — "
-        f"{ce_stats['scored_today']} scored | "
-        f"{ce_stats['high_conf']} high conf | "
-        f"{ce_stats['executed_today']} executed"
-    )
-    mode_display = _mode_label()
     try:
         paper_stats = await get_paper_trade_stats()
     except Exception:
@@ -471,200 +418,227 @@ async def _build_hub_text(autotrade: bool) -> str:
                        "total_pnl": 0.0, "today_count": 0, "today_pnl": 0.0,
                        "open_count": 0, "recent": []}
 
+    # ── Header ───────────────────────────────────────────────────────
+    mode_word  = {"live": "LIVE", "paper": "PAPER"}.get(state.trade_mode, "OFF")
+    chaos_word = "ON" if state.trade_mode == "paper" else "OFF"
+
+    real_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+    state.paper_balance = real_balance
+    starting = state.PAPER_STARTING_BALANCE or 1.0
+    pnl_val = real_balance - starting
+    pnl_pct = ((real_balance / starting) - 1) * 100
+
     lines = [
-        "🔑 *LOWKEY ALPHA HUB*",
-        "━━━━━━━━━━━━━━━━━━━━",
+        DIVIDER,
+        "🔑 REVOLT AGENT HUB",
+        f"Trade Mode: {mode_word}  |  Chaos Mode: {chaos_word}",
+        f"Balance: {real_balance:.2f} / {starting:.2f} SOL  |  P&L: {pnl_val:+.2f} SOL ({pnl_pct:+.1f}%)",
+        DIVIDER,
         "",
-        "🤖 *AGENTS*",
-        scanner_line,
-        harvest_line,
-        analyst_line,
-        gmgn_line,
-        _pattern_engine_line(last_pattern_engine, pattern_total, pattern_winners, pattern_rugs),
-        ce_line,
-        await _learning_loop_line(),
-        await _chart_detector_line(),
-        f"⚡ Trade Mode: *{mode_display}*",
+        "⚙️ AGENTS",
     ]
 
-    # Chaos mode section — only in paper mode
-    if state.trade_mode == "paper":
-        # compute_paper_balance() now applies paper_balance_offset internally,
-        # so this is the single source of truth for effective balance.
-        real_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-        state.paper_balance = real_balance
-        pnl_val = real_balance - state.PAPER_STARTING_BALANCE
-        pnl_pct = ((real_balance / state.PAPER_STARTING_BALANCE) - 1) * 100 if state.PAPER_STARTING_BALANCE > 0 else 0
-        lines += [
-            "",
-            "🔥 *CHAOS MODE — Max data collection*",
-            f"💼 Paper Balance: {real_balance:.2f} SOL / {state.PAPER_STARTING_BALANCE:.0f} SOL",
-            f"📈 Paper P&L: {pnl_val:+.2f} SOL ({pnl_pct:+.1f}%)",
-            f"📊 Candidates: {state.data_points_today} | Paper trades: {state.paper_trades_today}",
-        ]
+    # ── Agents block (column-aligned best-effort) ───────────────────
+    def _fmt_age(dt_or_secs, already_seconds: bool = False) -> str:
+        if dt_or_secs is None:
+            return "—"
+        if already_seconds:
+            secs = int(dt_or_secs)
+        else:
+            secs = int((datetime.utcnow() - dt_or_secs).total_seconds())
+        if secs < 60:
+            return f"{secs}s ago"
+        mins = secs // 60
+        if mins < 60:
+            return f"{mins}min ago"
+        hours = mins // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        return f"{hours // 24}d ago"
 
-    # MC repair progress
-    if state.backfill_progress and state.backfill_progress != "Not started":
-        bp = state.backfill_progress
-        if len(bp) > 70:
-            bp = bp[:70] + "..."
-        lines += ["", f"🔧 _{bp}_"]
+    def _fmt_agent(name: str, icon: str, detail: str, age: str) -> str:
+        return f"{name:<11} {icon}  {detail:<22} {age}"
 
+    scanner_age = _fmt_age(state.scanner_last_run)
+    lines.append(_fmt_agent(
+        "Scanner", "✅",
+        f"{state.scanner_candidates_today} today",
+        scanner_age,
+    ))
+
+    harvest_age = _fmt_age(last_harvest.run_at if last_harvest else None)
+    lines.append(_fmt_agent(
+        "Harvester", "✅",
+        f"{token_count:,} tokens",
+        harvest_age,
+    ))
+
+    analyst_age = _fmt_age(last_analyst.run_at if last_analyst else None)
+    lines.append(_fmt_agent(
+        "Wallets", "✅",
+        f"{wallet_total} ({wallet_tier1}T1/{wallet_tier2}T2)",
+        analyst_age,
+    ))
+
+    try:
+        gmgn = await get_gmgn_stats()
+        gmgn_detail = f"{gmgn['wallets']} wallets"
+    except Exception:
+        gmgn_detail = "starting..."
+    lines.append(_fmt_agent("GMGN", "✅", gmgn_detail, "—"))
+
+    pattern_age = _fmt_age(last_pattern_engine.run_at if last_pattern_engine else None)
+    lines.append(_fmt_agent(
+        "Patterns", "✅",
+        f"{pattern_total} active",
+        pattern_age,
+    ))
+
+    ce_icon = "✅" if autotrade else "⚙️"
+    lines.append(_fmt_agent(
+        "Confidence", ce_icon,
+        f"{ce_stats.get('scored_today', 0)} scored",
+        "—",
+    ))
+
+    regime = getattr(state, "market_regime", "NEUTRAL")
+    ll_icon = "⚠️" if regime == "BAD" else "✅"
+    ll_age = _fmt_age(state.learning_loop_last_run)
+    lines.append(_fmt_agent(
+        "Learning", ll_icon,
+        f"{regime} regime",
+        ll_age,
+    ))
+
+    try:
+        cs = await get_chart_pattern_stats_today()
+        chart_detail = f"{cs['detected']} detected"
+    except Exception:
+        chart_detail = "—"
+    lines.append(_fmt_agent("Charts", "✅", chart_detail, "—"))
+
+    # ── Performance ──────────────────────────────────────────────────
+    candidates_today = ce_stats.get("scored_today", 0) or state.scanner_candidates_today
     lines += [
         "",
-        "📊 *PERFORMANCE*",
-        f"Today: {today_pnl:+.4f} SOL | All Time: {alltime_pnl:+.4f} SOL",
-        f"Win Rate: {win_rate}% | Closed Trades: {total_closed}",
-        "",
-        f"📋 *PAPER TRADING* ({paper_stats['open_count']} open)",
-        f"Today: {paper_stats['today_count']} trades | "
-        f"strat {paper_stats.get('today_strategy_pnl', 0.0):+.2f} | "
-        f"meta {paper_stats.get('today_meta_pnl', 0.0):+.2f} SOL",
-        f"Strategy: {paper_stats.get('strategy_win_rate', 0)}% WR | "
-        f"{paper_stats.get('strategy_pnl', 0.0):+.2f} SOL "
-        f"({paper_stats.get('strategy_closed', 0)} bot-closed)",
-        f"Meta (manual): {paper_stats.get('meta_pnl', 0.0):+.2f} SOL "
-        f"— not learned from",
+        DIVIDER,
+        "📊 PERFORMANCE",
+        f"Today: {today_pnl:+.2f} SOL  |  All Time: {alltime_pnl:+.2f} SOL",
+        f"Win Rate: {win_rate}%  |  Closed: {total_closed} bot  |  Candidates: {candidates_today}",
     ]
 
-    # ── Open paper positions (live MC + multiplier) ─────────────────
+    # ── Open trades ─────────────────────────────────────────────────
     open_trades = await get_open_paper_trades()
     if open_trades:
-        # Fetch live MC for all open positions in parallel
         live_mcs = await asyncio.gather(
             *[fetch_current_market_cap(pt.token_address) for pt in open_trades],
             return_exceptions=True,
         )
 
-        lines += ["", "📂 *OPEN PAPER TRADES*"]
+        # Total unrealized P&L across all open positions
+        unrealized = 0.0
+        for pt, live_mc in zip(open_trades, live_mcs):
+            entry_mc = pt.entry_mc or 0
+            current_mc = live_mc if isinstance(live_mc, (int, float)) and live_mc else 0
+            if entry_mc > 0 and current_mc > 0:
+                mult = current_mc / entry_mc
+                unrealized += (pt.paper_sol_spent or 0) * (mult - 1)
+
+        lines += [
+            "",
+            DIVIDER,
+            f"📂 OPEN TRADES ({len(open_trades)})  |  Unrealized: {unrealized:+.2f} SOL",
+        ]
+
         now = datetime.utcnow()
         for idx, (pt, live_mc) in enumerate(zip(open_trades, live_mcs), 1):
-            raw_name = pt.token_name or "?"
-            safe_name = raw_name.replace("_", " ").replace("*", "").replace("", "")
-
+            raw_name = (pt.token_name or "?").replace("_", " ")
             entry_mc = pt.entry_mc or 0
             current_mc = live_mc if isinstance(live_mc, (int, float)) and live_mc else 0
             multiplier = (current_mc / entry_mc) if (entry_mc > 0 and current_mc > 0) else 0
 
-            # Warning flags
-            flag = ""
-            if multiplier >= 2.0:
-                flag = " 🔥"
-            elif 0 < multiplier < 1.0:
-                flag = " ⚠️"
-
-            # TP/SL target MCs derived from entry
-            tp_mc = entry_mc * pt.take_profit_x if entry_mc > 0 else 0
-            sl_mc = entry_mc * (1 - pt.stop_loss_pct / 100) if entry_mc > 0 else 0
-
-            # Time since opened
-            elapsed = now - pt.opened_at
-            mins = int(elapsed.total_seconds() // 60)
-            if mins < 1:
-                age = "just now"
-            elif mins < 60:
-                age = f"{mins}min ago"
-            elif mins < 1440:
-                age = f"{mins // 60}h ago"
+            if multiplier >= 1.3:
+                color = "🟢"
+            elif multiplier >= 1.0:
+                color = "🟡"
             else:
-                age = f"{mins // 1440}d ago"
+                color = "🔴"
 
-            mc_entry_str = _format_usd(entry_mc) if entry_mc else "?"
-            mc_now_str = _format_usd(current_mc) if current_mc else "?"
+            tp_mc = entry_mc * (pt.take_profit_x or 0) if entry_mc > 0 else 0
+            sl_mc = entry_mc * (1 - (pt.stop_loss_pct or 0) / 100) if entry_mc > 0 else 0
+
+            elapsed = now - pt.opened_at if pt.opened_at else None
+            if elapsed is None:
+                age = "—"
+            else:
+                mins = int(elapsed.total_seconds() // 60)
+                if mins < 1:
+                    age = "just now"
+                elif mins < 60:
+                    age = f"{mins}min ago"
+                elif mins < 1440:
+                    age = f"{mins // 60}h ago"
+                else:
+                    age = f"{mins // 1440}d ago"
+
             mult_str = f"{multiplier:.2f}x" if multiplier else "?"
+            ca = pt.token_address or "?"
 
-            lines.append(f"/{idx} ${safe_name}{flag}")
-            lines.append(f"MC: {mc_entry_str} → {mc_now_str} | {mult_str}")
+            lines.append("")
+            lines.append(f"{idx}. ${raw_name}  {mult_str} {color}")
+            lines.append(f"   MC: {_format_usd(entry_mc)} → {_format_usd(current_mc)}")
             lines.append(
-                f"TP: {pt.take_profit_x:.1f}x ({_format_usd(tp_mc)}) | "
-                f"SL: {pt.stop_loss_pct:.1f}% ({_format_usd(sl_mc)})"
+                f"   TP: {(pt.take_profit_x or 0):.1f}x ({_format_usd(tp_mc)})  "
+                f"SL: {(pt.stop_loss_pct or 0):.0f}% ({_format_usd(sl_mc)})"
             )
-            lines.append(f"Opened: _{age}_")
+            lines.append(f"   CA: {ca}")
+            lines.append(f"   Opened: {age}")
 
-    # Wallet summary line — counts by type + clusters
-    try:
-        from database.models import (
-            AsyncSessionLocal as _ASL, select as _select, func as _func,
-            Wallet as _Wallet, get_all_wallet_clusters as _gacs,
-        )
-        async with _ASL() as _session:
-            total_wallets = (await _session.execute(
-                _select(_func.count(_Wallet.address))
-            )).scalar() or 0
-            early_insider_count = (await _session.execute(
-                _select(_func.count(_Wallet.address)).where(
-                    _Wallet.wallet_type == "early_insider"
-                )
-            )).scalar() or 0
-            coordinated_count = (await _session.execute(
-                _select(_func.count(_Wallet.address)).where(
-                    _Wallet.wallet_type == "coordinated_group"
-                )
-            )).scalar() or 0
-        cluster_rows = await _gacs()
-        cluster_total = len(cluster_rows)
-    except Exception:
-        total_wallets = early_insider_count = coordinated_count = cluster_total = 0
-
-    lines += [
-        "",
-        "🔥 *TOP WALLETS*",
-        (
-            f"👛 Wallets: {total_wallets} total | "
-            f"{early_insider_count} early_insider | "
-            f"{coordinated_count} coordinated | "
-            f"{cluster_total} clusters"
-        ),
-    ]
-
+    # ── Top wallets ─────────────────────────────────────────────────
+    lines += ["", DIVIDER, "🧠 TOP WALLETS"]
     top_wallets = await get_top_wallets(limit=3)
     if not top_wallets:
-        lines.append("_No wallets scored yet — Agent 2 is analyzing..._")
+        lines.append("No wallets scored yet — Agent 2 is analyzing...")
     else:
         for i, w in enumerate(top_wallets, 1):
             short = f"{w.address[:4]}...{w.address[-4:]}"
-            wtype = getattr(w, "wallet_type", None) or "unknown"
-            cluster = getattr(w, "cluster_id", None)
-            # wtype + cluster contain underscores — wrap in backticks so
-            # Telegram Markdown doesn't treat them as italic delimiters
-            suffix = f" [{cluster}]" if cluster else ""
+            wr = int((w.win_rate or 0) * 100)
             lines.append(
-                f"#{i} {short} | Score: {w.score:.0f} | "
-                f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | T{w.tier}"
-                f" | {wtype}{suffix}"
+                f"#{i}  {short}  Score:{w.score:.0f}  "
+                f"{w.wins}W-{w.losses}L  {wr}%  T{w.tier}"
             )
 
-    # Show recent paper trades (ONLY from PaperTrades table, never Positions)
-    if state.trade_mode == "paper":
-        lines += ["", "📋 *RECENT PAPER TRADES*"]
-        if paper_stats["recent"]:
-            for pt in paper_stats["recent"][:5]:
-                # Use $ + symbol style name, escape for Markdown
-                raw_name = pt.token_name or "?"
-                # Strip anything that breaks Markdown
-                safe_name = raw_name.replace("_", " ").replace("*", "").replace("", "")
-                flag = ""
-                if getattr(pt, "sold_too_early", None):
-                    flag = " 😬"
-                elif getattr(pt, "sold_too_late", None):
-                    flag = " ⏰"
-                if pt.status == "open":
-                    mc_str = _format_usd(pt.entry_mc) if pt.entry_mc else "?"
-                    lines.append(f"🟡 {safe_name} — open @ {mc_str}")
-                elif pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
-                    lines.append(f"✅ {safe_name} — {pt.peak_multiple or 0:.1f}x +{pt.paper_pnl_sol:.4f} SOL{flag}")
-                else:
-                    reason = {"tp_hit": "TP hit", "sl_hit": "SL hit"}.get(pt.close_reason or "", pt.close_reason or "")
-                    lines.append(f"❌ {safe_name} — {reason} {pt.paper_pnl_sol or 0:.4f} SOL{flag}")
-        else:
-            lines.append("_Waiting for paper trades..._")
+    # ── Recent trades ───────────────────────────────────────────────
+    lines += ["", DIVIDER, "📋 RECENT TRADES"]
+    reason_map = {
+        "tp_hit":         "TP hit",
+        "sl_hit":         "SL hit",
+        "trail_hit":      "trail",
+        "breakeven_stop": "BE stop",
+        "profit_trail":   "prof trl",
+        "stale":          "stale",
+        "expired":        "expired",
+        "manual_close":   "manual",
+        "dead_token":     "dead",
+    }
+    recent = paper_stats.get("recent") or []
+    if recent:
+        for pt in recent[:5]:
+            raw_name = (pt.token_name or "?").replace("_", " ")
+            name_col = raw_name[:15]
+            if pt.status == "open":
+                lines.append(f"🟡 {name_col:<15}  open")
+            elif pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
+                mult = f"{(pt.peak_multiple or 0):.1f}x"
+                lines.append(f"✅ {name_col:<15}  {mult:<8} {pt.paper_pnl_sol:+.2f} SOL")
+            else:
+                reason = reason_map.get(pt.close_reason or "", pt.close_reason or "?")
+                pnl = pt.paper_pnl_sol or 0
+                lines.append(f"❌ {name_col:<15}  {reason:<8} {pnl:+.2f} SOL")
     else:
-        lines += ["", "📈 *RECENT AI TRADES*"]
-        lines.append("_Set mode to PAPER to start AI trading_")
+        lines.append("No recent trades yet")
 
-    lines.append("")
-    lines.append(f"_Updated: {datetime.utcnow().strftime('%H:%M:%S')} UTC_")
-
+    lines.append(DIVIDER)
     return "\n".join(lines)
 
 
@@ -675,18 +649,13 @@ async def cmd_hub(message: Message):
         return
     try:
         text = await _build_hub_text(state.autotrade_enabled)
-        await message.reply(text, parse_mode="Markdown", reply_markup=_hub_keyboard(state.autotrade_enabled))
+        await message.reply(
+            text, parse_mode=None,
+            reply_markup=_hub_keyboard(state.autotrade_enabled),
+        )
     except Exception as exc:
         logger.error("Hub render failed: %s", exc)
-        # Fallback: send without Markdown if parse fails
-        try:
-            text = await _build_hub_text(state.autotrade_enabled)
-            # Strip markdown formatting
-            plain = text.replace("*", "").replace("", "").replace("_", "")
-            await message.reply(plain, parse_mode=None, reply_markup=_hub_keyboard(state.autotrade_enabled))
-        except Exception as exc2:
-            logger.error("Hub fallback also failed: %s", exc2)
-            await message.reply(f"⛔ Hub error: {exc}", parse_mode=None)
+        await message.reply(f"⛔ Hub error: {exc}", parse_mode=None)
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("hub:"))
@@ -698,7 +667,7 @@ async def cb_hub(callback: CallbackQuery):
         text = await _build_hub_text(state.autotrade_enabled)
         try:
             await callback.message.edit_text(
-                text, parse_mode="Markdown",
+                text, parse_mode=None,
                 reply_markup=_hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
@@ -718,20 +687,11 @@ async def cb_hub(callback: CallbackQuery):
         try:
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(
-                text, parse_mode="Markdown",
+                text, parse_mode=None,
                 reply_markup=_hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
-            # Markdown failed — retry plain
-            try:
-                text = await _build_hub_text(state.autotrade_enabled)
-                plain = text.replace("*", "").replace("", "").replace("_", "")
-                await callback.message.edit_text(
-                    plain, parse_mode=None,
-                    reply_markup=_hub_keyboard(state.autotrade_enabled),
-                )
-            except Exception:
-                pass
+            pass
 
     elif action == "live_locked":
         await callback.answer(
@@ -751,7 +711,7 @@ async def cb_hub(callback: CallbackQuery):
         try:
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(
-                text, parse_mode="Markdown",
+                text, parse_mode=None,
                 reply_markup=_hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
