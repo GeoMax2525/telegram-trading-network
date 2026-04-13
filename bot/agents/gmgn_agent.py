@@ -99,7 +99,7 @@ async def gmgn_smart_money_trades(limit: int = 50) -> list:
 
 
 async def gmgn_kol_trades(limit: int = 100) -> list:
-    """Method B fallback — `gmgn-cli track kol --raw`."""
+    """Method B fallback — gmgn-cli track kol --raw."""
     data = await _run_cli("track", "kol", "--chain", "sol", "--limit", str(limit))
     if isinstance(data, dict):
         return data.get("list") or (data.get("data") or {}).get("list") or []

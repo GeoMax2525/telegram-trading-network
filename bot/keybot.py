@@ -548,7 +548,7 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
     elif action == "sol_limit_input":
         await state.set_state(KeyBotStates.waiting_for_sol_limit)
         await callback.message.edit_text(
-            "💰 *Set SOL Loss Limit*\n\nType the maximum SOL you can lose per day _(e.g. `0.5`)_:",
+            "💰 *Set SOL Loss Limit*\n\nType the maximum SOL you can lose per day _(e.g. 0.5)_:",
             parse_mode="Markdown",
             reply_markup=_wallet_input_keyboard(),
         )
@@ -557,7 +557,7 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
     elif action == "pct_limit_input":
         await state.set_state(KeyBotStates.waiting_for_pct_limit)
         await callback.message.edit_text(
-            "📊 *Set % Loss Limit*\n\nType the maximum % of wallet balance to lose per day _(e.g. `10`)_:",
+            "📊 *Set % Loss Limit*\n\nType the maximum % of wallet balance to lose per day _(e.g. 10)_:",
             parse_mode="Markdown",
             reply_markup=_wallet_input_keyboard(),
         )
@@ -574,7 +574,7 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(
             "⏱️ *Cooldown Period*\n\n"
             "Type the number of minutes to wait between buys.\n"
-            "_(Send `0` to disable)_",
+            "_(Send 0 to disable)_",
             parse_mode="Markdown",
             reply_markup=_wallet_input_keyboard(),
         )
@@ -623,7 +623,7 @@ async def receive_buy_amount(message: Message, state: FSMContext):
             raise ValueError
     except ValueError:
         await message.reply(
-            "⚠️ Please enter a valid number greater than 0 (e.g. `0.3` or `1.5`).",
+            "⚠️ Please enter a valid number greater than 0 (e.g. 0.3 or 1.5).",
             parse_mode="Markdown",
             reply_markup=_wallet_input_keyboard(),
         )
@@ -683,7 +683,7 @@ async def receive_sol_limit(message: Message, state: FSMContext):
             raise ValueError
     except ValueError:
         await message.reply(
-            "⚠️ Enter a valid SOL amount greater than 0 (e.g. `0.5`).",
+            "⚠️ Enter a valid SOL amount greater than 0 (e.g. 0.5).",
             parse_mode="Markdown",
             reply_markup=_wallet_input_keyboard(),
         )
@@ -712,7 +712,7 @@ async def receive_pct_limit(message: Message, state: FSMContext):
             raise ValueError
     except ValueError:
         await message.reply(
-            "⚠️ Enter a percentage between 1 and 100 (e.g. `10`).",
+            "⚠️ Enter a percentage between 1 and 100 (e.g. 10).",
             parse_mode="Markdown",
             reply_markup=_wallet_input_keyboard(),
         )
@@ -741,7 +741,7 @@ async def receive_cooldown(message: Message, state: FSMContext):
             raise ValueError
     except ValueError:
         await message.reply(
-            "⚠️ Enter a whole number of minutes (0 to disable, e.g. `5`).",
+            "⚠️ Enter a whole number of minutes (0 to disable, e.g. 5).",
             parse_mode="Markdown",
             reply_markup=_wallet_input_keyboard(),
         )
@@ -860,11 +860,11 @@ async def cb_keybot_buy(callback: CallbackQuery):
         mc_str = ""
         await status_msg.edit_text(
             f"✅ *Swap Executed!*\n\n"
-            f"🪙 Token:          `{token_name}`\n"
-            f"💰 Spent:          `{s.buy_amount_sol} SOL`\n"
-            f"📊 Price Impact:   `{price_impact:.2f}%`\n"
-            f"🎯 Take Profit:    `{s.take_profit_x}x`\n"
-            f"🛑 Stop Loss:      `-{s.stop_loss_pct}%`\n\n"
+            f"🪙 Token:          {token_name}\n"
+            f"💰 Spent:          {s.buy_amount_sol} SOL\n"
+            f"📊 Price Impact:   {price_impact:.2f}%\n"
+            f"🎯 Take Profit:    {s.take_profit_x}x\n"
+            f"🛑 Stop Loss:      -{s.stop_loss_pct}%\n\n"
             f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
             parse_mode="Markdown",
             disable_web_page_preview=True,
@@ -873,7 +873,7 @@ async def cb_keybot_buy(callback: CallbackQuery):
     except Exception as exc:
         logger.error("Swap failed for %s: %s", address, exc)
         await status_msg.edit_text(
-            f"❌ *Swap Failed*\n\n`{str(exc)[:300]}`",
+            f"❌ *Swap Failed*\n\n{str(exc)[:300]}",
             parse_mode="Markdown",
         )
         return
@@ -946,7 +946,7 @@ async def cb_keybot_sell(callback: CallbackQuery):
         token_amount = await get_token_balance(wallet_address, address)
         if token_amount == 0:
             await status_msg.edit_text(
-                f"📭 *No tokens to sell*\n\nWallet holds 0 of `{token_name}`.",
+                f"📭 *No tokens to sell*\n\nWallet holds 0 of {token_name}.",
                 parse_mode="Markdown",
             )
             return
@@ -976,13 +976,13 @@ async def cb_keybot_sell(callback: CallbackQuery):
             if pnl_sol < 0:
                 await add_daily_loss(user_id, abs(pnl_sol))
 
-        pnl_str = f"\n💹 PnL:            `{pnl_sol:+.4f} SOL`" if pnl_sol is not None else ""
+        pnl_str = f"\n💹 PnL:            {pnl_sol:+.4f} SOL" if pnl_sol is not None else ""
         await status_msg.edit_text(
             f"✅ *Sell Executed!*\n\n"
-            f"🪙 Token:          `{token_name}`\n"
-            f"📦 Sold:           `100% of holdings`\n"
-            f"💰 SOL Received:   `~{sol_received} SOL`\n"
-            f"📊 Price Impact:   `{price_impact:.2f}%`"
+            f"🪙 Token:          {token_name}\n"
+            f"📦 Sold:           100% of holdings\n"
+            f"💰 SOL Received:   ~{sol_received} SOL\n"
+            f"📊 Price Impact:   {price_impact:.2f}%"
             f"{pnl_str}\n\n"
             f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
             parse_mode="Markdown",
@@ -992,7 +992,7 @@ async def cb_keybot_sell(callback: CallbackQuery):
     except Exception as exc:
         logger.error("Sell failed for %s: %s", address, exc)
         await status_msg.edit_text(
-            f"❌ *Sell Failed*\n\n`{str(exc)[:300]}`",
+            f"❌ *Sell Failed*\n\n{str(exc)[:300]}",
             parse_mode="Markdown",
         )
 
@@ -1077,7 +1077,7 @@ async def handle_sell_pct_input(message: Message, state: FSMContext):
         full_balance = await get_token_balance(wallet_address, address)
         if full_balance == 0:
             await status_msg.edit_text(
-                f"📭 *No tokens to sell*\n\nWallet holds 0 of `{token_name}`.",
+                f"📭 *No tokens to sell*\n\nWallet holds 0 of {token_name}.",
                 parse_mode="Markdown",
             )
             return
@@ -1108,14 +1108,14 @@ async def handle_sell_pct_input(message: Message, state: FSMContext):
                 await close_position(pos.id, "manual", pnl_sol)
                 if pnl_sol < 0:
                     await add_daily_loss(user_id, abs(pnl_sol))
-                pnl_str = f"\n💹 PnL:            `{pnl_sol:+.4f} SOL`"
+                pnl_str = f"\n💹 PnL:            {pnl_sol:+.4f} SOL"
 
         await status_msg.edit_text(
             f"✅ *Custom Sell Executed!*\n\n"
-            f"🪙 Token:          `{token_name}`\n"
-            f"✂️ Sold:           `{pct:.1f}% of holdings`\n"
-            f"💰 SOL Received:   `~{sol_received} SOL`\n"
-            f"📊 Price Impact:   `{price_impact:.2f}%`"
+            f"🪙 Token:          {token_name}\n"
+            f"✂️ Sold:           {pct:.1f}% of holdings\n"
+            f"💰 SOL Received:   ~{sol_received} SOL\n"
+            f"📊 Price Impact:   {price_impact:.2f}%"
             f"{pnl_str}\n\n"
             f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
             parse_mode="Markdown",
@@ -1125,7 +1125,7 @@ async def handle_sell_pct_input(message: Message, state: FSMContext):
     except Exception as exc:
         logger.error("Custom sell failed for %s: %s", address, exc)
         await status_msg.edit_text(
-            f"❌ *Sell Failed*\n\n`{str(exc)[:300]}`",
+            f"❌ *Sell Failed*\n\n{str(exc)[:300]}",
             parse_mode="Markdown",
         )
 
@@ -1161,7 +1161,7 @@ async def cb_close_position(callback: CallbackQuery):
         if token_amount == 0:
             await close_position(pos.id, "manual", pnl_sol=None)
             await status_msg.edit_text(
-                f"📭 *Position Closed*\n\nNo tokens found in wallet for `{pos.token_name}`.",
+                f"📭 *Position Closed*\n\nNo tokens found in wallet for {pos.token_name}.",
                 parse_mode="Markdown",
             )
             return
@@ -1184,9 +1184,9 @@ async def cb_close_position(callback: CallbackQuery):
         pnl_emoji = "🟢" if pnl_sol >= 0 else "🔴"
         await status_msg.edit_text(
             f"✅ *Position Closed*\n\n"
-            f"🪙 Token:          `{pos.token_name}`\n"
-            f"💰 SOL Received:   `{sol_received} SOL`\n"
-            f"{pnl_emoji} PnL:            `{pnl_sol:+.4f} SOL`\n\n"
+            f"🪙 Token:          {pos.token_name}\n"
+            f"💰 SOL Received:   {sol_received} SOL\n"
+            f"{pnl_emoji} PnL:            {pnl_sol:+.4f} SOL\n\n"
             f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
             parse_mode="Markdown",
             disable_web_page_preview=True,
@@ -1199,7 +1199,7 @@ async def cb_close_position(callback: CallbackQuery):
     except Exception as exc:
         logger.error("Close position %d failed: %s", position_id, exc)
         await status_msg.edit_text(
-            f"❌ *Close Failed*\n\n`{str(exc)[:300]}`", parse_mode="Markdown"
+            f"❌ *Close Failed*\n\n{str(exc)[:300]}", parse_mode="Markdown"
         )
 
 
@@ -1286,9 +1286,9 @@ async def position_monitor_loop(bot: Bot) -> None:
                             await bot.send_message(
                                 CALLER_GROUP_ID,
                                 f"{emoji} *{label}*\n\n"
-                                f"🪙 Token: `{pos.token_name}`\n"
-                                f"📊 Entry MC: `{entry_str}` | Exit MC: `{exit_str}`\n"
-                                f"📈 Result: `{mult}x` | PNL: `{pnl_sign}{pnl_sol:.4f} SOL`\n\n"
+                                f"🪙 Token: {pos.token_name}\n"
+                                f"📊 Entry MC: {entry_str} | Exit MC: {exit_str}\n"
+                                f"📈 Result: {mult}x | PNL: {pnl_sign}{pnl_sol:.4f} SOL\n\n"
                                 f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
                                 parse_mode="Markdown",
                                 disable_web_page_preview=True,
@@ -1311,9 +1311,9 @@ async def position_monitor_loop(bot: Bot) -> None:
                         await bot.send_message(
                             CALLER_GROUP_ID,
                             f"{emoji} *{label}* ⚠️ _Manual sell required_\n\n"
-                            f"🪙 Token: `{pos.token_name}`\n"
-                            f"📊 Entry MC: `{entry_str}` | Exit MC: `{exit_str}`\n"
-                            f"📈 Result: `{mult}x`\n\n"
+                            f"🪙 Token: {pos.token_name}\n"
+                            f"📊 Entry MC: {entry_str} | Exit MC: {exit_str}\n"
+                            f"📈 Result: {mult}x\n\n"
                             f"_No server wallet configured — sell manually._",
                             parse_mode="Markdown",
                             message_thread_id=SCAN_TOPIC_ID,

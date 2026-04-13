@@ -547,7 +547,7 @@ async def _source4_gmgn_flagged() -> list[dict]:
     as either trending on GMGN or touched by smart money. Filters to
     recent (last 6h) tokens within the scanner's mcap/liquidity bands,
     and tags them with source="gmgn_smart" so trade_profiles matches
-    the `trending_gmgn` / `smart_money_gmgn` pattern_types.
+    the trending_gmgn / smart_money_gmgn pattern_types.
 
     This is the ONLY source that actually reads the Token table —
     source 1 and source 3 both just hit the DexScreener profiles
@@ -957,9 +957,12 @@ async def run_once() -> tuple[int, int]:
             )
 
             logger.info(
-                "Scanner: PAPER TRADE %s conf=%.0f size=%.0f%% sol=%.4f bal=%.4f",
-                scored.get("name", "?")[:20], conf, size_pct * 100,
-                paper_sol, state.paper_balance,
+                "Scanner: PAPER TRADE %s conf=%.0f size=%.1f%% sol=%.4f bal=%.4f",
+                scored.get("name", "?")[:20],
+                scored.get("confidence_score", 0),
+                learned_pct * 100,
+                paper_sol,
+                state.paper_balance,
             )
             try:
                 # pattern_type now stores the COMMA-SEPARATED list of matched

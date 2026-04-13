@@ -90,18 +90,18 @@ def build_trade_card(data: dict) -> str:
         f"{'─' * 34}",
         f"",
         f"🪙 *{data['name']}* (${data['symbol']})",
-        f"🔗 `{data['address']}`",
+        f"🔗 {data['address']}",
         f"",
-        f"💵 Price:       `{_format_price(data['price_usd'])}`",
-        f"📊 Market Cap:  `{_format_usd(data['market_cap'])}`",
-        f"💧 Liquidity:   `{_format_usd(data['liquidity_usd'])}`",
-        f"📈 Volume 24h:  `{_format_usd(data['volume_24h'])}`",
-        f"🕯 Change 24h:  `{change_sign}{data['price_change_24h']:.1f}%`",
+        f"💵 Price:       {_format_price(data['price_usd'])}",
+        f"📊 Market Cap:  {_format_usd(data['market_cap'])}",
+        f"💧 Liquidity:   {_format_usd(data['liquidity_usd'])}",
+        f"📈 Volume 24h:  {_format_usd(data['volume_24h'])}",
+        f"🕯 Change 24h:  {change_sign}{data['price_change_24h']:.1f}%",
         f"",
         f"{'─' * 34}",
         f"🧠 *AI SCORE*",
         f"",
-        f"`[{score_bar}]` *{data['total']}/100*",
+        f"[{score_bar}] *{data['total']}/100*",
         f"",
         f"  • Liquidity:            {data['components']['liquidity']:.1f}/20",
         f"  • Volume:               {data['components']['volume']:.1f}/20",
@@ -135,17 +135,17 @@ def _build_position_section(
     lines = [
         f"{'─' * 34}",
         f"💼 *YOUR POSITION*",
-        f"🪙 Hold: `{balance:,.0f} tokens ({pct_supply:.3f}% supply)`",
-        f"💵 Value: `{_format_usd(value_usd)}` / `{value_sol:.4f} SOL`",
+        f"🪙 Hold: {balance:,.0f} tokens ({pct_supply:.3f}% supply)",
+        f"💵 Value: {_format_usd(value_usd)} / {value_sol:.4f} SOL",
     ]
 
     if pos and pos.entry_mc and pos.entry_mc > 0 and current_mc > 0:
         pct_change = (current_mc - pos.entry_mc) / pos.entry_mc * 100
         sign       = "+" if pct_change >= 0 else ""
         lines.append(
-            f"📈 Avg Entry: `{_format_usd(pos.entry_mc)} MC`"
-            f" | Now: `{_format_usd(current_mc)} MC`"
-            f" | `{sign}{pct_change:.1f}%`"
+            f"📈 Avg Entry: {_format_usd(pos.entry_mc)} MC"
+            f" | Now: {_format_usd(current_mc)} MC"
+            f" | {sign}{pct_change:.1f}%"
         )
 
     return "\n".join(lines)
@@ -498,9 +498,9 @@ async def _build_hub_text(autotrade: bool) -> str:
         lines += [
             "",
             "🔥 *CHAOS MODE — Max data collection*",
-            f"💼 Paper Balance: `{real_balance:.2f} SOL` / {state.PAPER_STARTING_BALANCE:.0f} SOL",
-            f"📈 Paper P&L: `{pnl_val:+.2f} SOL` (`{pnl_pct:+.1f}%`)",
-            f"📊 Candidates: `{state.data_points_today}` | Paper trades: `{state.paper_trades_today}`",
+            f"💼 Paper Balance: {real_balance:.2f} SOL / {state.PAPER_STARTING_BALANCE:.0f} SOL",
+            f"📈 Paper P&L: {pnl_val:+.2f} SOL ({pnl_pct:+.1f}%)",
+            f"📊 Candidates: {state.data_points_today} | Paper trades: {state.paper_trades_today}",
         ]
 
     # MC repair progress
@@ -513,17 +513,17 @@ async def _build_hub_text(autotrade: bool) -> str:
     lines += [
         "",
         "📊 *PERFORMANCE*",
-        f"Today: `{today_pnl:+.4f} SOL` | All Time: `{alltime_pnl:+.4f} SOL`",
-        f"Win Rate: `{win_rate}%` | Closed Trades: `{total_closed}`",
+        f"Today: {today_pnl:+.4f} SOL | All Time: {alltime_pnl:+.4f} SOL",
+        f"Win Rate: {win_rate}% | Closed Trades: {total_closed}",
         "",
         f"📋 *PAPER TRADING* ({paper_stats['open_count']} open)",
-        f"Today: `{paper_stats['today_count']}` trades | "
-        f"strat `{paper_stats.get('today_strategy_pnl', 0.0):+.2f}` | "
-        f"meta `{paper_stats.get('today_meta_pnl', 0.0):+.2f}` SOL",
-        f"Strategy: `{paper_stats.get('strategy_win_rate', 0)}%` WR | "
-        f"`{paper_stats.get('strategy_pnl', 0.0):+.2f}` SOL "
+        f"Today: {paper_stats['today_count']} trades | "
+        f"strat {paper_stats.get('today_strategy_pnl', 0.0):+.2f} | "
+        f"meta {paper_stats.get('today_meta_pnl', 0.0):+.2f} SOL",
+        f"Strategy: {paper_stats.get('strategy_win_rate', 0)}% WR | "
+        f"{paper_stats.get('strategy_pnl', 0.0):+.2f} SOL "
         f"({paper_stats.get('strategy_closed', 0)} bot-closed)",
-        f"Meta (manual): `{paper_stats.get('meta_pnl', 0.0):+.2f}` SOL "
+        f"Meta (manual): {paper_stats.get('meta_pnl', 0.0):+.2f} SOL "
         f"— not learned from",
     ]
 
@@ -540,7 +540,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         now = datetime.utcnow()
         for idx, (pt, live_mc) in enumerate(zip(open_trades, live_mcs), 1):
             raw_name = pt.token_name or "?"
-            safe_name = raw_name.replace("_", " ").replace("*", "").replace("`", "")
+            safe_name = raw_name.replace("_", " ").replace("*", "").replace("", "")
 
             entry_mc = pt.entry_mc or 0
             current_mc = live_mc if isinstance(live_mc, (int, float)) and live_mc else 0
@@ -574,10 +574,10 @@ async def _build_hub_text(autotrade: bool) -> str:
             mult_str = f"{multiplier:.2f}x" if multiplier else "?"
 
             lines.append(f"/{idx} ${safe_name}{flag}")
-            lines.append(f"MC: `{mc_entry_str}` → `{mc_now_str}` | `{mult_str}`")
+            lines.append(f"MC: {mc_entry_str} → {mc_now_str} | {mult_str}")
             lines.append(
-                f"TP: `{pt.take_profit_x:.1f}x` ({_format_usd(tp_mc)}) | "
-                f"SL: `{pt.stop_loss_pct:.1f}%` ({_format_usd(sl_mc)})"
+                f"TP: {pt.take_profit_x:.1f}x ({_format_usd(tp_mc)}) | "
+                f"SL: {pt.stop_loss_pct:.1f}% ({_format_usd(sl_mc)})"
             )
             lines.append(f"Opened: _{age}_")
 
@@ -610,10 +610,10 @@ async def _build_hub_text(autotrade: bool) -> str:
         "",
         "🔥 *TOP WALLETS*",
         (
-            f"👛 Wallets: `{total_wallets}` total | "
-            f"`{early_insider_count}` early_insider | "
-            f"`{coordinated_count}` coordinated | "
-            f"`{cluster_total}` clusters"
+            f"👛 Wallets: {total_wallets} total | "
+            f"{early_insider_count} early_insider | "
+            f"{coordinated_count} coordinated | "
+            f"{cluster_total} clusters"
         ),
     ]
 
@@ -627,11 +627,11 @@ async def _build_hub_text(autotrade: bool) -> str:
             cluster = getattr(w, "cluster_id", None)
             # wtype + cluster contain underscores — wrap in backticks so
             # Telegram Markdown doesn't treat them as italic delimiters
-            suffix = f" [`{cluster}`]" if cluster else ""
+            suffix = f" [{cluster}]" if cluster else ""
             lines.append(
-                f"#{i} `{short}` | Score: {w.score:.0f} | "
+                f"#{i} {short} | Score: {w.score:.0f} | "
                 f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | T{w.tier}"
-                f" | `{wtype}`{suffix}"
+                f" | {wtype}{suffix}"
             )
 
     # Show recent paper trades (ONLY from PaperTrades table, never Positions)
@@ -642,7 +642,7 @@ async def _build_hub_text(autotrade: bool) -> str:
                 # Use $ + symbol style name, escape for Markdown
                 raw_name = pt.token_name or "?"
                 # Strip anything that breaks Markdown
-                safe_name = raw_name.replace("_", " ").replace("*", "").replace("`", "")
+                safe_name = raw_name.replace("_", " ").replace("*", "").replace("", "")
                 flag = ""
                 if getattr(pt, "sold_too_early", None):
                     flag = " 😬"
@@ -652,10 +652,10 @@ async def _build_hub_text(autotrade: bool) -> str:
                     mc_str = _format_usd(pt.entry_mc) if pt.entry_mc else "?"
                     lines.append(f"🟡 {safe_name} — open @ {mc_str}")
                 elif pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
-                    lines.append(f"✅ {safe_name} — {pt.peak_multiple or 0:.1f}x `+{pt.paper_pnl_sol:.4f}` SOL{flag}")
+                    lines.append(f"✅ {safe_name} — {pt.peak_multiple or 0:.1f}x +{pt.paper_pnl_sol:.4f} SOL{flag}")
                 else:
                     reason = {"tp_hit": "TP hit", "sl_hit": "SL hit"}.get(pt.close_reason or "", pt.close_reason or "")
-                    lines.append(f"❌ {safe_name} — {reason} `{pt.paper_pnl_sol or 0:.4f}` SOL{flag}")
+                    lines.append(f"❌ {safe_name} — {reason} {pt.paper_pnl_sol or 0:.4f} SOL{flag}")
         else:
             lines.append("_Waiting for paper trades..._")
     else:
@@ -671,7 +671,7 @@ async def _build_hub_text(autotrade: bool) -> str:
 @router.message(Command("hub"))
 async def cmd_hub(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        await message.reply("⛔ `/hub` is only available in Callers HQ.")
+        await message.reply("⛔ /hub is only available in Callers HQ.")
         return
     try:
         text = await _build_hub_text(state.autotrade_enabled)
@@ -682,7 +682,7 @@ async def cmd_hub(message: Message):
         try:
             text = await _build_hub_text(state.autotrade_enabled)
             # Strip markdown formatting
-            plain = text.replace("*", "").replace("`", "").replace("_", "")
+            plain = text.replace("*", "").replace("", "").replace("_", "")
             await message.reply(plain, parse_mode=None, reply_markup=_hub_keyboard(state.autotrade_enabled))
         except Exception as exc2:
             logger.error("Hub fallback also failed: %s", exc2)
@@ -725,7 +725,7 @@ async def cb_hub(callback: CallbackQuery):
             # Markdown failed — retry plain
             try:
                 text = await _build_hub_text(state.autotrade_enabled)
-                plain = text.replace("*", "").replace("`", "").replace("_", "")
+                plain = text.replace("*", "").replace("", "").replace("_", "")
                 await callback.message.edit_text(
                     plain, parse_mode=None,
                     reply_markup=_hub_keyboard(state.autotrade_enabled),
@@ -773,7 +773,7 @@ async def cb_hub(callback: CallbackQuery):
             for i, w in enumerate(wallets, 1):
                 short = f"{w.address[:4]}...{w.address[-4:]}"
                 lines.append(
-                    f"#{i} `{short}` | Score: {w.score:.0f} | "
+                    f"#{i} {short} | Score: {w.score:.0f} | "
                     f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | {w.avg_multiple:.1f}x | T{w.tier}"
                 + (f" | {w.source}" if getattr(w, "source", None) else "")
                 )
@@ -831,7 +831,7 @@ async def cb_hub(callback: CallbackQuery):
 @router.message(Command("wallets"))
 async def cmd_wallets(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        await message.reply("⛔ `/wallets` is only available in Callers HQ.")
+        await message.reply("⛔ /wallets is only available in Callers HQ.")
         return
 
     wallets = await get_top_wallets(limit=10)
@@ -850,11 +850,11 @@ async def cmd_wallets(message: Message):
         cluster = getattr(w, "cluster_id", None)
         # Wrap wtype + cluster in backticks so their underscores don't
         # trigger Telegram Markdown italics and break the whole message
-        cluster_suffix = f" [`{cluster}`]" if cluster else ""
+        cluster_suffix = f" [{cluster}]" if cluster else ""
         lines.append(
-            f"#{i} `{short}` | Score: {w.score:.0f} | "
+            f"#{i} {short} | Score: {w.score:.0f} | "
             f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | Tier {w.tier} | "
-            f"`{wtype}`{cluster_suffix}"
+            f"{wtype}{cluster_suffix}"
         )
     await message.reply("\n".join(lines), parse_mode="Markdown")
 
@@ -864,7 +864,7 @@ async def cmd_wallets(message: Message):
 @router.message(Command("autotrade"))
 async def cmd_autotrade(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        await message.reply("⛔ `/autotrade` is only available in Callers HQ.")
+        await message.reply("⛔ /autotrade is only available in Callers HQ.")
         return
     if message.from_user.id not in ADMIN_IDS:
         await message.reply("⛔ Only admins can toggle autotrade.")
@@ -875,7 +875,7 @@ async def cmd_autotrade(message: Message):
     if len(parts) < 2 or parts[1].lower() not in valid_modes:
         await message.reply(
             f"⚡ Trade mode: *{_mode_label()}*\n"
-            f"Usage: `/autotrade off` | `/autotrade paper` | `/autotrade live`",
+            f"Usage: /autotrade off | /autotrade paper | /autotrade live",
             parse_mode="Markdown",
         )
         return
@@ -914,7 +914,7 @@ async def cmd_nukepaper(message: Message):
     etc.) and a clean slate is cheaper than filtering.
 
     Dry-run default — shows what would be deleted without touching the
-    DB. Pass `confirm` as the argument to actually do it.
+    DB. Pass confirm as the argument to actually do it.
 
     Usage:
       /nukepaper            → dry-run preview
@@ -966,7 +966,7 @@ async def cmd_nukepaper(message: Message):
             "  state.pending_candidates cleared",
             "",
             "⚠️ This is destructive and cannot be undone.",
-            "Run `/nukepaper confirm` to actually execute.",
+            "Run /nukepaper confirm to actually execute.",
         ]
         await message.reply("\n".join(lines), parse_mode=None)
         return
@@ -1016,6 +1016,117 @@ async def cmd_nukepaper(message: Message):
         "NUKE PAPER executed by %s: deleted=%d, atp_reset=%d",
         message.from_user.id, nuke_result["deleted_total"], atp_reset,
     )
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
+# ── /scannerwhy — Diagnose why scanner isn't opening paper trades ─────────
+
+@router.message(Command("scannerwhy"))
+async def cmd_scannerwhy(message: Message):
+    """
+    Shows the state of every gate that could block a paper trade open.
+    """
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    try:
+        from database.models import (
+            AsyncSessionLocal, select, func,
+            AgentParam, Candidate, PaperTrade,
+        )
+        from datetime import timedelta
+
+        now = datetime.utcnow()
+        recent_cutoff = now - timedelta(hours=2)
+        cooldown_cutoff = now - timedelta(hours=24)
+
+        async with AsyncSessionLocal() as session:
+            trade_mode_val = (await session.execute(
+                select(AgentParam.param_value).where(AgentParam.param_name == "trade_mode")
+            )).scalar_one_or_none()
+
+            conf_thresh = (await session.execute(
+                select(AgentParam.param_value).where(AgentParam.param_name == "conf_paper_threshold")
+            )).scalar_one_or_none()
+
+            cooldown_hours = (await session.execute(
+                select(AgentParam.param_value).where(AgentParam.param_name == "manual_close_cooldown_hours")
+            )).scalar_one_or_none()
+
+            open_count = (await session.execute(
+                select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+            )).scalar() or 0
+
+            recent_manual_close = (await session.execute(
+                select(func.count(PaperTrade.id)).where(
+                    PaperTrade.close_reason == "manual_close",
+                    PaperTrade.closed_at >= cooldown_cutoff,
+                )
+            )).scalar() or 0
+
+            recent_candidates = (await session.execute(
+                select(Candidate)
+                .where(Candidate.created_at >= recent_cutoff)
+                .order_by(Candidate.id.desc())
+                .limit(10)
+            )).scalars().all()
+
+    except Exception as exc:
+        logger.exception("scannerwhy failed")
+        await message.reply(f"❌ scannerwhy error: {exc}", parse_mode=None)
+        return
+
+    tm_int = int(trade_mode_val or 0)
+    mode_name = {0: "off", 1: "paper", 2: "live"}.get(tm_int, "?")
+    thresh_val = float(conf_thresh) if conf_thresh is not None else 20.0
+    cooldown_val = float(cooldown_hours) if cooldown_hours is not None else 24.0
+
+    lines = [
+        "🔍 SCANNER DIAGNOSTIC",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"trade_mode (DB)           = {tm_int} ({mode_name})  "
+        f"{'OK' if tm_int == 1 else 'WRONG - must be paper=1'}",
+        f"state.trade_mode (memory) = {state.trade_mode}",
+        f"conf_paper_threshold      = {thresh_val:.0f}",
+        f"manual_close_cooldown_hr  = {cooldown_val:.1f}",
+        "",
+        f"Open paper trades: {open_count}",
+        f"Manual closes in last 24h: {recent_manual_close}",
+        "",
+    ]
+
+    if not recent_candidates:
+        lines += [
+            "No Candidate rows in the last 2h.",
+            "Scanner may not be finding anything OR crashing before scoring.",
+        ]
+    else:
+        lines.append("LAST 10 CANDIDATES SCORED (past 2h):")
+        lines.append("")
+        for c in recent_candidates:
+            name = (c.token_name or "?")[:18]
+            conf = c.confidence_score or 0
+            pass_mark = "OK" if conf >= thresh_val else "--"
+            icon = {
+                "execute_full": "FULL",
+                "execute_half": "HALF",
+                "monitor":      "MON ",
+                "discard":      "DISC",
+            }.get(c.decision, "?   ")
+            lines.append(
+                f"{icon} {name:<18} conf={conf:>5.1f} {pass_mark} "
+                f"src={(c.source or '?')[:10]}"
+            )
+
+    lines += [
+        "",
+        "If stuck, fixes:",
+        "  trade_mode != 1 → /autotrade paper",
+        "  all conf < thresh → /setparam conf_paper_threshold 15",
+        "  high recent manual_close → wait or /setparam manual_close_cooldown_hours 0",
+    ]
+
     await message.reply("\n".join(lines), parse_mode=None)
 
 
@@ -1430,7 +1541,7 @@ async def cmd_whyloss(message: Message):
 @router.message(Command("papertrades"))
 async def cmd_papertrades(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        await message.reply("⛔ `/papertrades` is only available in Callers HQ.")
+        await message.reply("⛔ /papertrades is only available in Callers HQ.")
         return
 
     ps = await get_paper_trade_stats()
@@ -1497,7 +1608,7 @@ _PATTERN_LABELS = {
 @router.message(Command("patterns"))
 async def cmd_patterns(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        await message.reply("⛔ `/patterns` is only available in Callers HQ.")
+        await message.reply("⛔ /patterns is only available in Callers HQ.")
         return
 
     params = await get_all_trade_params()
@@ -1516,8 +1627,8 @@ async def cmd_patterns(message: Message):
         using = "AI learned" if p.sample_size >= 10 else "Manual presets (need 10+ trades)"
         lines += [
             f"🎯 *{label}*",
-            f"TP: `{p.optimal_tp_x:.1f}x` | SL: `{p.optimal_sl_pct:.0f}%` | Size: `{p.optimal_position_pct:.0f}%` wallet",
-            f"Win rate: `{p.win_rate * 100:.0f}%` | Avg: `{p.avg_multiple:.1f}x` | Sample: `{p.sample_size}` trades",
+            f"TP: {p.optimal_tp_x:.1f}x | SL: {p.optimal_sl_pct:.0f}% | Size: {p.optimal_position_pct:.0f}% wallet",
+            f"Win rate: {p.win_rate * 100:.0f}% | Avg: {p.avg_multiple:.1f}x | Sample: {p.sample_size} trades",
             f"Using: _{using}_",
             "",
         ]
@@ -1529,7 +1640,7 @@ async def cmd_patterns(message: Message):
         for cw in chart_wr:
             name = cw["pattern"].replace("_", " ").title()
             lines.append(
-                f"  `{name}` — {cw['win_rate']}% WR | {cw['trades']} trades"
+                f"  {name} — {cw['win_rate']}% WR | {cw['trades']} trades"
             )
         lines.append("")
 
@@ -1792,7 +1903,7 @@ async def _run_analysis(address: str, status_msg: Message) -> None:
 @router.message(Command("analyze"))
 async def cmd_analyze(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        await message.reply("⛔ `/analyze` is only available in Callers HQ.")
+        await message.reply("⛔ /analyze is only available in Callers HQ.")
         return
 
     parts = (message.text or "").split()
@@ -1837,7 +1948,7 @@ async def handle_analyze_address(message: Message):
 @router.message(Command("params"))
 async def cmd_params(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        await message.reply("⛔ `/params` is only available in Callers HQ.")
+        await message.reply("⛔ /params is only available in Callers HQ.")
         return
 
     params = await get_all_params()
@@ -2518,14 +2629,14 @@ async def cmd_start(message: Message):
 @router.message(Command("scan"))
 async def cmd_scan(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        await message.reply("⛔ `/scan` is only available in the designated callers group.")
+        await message.reply("⛔ /scan is only available in the designated callers group.")
         return
 
     parts = (message.text or "").split()
     if len(parts) < 2:
         await message.reply(
-            "⚠️ Usage: `/scan <contract_address>`\n"
-            "Example: `/scan So11111111111111111111111111111111111111112`",
+            "⚠️ Usage: /scan <contract_address>\n"
+            "Example: /scan So11111111111111111111111111111111111111112",
             parse_mode="Markdown",
         )
         return
@@ -2553,11 +2664,11 @@ async def cmd_settradeparam(message: Message):
     parts = (message.text or "").split()
     if len(parts) != 4:
         await message.reply(
-            "⚠️ Usage: `/settradeparam <pattern_type> <field> <value>`\n\n"
-            f"Fields: `{', '.join(_SETTRADEPARAM_FIELDS.keys())}`\n"
-            "Pattern types: `new_launch, insider_wallet, volume_spike, "
-            "low_mc, mid_mc, high_mc, high_chart, high_caller`\n\n"
-            "Example: `/settradeparam high_chart trail_sl_enabled 1`",
+            "⚠️ Usage: /settradeparam <pattern_type> <field> <value>\n\n"
+            f"Fields: {', '.join(_SETTRADEPARAM_FIELDS.keys())}\n"
+            "Pattern types: new_launch, insider_wallet, volume_spike, "
+            "low_mc, mid_mc, high_mc, high_chart, high_caller\n\n"
+            "Example: /settradeparam high_chart trail_sl_enabled 1",
             parse_mode="Markdown",
         )
         return
@@ -2566,7 +2677,7 @@ async def cmd_settradeparam(message: Message):
 
     if field not in _SETTRADEPARAM_FIELDS:
         await message.reply(
-            f"⚠️ Unknown field `{field}`. Allowed: `{', '.join(_SETTRADEPARAM_FIELDS.keys())}`",
+            f"⚠️ Unknown field {field}. Allowed: {', '.join(_SETTRADEPARAM_FIELDS.keys())}",
             parse_mode="Markdown",
         )
         return
@@ -2574,12 +2685,12 @@ async def cmd_settradeparam(message: Message):
     try:
         value = _SETTRADEPARAM_FIELDS[field](raw_value)
     except ValueError:
-        await message.reply(f"⚠️ Could not parse `{raw_value}` as {_SETTRADEPARAM_FIELDS[field].__name__}",
+        await message.reply(f"⚠️ Could not parse {raw_value} as {_SETTRADEPARAM_FIELDS[field].__name__}",
                             parse_mode="Markdown")
         return
 
     if field == "trail_sl_enabled" and value not in (0, 1):
-        await message.reply("⚠️ `trail_sl_enabled` must be 0 or 1.", parse_mode="Markdown")
+        await message.reply("⚠️ trail_sl_enabled must be 0 or 1.", parse_mode="Markdown")
         return
 
     from database.models import AsyncSessionLocal, AITradeParams, select as _select
@@ -2589,7 +2700,7 @@ async def cmd_settradeparam(message: Message):
         )).scalar_one_or_none()
         if row is None:
             await message.reply(
-                f"⚠️ No `ai_trade_params` row for `{ptype}`. Known rows are seeded on boot.",
+                f"⚠️ No ai_trade_params row for {ptype}. Known rows are seeded on boot.",
                 parse_mode="Markdown",
             )
             return
@@ -2600,7 +2711,7 @@ async def cmd_settradeparam(message: Message):
         await session.commit()
 
     await message.reply(
-        f"✅ `{ptype}.{field}`: `{old_value}` → `{value}`",
+        f"✅ {ptype}.{field}: {old_value} → {value}",
         parse_mode="Markdown",
     )
     logger.info("settradeparam: %s.%s %s -> %s by admin %d",
@@ -2623,8 +2734,8 @@ async def cmd_agent6force(message: Message):
 
     await message.reply(
         f"🧠 Forcing Agent 6 learning cycle…\n"
-        f"Closed trades: `{total_before}` | Already analyzed: `{analyzed_before}` | "
-        f"Pending: `{total_before - analyzed_before}`",
+        f"Closed trades: {total_before} | Already analyzed: {analyzed_before} | "
+        f"Pending: {total_before - analyzed_before}",
         parse_mode="Markdown",
     )
 
@@ -2632,7 +2743,7 @@ async def cmd_agent6force(message: Message):
         ran = await agent6_run_once(message.bot, force=True)
     except Exception as exc:
         logger.exception("agent6force failed")
-        await message.reply(f"❌ Agent 6 run raised: `{exc}`", parse_mode="Markdown")
+        await message.reply(f"❌ Agent 6 run raised: {exc}", parse_mode="Markdown")
         return
 
     row_after = await get_current_weights()
@@ -2651,10 +2762,10 @@ async def cmd_agent6force(message: Message):
 
     lines = [
         f"{'✅' if ran else 'ℹ️'} Agent 6 cycle {'completed' if ran else 'did not run (nothing to analyze)'}",
-        f"Analyzed: `{analyzed_before}` → `{analyzed_after}`",
-        f"Regime: `{regime}`",
-        f"Weights: `{weights_txt}`",
-        f"Thresholds: `{thresholds}`",
+        f"Analyzed: {analyzed_before} → {analyzed_after}",
+        f"Regime: {regime}",
+        f"Weights: {weights_txt}",
+        f"Thresholds: {thresholds}",
         f"Changes: _{last_change}_",
     ]
     await message.reply("\n".join(lines), parse_mode="Markdown")
@@ -2706,22 +2817,22 @@ async def cmd_healthcheck(message: Message):
         "🩺 *HEALTHCHECK*",
         "━━━━━━━━━━━━━━━━━━━━",
         f"DB: {'✅' if db_ok else '❌ UNREACHABLE'}",
-        f"Mode: `{state.trade_mode}` | Autotrade: `{state.autotrade_enabled}`",
-        f"Paper balance: `{balance:.4f} SOL` / `{state.PAPER_STARTING_BALANCE:.0f} SOL`",
-        f"Open paper: `{len(open_paper)}` | Closed: `{closed_count}`",
-        f"Tokens tracked: `{token_count}`",
+        f"Mode: {state.trade_mode} | Autotrade: {state.autotrade_enabled}",
+        f"Paper balance: {balance:.4f} SOL / {state.PAPER_STARTING_BALANCE:.0f} SOL",
+        f"Open paper: {len(open_paper)} | Closed: {closed_count}",
+        f"Tokens tracked: {token_count}",
         "",
         "*Agent liveness*",
-        f"Scanner last run: `{scanner_age}` ({state.scanner_status})",
-        f"Learning loop last run: `{learning_age}`",
-        f"Market regime: `{state.market_regime}` | SOL 24h: `{state.sol_24h_change:+.1f}%`",
+        f"Scanner last run: {scanner_age} ({state.scanner_status})",
+        f"Learning loop last run: {learning_age}",
+        f"Market regime: {state.market_regime} | SOL 24h: {state.sol_24h_change:+.1f}%",
         "",
         f"_Checked {now.strftime('%H:%M:%S')} UTC_",
     ]
     try:
         await message.reply("\n".join(lines), parse_mode="Markdown")
     except Exception:
-        await message.reply("\n".join(lines).replace("*", "").replace("`", ""), parse_mode=None)
+        await message.reply("\n".join(lines).replace("*", "").replace("", ""), parse_mode=None)
 
 
 # ── /agent_status — Per-agent last run table ─────────────────────────────────
@@ -2771,7 +2882,7 @@ async def cmd_agent_status(message: Message):
         for r in rows:
             notes = (r.notes or "")[:40]
             lines.append(
-                f"`{r.agent_name:<16}` {_ago(r.run_at)} | "
+                f"{r.agent_name:<16} {_ago(r.run_at)} | "
                 f"found={r.tokens_found} saved={r.tokens_saved}"
                 + (f" | {notes}" if notes else "")
             )
@@ -2780,11 +2891,11 @@ async def cmd_agent_status(message: Message):
     lines += [
         "",
         "*Live state*",
-        f"Scanner: `{state.scanner_status}` | last tick {_ago(state.scanner_last_run)}",
+        f"Scanner: {state.scanner_status} | last tick {_ago(state.scanner_last_run)}",
         f"Agent 6: analyzed={state.learning_loop_last_analyzed}"
         f" closed={state.learning_loop_total_closed}"
         f" | last run {_ago(state.learning_loop_last_run)}",
-        f"Regime: `{state.market_regime}` | SOL 24h: `{state.sol_24h_change:+.1f}%`",
+        f"Regime: {state.market_regime} | SOL 24h: {state.sol_24h_change:+.1f}%",
         "",
         f"_Checked {now.strftime('%H:%M:%S')} UTC_",
     ]
@@ -2792,7 +2903,7 @@ async def cmd_agent_status(message: Message):
     try:
         await message.reply("\n".join(lines), parse_mode="Markdown")
     except Exception:
-        await message.reply("\n".join(lines).replace("*", "").replace("`", ""), parse_mode=None)
+        await message.reply("\n".join(lines).replace("*", "").replace("", ""), parse_mode=None)
 
 
 # ── /addcaller ────────────────────────────────────────────────────────────────
@@ -2805,15 +2916,15 @@ async def cmd_addcaller(message: Message):
 
     parts = (message.text or "").split()
     if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
-        await message.reply("⚠️ Usage: `/addcaller <telegram_id>`", parse_mode="Markdown")
+        await message.reply("⚠️ Usage: /addcaller <telegram_id>", parse_mode="Markdown")
         return
 
     telegram_id = int(parts[1])
     added = await add_caller(telegram_id)
     if added:
-        await message.reply(f"✅ User `{telegram_id}` added to approved callers.", parse_mode="Markdown")
+        await message.reply(f"✅ User {telegram_id} added to approved callers.", parse_mode="Markdown")
     else:
-        await message.reply(f"ℹ️ User `{telegram_id}` is already an approved caller.", parse_mode="Markdown")
+        await message.reply(f"ℹ️ User {telegram_id} is already an approved caller.", parse_mode="Markdown")
 
 
 # ── PnL helpers ───────────────────────────────────────────────────────────────
@@ -2857,13 +2968,13 @@ async def _build_pnl_text(scan, current_mc: float) -> str:
 
     return (
         f"{icon} *{scan.token_name}*\n\n"
-        f"Entry MC:   `{_format_usd(scan.entry_price)}`\n"
-        f"Current MC: `{_format_usd(current_mc)}`\n"
-        f"Peak MC:    `{_format_usd(scan.peak_market_cap or scan.entry_price)}`\n\n"
+        f"Entry MC:   {_format_usd(scan.entry_price)}\n"
+        f"Current MC: {_format_usd(current_mc)}\n"
+        f"Peak MC:    {_format_usd(scan.peak_market_cap or scan.entry_price)}\n\n"
         f"Current X:  *{curr_mult:.2f}x*\n"
         f"Peak X:     *{peak_mult:.2f}x*\n"
         f"Points:     *{scan.points:.2f}*\n\n"
-        f"Status:  `{label}`\n"
+        f"Status:  {label}\n"
         f"{time_str}\n\n"
         f"_Called by @{scan.scanned_by}_"
     )
@@ -2875,7 +2986,7 @@ async def _build_pnl_text(scan, current_mc: float) -> str:
 async def cmd_pnl(message: Message):
     parts = (message.text or "").split()
     if len(parts) < 2:
-        await message.reply("Please provide a contract address: `/pnl <contract>`", parse_mode="Markdown")
+        await message.reply("Please provide a contract address: /pnl <contract>", parse_mode="Markdown")
         return
 
     address = parts[1].strip()
@@ -2938,7 +3049,7 @@ async def cmd_sl(message: Message):
     for i, row in enumerate(rows):
         prefix = medals[i] if i < 3 else f"{i + 1}."
         lines.append(
-            f"{prefix} `@{row['username']}` | "
+            f"{prefix} @{row['username']} | "
             f"{row['scans']} calls | "
             f"🟢{row['wins']}W 🔴{row['losses']}L | "
             f"{row['win_pct']}% | "

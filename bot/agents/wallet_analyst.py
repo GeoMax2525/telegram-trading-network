@@ -105,7 +105,7 @@ async def _parse_transactions(signatures: list[str]) -> list[dict]:
 # ── Early buyer detection ────────────────────────────────────────────────────
 
 async def _fetch_sigs_with_retry(address: str, limit: int = 200, retries: int = 3) -> list[dict]:
-    """Fetch signatures with retry logic. Tries up to `retries` times with 2s delay."""
+    """Fetch signatures with retry logic. Tries up to retries times with 2s delay."""
     for attempt in range(retries):
         sigs = await _get_signatures(address, limit=limit)
         if sigs:
@@ -172,7 +172,7 @@ async def _get_early_buyers(
 ) -> list[str]:
     """
     Returns deduplicated wallet addresses that bought this token
-    within the first `window_minutes` after launch.
+    within the first window_minutes after launch.
 
     Strategy:
     1. Try getSignaturesForAddress on token mint (with retries)
@@ -450,7 +450,7 @@ async def _score_wallet(
 ) -> tuple[float, int]:
     """
     Scores a wallet 0–100 and assigns tier 1/2/3/0 using thresholds
-    from agent_params. `score_bonus` is added AFTER the base score
+    from agent_params. score_bonus is added AFTER the base score
     (classification bonuses from _classify_wallet).
 
     Returns (final_score, tier).

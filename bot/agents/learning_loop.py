@@ -474,7 +474,7 @@ async def _optimize_trade_params(regime: str) -> int:
     can't actually deliver without human intervention.
 
     Each surviving closed PaperTrade is assigned to every pattern_type
-    it matched at entry (comma-separated `pattern_type` column → split).
+    it matched at entry (comma-separated pattern_type column → split).
     For each group with >= MIN_SAMPLE_FOR_LEARNING samples we analyze
     four signals and adjust the row in ai_trade_params.
 
@@ -711,7 +711,7 @@ async def _classify_batch(batch) -> tuple[list[dict], list[dict]]:
     Returns (winners_scores, losers_scores).
 
     Works for both Position and PaperTrade instances (PaperTrade exposes a
-    `pnl_sol` property alias). If a trade has no matching Candidate row
+    pnl_sol property alias). If a trade has no matching Candidate row
     (common for paper trades), component scores default to 50 so the trade
     still contributes a classification signal rather than being dropped.
     """
@@ -1158,7 +1158,7 @@ async def run_once(bot, force: bool = False) -> bool:
       - Every 50 trades: full review (weights + params + wallets)
       - Every 100 trades: major recalibration (thresholds + regime)
 
-    When `force=True` (admin /agent6force), runs one adjustment cycle on whatever
+    When force=True (admin /agent6force), runs one adjustment cycle on whatever
     unanalyzed trades exist, even if below the normal micro threshold.
     """
     current_row = await get_current_weights()
@@ -1260,7 +1260,7 @@ async def run_once(bot, force: bool = False) -> bool:
         all_changes.extend(weight_changes)
 
     # ── TP/SL refresh — runs EVERY cycle, not just full/major ─────────
-    # Previously gated on `level in ("full", "major")`, which meant
+    # Previously gated on level in ("full", "major"), which meant
     # _optimize_trade_params never fired because pending rarely reaches
     # FULL_BATCH=5 (trades trickle in 1-2 at a time, micro catches them
     # immediately). After 73 closed trades, the function had been

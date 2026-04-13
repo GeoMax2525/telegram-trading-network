@@ -178,7 +178,7 @@ def match_pattern_types(candidate: dict, now: datetime | None = None) -> list[st
     or module-level state. Signals that aren't wired yet (Group C) are
     NOT evaluated — they'd produce dead matchers.
 
-    `now` is injected for testability; defaults to datetime.utcnow().
+    now is injected for testability; defaults to datetime.utcnow().
     """
     tags: list[str] = []
     now = now or datetime.utcnow()
