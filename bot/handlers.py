@@ -2895,10 +2895,6 @@ async def cmd_whoami(message: Message):
 
 @router.message(Command("setparam"))
 async def cmd_setparam(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.reply("⛔ Admin only.")
-        return
-
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) != 3:
         await message.reply(
