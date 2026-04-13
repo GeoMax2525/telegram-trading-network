@@ -456,16 +456,20 @@ async def _optimize_trade_params(regime: str) -> int:
     """
     Learn per-pattern_type TP and SL from closed PaperTrade outcomes.
 
-    Each closed PaperTrade is assigned to every pattern_type it matched at
-    entry (comma-separated `pattern_type` column → split). For each group
-    with >= MIN_SAMPLE_FOR_LEARNING samples we analyze four signals and
-    adjust the row in ai_trade_params via upsert_trade_params (which goes
-    through set_param's audit trail? no — upsert_trade_params writes
-    ai_trade_params directly, so we also fall back to set_param for the
-    param_changes log). Trail config is preserved (None = no-op).
+    STRATEGY CLOSES ONLY: trades closed via manual_close (the /hub Close
+    All button) or reset (/resetbalance) are excluded from learning.
+    Those are human decisions and don't represent outcomes the strategy
+    could have produced on its own — counting a 14x manual_close as a
+    "win" would teach Agent 6 to expect 14x wins that the strategy
+    can't actually deliver without human intervention.
+
+    Each surviving closed PaperTrade is assigned to every pattern_type
+    it matched at entry (comma-separated `pattern_type` column → split).
+    For each group with >= MIN_SAMPLE_FOR_LEARNING samples we analyze
+    four signals and adjust the row in ai_trade_params.
 
     Signal → action rules (applied independently, clamped per step):
-      1. sl_hit_rate > 0.50            → widen sl_pct by +5 points
+      1. sl_hit_rate > 0.50            → tighten sl_pct by -5 points
       2. peak_exceeds_tp_rate > 0.60   → raise tp_x by +0.5
       3. avg_peak_mult < current_tp*0.80 → lower tp_x by -0.3
       4. avg(mc_1h_after / close_mc) > 1.20 → raise tp_x by +0.3
@@ -474,7 +478,22 @@ async def _optimize_trade_params(regime: str) -> int:
 
     Hard bounds: tp_x ∈ [1.5, 10.0], sl_pct ∈ [10.0, 50.0].
     """
-    all_trades = await _fetch_closed_paper_trades(limit=500)
+    raw_all = await _fetch_closed_paper_trades(limit=500)
+    if not raw_all:
+        return 0
+    # Filter out meta closes (manual_close, reset) — human decisions
+    # that don't represent strategy outcomes
+    from database.models import STRATEGY_CLOSE_REASONS
+    all_trades = [
+        t for t in raw_all
+        if (t.close_reason or "") in STRATEGY_CLOSE_REASONS
+    ]
+    meta_excluded = len(raw_all) - len(all_trades)
+    if meta_excluded:
+        logger.info(
+            "Agent6 tune: excluded %d meta closes (manual/reset) from learning",
+            meta_excluded,
+        )
     if not all_trades:
         return 0
 

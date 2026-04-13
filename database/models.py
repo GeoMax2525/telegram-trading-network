@@ -35,6 +35,26 @@ engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
+# Close reasons that represent a real strategy outcome — the bot's exit
+# decided on its own. Used to split "strategy PnL" from "meta PnL" in
+# reporting and to exclude user-driven closes from Agent 6 learning.
+STRATEGY_CLOSE_REASONS = frozenset({
+    "tp_hit",     # take-profit auto-close
+    "sl_hit",     # stop-loss auto-close
+    "trail_hit",  # trailing-stop auto-close
+    "dead_token", # dead-position auto-close
+    "expired",    # 7-day expiration auto-close
+})
+
+# Reasons that came from a human action (hub button, /resetbalance, etc.)
+# These must not be counted as strategy wins — Agent 6 would learn
+# "close at 14x" which the strategy can't actually do without a human.
+META_CLOSE_REASONS = frozenset({
+    "manual_close",
+    "reset",
+})
+
+
 # Sentinel for "field not provided" in partial-update helpers (None means
 # "explicitly set to null" so we need a distinct value).
 class _Unset:
@@ -2313,6 +2333,24 @@ async def update_paper_dead_tracking(
 
 
 async def get_paper_trade_stats() -> dict:
+    """
+    Returns paper trade aggregates, split into STRATEGY and META buckets.
+
+    `strategy_*` counts only trades that closed via a bot decision
+    (tp_hit / sl_hit / trail_hit / dead_token / expired). These are the
+    real performance numbers Agent 6 learns from.
+
+    `meta_*` counts trades closed by human action (manual_close from the
+    hub button, reset from /resetbalance). These inflate the balance but
+    don't represent strategy skill — a human clicking "close" at a 14x
+    peak isn't something the strategy could have done on its own.
+
+    `total_pnl` / `win_rate` / etc. keep their legacy semantics
+    (strategy + meta combined) so existing consumers don't break.
+    """
+    strategy_reasons = list(STRATEGY_CLOSE_REASONS)
+    meta_reasons = list(META_CLOSE_REASONS)
+
     async with AsyncSessionLocal() as session:
         total = (await session.execute(
             select(func.count(PaperTrade.id))
@@ -2336,6 +2374,37 @@ async def get_paper_trade_stats() -> dict:
             )
         )).scalar() or 0.0
 
+        # Strategy-only aggregates (what Agent 6 learns from)
+        strategy_closed = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+                PaperTrade.close_reason.in_(strategy_reasons),
+            )
+        )).scalar() or 0
+
+        strategy_wins = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol > 0,
+                PaperTrade.close_reason.in_(strategy_reasons),
+            )
+        )).scalar() or 0
+
+        strategy_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                PaperTrade.paper_pnl_sol.is_not(None),
+                PaperTrade.close_reason.in_(strategy_reasons),
+            )
+        )).scalar() or 0.0
+
+        meta_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                PaperTrade.paper_pnl_sol.is_not(None),
+                PaperTrade.close_reason.in_(meta_reasons),
+            )
+        )).scalar() or 0.0
+
         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         today_count = (await session.execute(
             select(func.count(PaperTrade.id)).where(PaperTrade.opened_at >= today)
@@ -2344,6 +2413,22 @@ async def get_paper_trade_stats() -> dict:
         today_pnl = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
                 PaperTrade.closed_at >= today, PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0.0
+
+        today_strategy_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                PaperTrade.closed_at >= today,
+                PaperTrade.paper_pnl_sol.is_not(None),
+                PaperTrade.close_reason.in_(strategy_reasons),
+            )
+        )).scalar() or 0.0
+
+        today_meta_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                PaperTrade.closed_at >= today,
+                PaperTrade.paper_pnl_sol.is_not(None),
+                PaperTrade.close_reason.in_(meta_reasons),
             )
         )).scalar() or 0.0
 
@@ -2357,11 +2442,21 @@ async def get_paper_trade_stats() -> dict:
         )).scalars().all())
 
     win_rate = round(wins / closed * 100) if closed > 0 else 0
+    strategy_win_rate = round(strategy_wins / strategy_closed * 100) if strategy_closed > 0 else 0
+
     return {
         "total": total, "closed": closed, "wins": wins,
         "win_rate": win_rate, "total_pnl": float(total_pnl),
         "today_count": today_count, "today_pnl": float(today_pnl),
         "open_count": open_count, "recent": recent,
+        # Split numbers for honest reporting
+        "strategy_closed": strategy_closed,
+        "strategy_wins": strategy_wins,
+        "strategy_win_rate": strategy_win_rate,
+        "strategy_pnl": float(strategy_pnl),
+        "meta_pnl": float(meta_pnl),
+        "today_strategy_pnl": float(today_strategy_pnl),
+        "today_meta_pnl": float(today_meta_pnl),
     }
 
 
@@ -2435,6 +2530,11 @@ AGENT_PARAM_DEFAULTS = {
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
     "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
     "trail_sl_pct":          0.20, # distance from peak when trailing active
+
+    # Absolute per-trade position size cap in SOL, prevents the
+    # compounding-size runaway loop where winners balloon the balance
+    # and the next trade opens at an unrealistic size.
+    "max_position_sol": 5.0,
 
     # Self-healing state (Agent 6)
     "last_wr_snapshot_at": 0.0,    # trades_analyzed at last WR snapshot

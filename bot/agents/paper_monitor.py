@@ -150,6 +150,13 @@ def _check_dead(
 
 async def _check_open_trades(bot) -> None:
     trades = await get_open_paper_trades()
+    # Always refresh the in-memory balance snapshot, even if there are
+    # no open trades to iterate. Keeps state.paper_balance close to DB
+    # reality between scanner ticks and /hub renders.
+    try:
+        state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+    except Exception as exc:
+        logger.debug("Paper monitor balance refresh failed: %s", exc)
     if not trades:
         return
 

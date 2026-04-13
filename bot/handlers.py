@@ -512,8 +512,14 @@ async def _build_hub_text(autotrade: bool) -> str:
         f"Win Rate: `{win_rate}%` | Closed Trades: `{total_closed}`",
         "",
         f"📋 *PAPER TRADING* ({paper_stats['open_count']} open)",
-        f"Today: `{paper_stats['today_count']}` trades | `{paper_stats['today_pnl']:+.4f} SOL`",
-        f"All time: `{paper_stats['win_rate']}%` WR | `{paper_stats['total_pnl']:+.4f} SOL`",
+        f"Today: `{paper_stats['today_count']}` trades | "
+        f"strat `{paper_stats.get('today_strategy_pnl', 0.0):+.2f}` | "
+        f"meta `{paper_stats.get('today_meta_pnl', 0.0):+.2f}` SOL",
+        f"Strategy: `{paper_stats.get('strategy_win_rate', 0)}%` WR | "
+        f"`{paper_stats.get('strategy_pnl', 0.0):+.2f}` SOL "
+        f"({paper_stats.get('strategy_closed', 0)} bot-closed)",
+        f"Meta (manual): `{paper_stats.get('meta_pnl', 0.0):+.2f}` SOL "
+        f"— not learned from",
     ]
 
     # ── Open paper positions (live MC + multiplier) ─────────────────
@@ -1256,9 +1262,21 @@ async def cmd_papertrades(message: Message):
     lines = [
         "📋 PAPER TRADING RESULTS",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"Total: {ps['total']} | Win rate: {ps['win_rate']}%",
-        f"Paper P&L: {ps['total_pnl']:+.4f} SOL",
-        f"Open: {ps['open_count']} | Today: {ps['today_count']} ({ps['today_pnl']:+.4f} SOL)",
+        f"Total: {ps['total']} | Combined WR: {ps['win_rate']}% | "
+        f"Combined PnL: {ps['total_pnl']:+.2f} SOL",
+        "",
+        "STRATEGY (what Agent 6 learns from):",
+        f"  Closed: {ps.get('strategy_closed', 0)} | "
+        f"WR: {ps.get('strategy_win_rate', 0)}% | "
+        f"PnL: {ps.get('strategy_pnl', 0.0):+.2f} SOL",
+        "",
+        "META (manual_close + reset, excluded from learning):",
+        f"  PnL: {ps.get('meta_pnl', 0.0):+.2f} SOL "
+        f"(today: {ps.get('today_meta_pnl', 0.0):+.2f})",
+        "",
+        f"Open: {ps['open_count']} | Today: {ps['today_count']} "
+        f"strat {ps.get('today_strategy_pnl', 0.0):+.2f} / "
+        f"meta {ps.get('today_meta_pnl', 0.0):+.2f} SOL",
         "",
     ]
     if ps["recent"]:

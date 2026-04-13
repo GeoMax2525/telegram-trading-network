@@ -760,6 +760,15 @@ async def run_once() -> tuple[int, int]:
     Returns (candidates_found, candidates_queued).
     """
     state.scanner_status = "running"
+    # Refresh paper_balance at the top of every tick so the in-memory
+    # cache stays close to DB reality. Previously this only refreshed
+    # inside the trade-opening loop which meant ticks with no new
+    # candidates left state.paper_balance stale — user saw a 904 SOL
+    # divergence when lots of trades closed between ticks.
+    try:
+        state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+    except Exception as exc:
+        logger.debug("Scanner balance refresh failed: %s", exc)
     pattern = await get_pattern_by_type("winner_2x")
 
     # Gather raw candidates from all 4 sources concurrently. Source 1 and
@@ -890,10 +899,16 @@ async def run_once() -> tuple[int, int]:
                 logger.info("Scanner: paper balance depleted (%.4f SOL), skipping", state.paper_balance)
                 continue
 
-            # Confidence-based position sizing from DB params (% of balance)
+            # Confidence-based position sizing from DB params (% of balance),
+            # floored at 0 and capped by:
+            #   - 20% of balance (tail risk cap)
+            #   - max_position_sol (absolute cap to prevent runaway
+            #     compounding where winners balloon the balance and
+            #     the next trade opens at an unrealistic size)
             sp = await get_params(
                 "size_confidence_20", "size_confidence_50",
                 "size_confidence_70", "size_confidence_80",
+                "max_position_sol",
             )
             conf = scored.get("confidence_score", 0)
             if conf >= 80:
@@ -905,7 +920,15 @@ async def run_once() -> tuple[int, int]:
             else:
                 size_pct = sp["size_confidence_20"] / 100.0
 
-            paper_sol = round(min(state.paper_balance * size_pct, state.paper_balance * 0.20), 4)
+            max_abs = float(sp.get("max_position_sol") or 5.0)
+            paper_sol = round(
+                min(
+                    state.paper_balance * size_pct,
+                    state.paper_balance * 0.20,
+                    max_abs,
+                ),
+                4,
+            )
 
             logger.info(
                 "Scanner: PAPER TRADE %s conf=%.0f size=%.0f%% sol=%.4f bal=%.4f",
