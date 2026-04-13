@@ -614,11 +614,13 @@ async def _build_hub_text(autotrade: bool) -> str:
             short = f"{w.address[:4]}...{w.address[-4:]}"
             wtype = getattr(w, "wallet_type", None) or "unknown"
             cluster = getattr(w, "cluster_id", None)
-            suffix = f" [{cluster}]" if cluster else ""
+            # wtype + cluster contain underscores — wrap in backticks so
+            # Telegram Markdown doesn't treat them as italic delimiters
+            suffix = f" [`{cluster}`]" if cluster else ""
             lines.append(
                 f"#{i} `{short}` | Score: {w.score:.0f} | "
                 f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | T{w.tier}"
-                f" | {wtype}{suffix}"
+                f" | `{wtype}`{suffix}"
             )
 
     # Show recent paper trades (ONLY from PaperTrades table, never Positions)
@@ -835,11 +837,13 @@ async def cmd_wallets(message: Message):
         short = f"{w.address[:4]}...{w.address[-4:]}"
         wtype = getattr(w, "wallet_type", None) or "unknown"
         cluster = getattr(w, "cluster_id", None)
-        cluster_suffix = f" [{cluster}]" if cluster else ""
+        # Wrap wtype + cluster in backticks so their underscores don't
+        # trigger Telegram Markdown italics and break the whole message
+        cluster_suffix = f" [`{cluster}`]" if cluster else ""
         lines.append(
             f"#{i} `{short}` | Score: {w.score:.0f} | "
             f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | Tier {w.tier} | "
-            f"{wtype}{cluster_suffix}"
+            f"`{wtype}`{cluster_suffix}"
         )
     await message.reply("\n".join(lines), parse_mode="Markdown")
 

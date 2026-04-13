@@ -261,7 +261,10 @@ class PaperTrade(Base):
     entry_price       = Column(Float,       nullable=True)
     paper_sol_spent   = Column(Float,       nullable=False, default=0.5)
     confidence_score  = Column(Float,       nullable=True)
-    pattern_type      = Column(String(64),  nullable=True)
+    # Stores a comma-separated list of every matched pattern_type at entry
+    # (e.g. "new_launch,mid_mc,high_chart,early_entry,trending_gmgn,..."). The
+    # full set of 31+ tags can easily exceed 200 chars, so this is wide.
+    pattern_type      = Column(String(512), nullable=True)
     take_profit_x     = Column(Float,       nullable=False, default=3.0)
     stop_loss_pct     = Column(Float,       nullable=False, default=30.0)
     status            = Column(String(16),  default="open",  nullable=False)
@@ -556,6 +559,19 @@ async def init_db() -> None:
                     )
                 except Exception:
                     pass
+
+        # Widen paper_trades.pattern_type: original VARCHAR(64) is too
+        # narrow now that pattern_type stores the full comma-separated tag
+        # list (can exceed 200 chars). PostgreSQL supports ALTER TYPE
+        # in-place; SQLite treats TEXT as unbounded so the DDL is a no-op.
+        if is_postgres:
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE paper_trades "
+                    "ALTER COLUMN pattern_type TYPE VARCHAR(512)"
+                ))
+            except Exception as _exc:
+                logger.debug("pattern_type widen skipped: %s", _exc)
 
         for col_name, col_def in _NEW_AI_TRADE_PARAMS_COLS:
             if is_postgres:
