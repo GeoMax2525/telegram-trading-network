@@ -2878,6 +2878,45 @@ async def cmd_settradeparam(message: Message):
                 ptype, field, old_value, value, message.from_user.id)
 
 
+# ── /setparam — edit a row in agent_params (global tunables) ────────────────
+
+@router.message(Command("setparam"))
+async def cmd_setparam(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply("⛔ Admin only.")
+        return
+
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) != 3:
+        await message.reply(
+            "⚠️ Usage: /setparam <name> <value>\n\n"
+            "Example: /setparam conf_paper_threshold 45\n"
+            "Use /params to see current values.",
+        )
+        return
+
+    _, name, raw_value = parts
+    try:
+        value = float(raw_value)
+    except ValueError:
+        await message.reply(f"⚠️ Could not parse {raw_value} as a number.")
+        return
+
+    from database.models import AsyncSessionLocal, AgentParam, select as _select
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(
+            _select(AgentParam).where(AgentParam.param_name == name)
+        )).scalar_one_or_none()
+        old_value = row.param_value if row else None
+
+    await set_param(name, value, f"Manual override via /setparam by admin {message.from_user.id}")
+
+    old_str = f"{old_value}" if old_value is not None else "(new)"
+    await message.reply(f"✅ {name}: {old_str} → {value}")
+    logger.info("setparam: %s %s -> %s by admin %d",
+                name, old_value, value, message.from_user.id)
+
+
 # ── /agent6force ──────────────────────────────────────────────────────────────
 
 @router.message(Command("agent6force"))
