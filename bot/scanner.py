@@ -215,7 +215,7 @@ async def fetch_current_market_cap(address: str) -> Optional[float]:
 async def fetch_live_data(address: str) -> Optional[dict]:
     """
     Returns live token data dict, or None on failure.
-    Keys: market_cap, liquidity_usd, price_usd, symbol, price_changes{m5,h1,h6,h24}
+    Keys: market_cap, liquidity_usd, price_usd, symbol, price_changes, volume
     """
     pair = await fetch_token_data(address)
     if pair is None:
@@ -224,6 +224,7 @@ async def fetch_live_data(address: str) -> Optional[dict]:
     liq    = float((pair.get("liquidity") or {}).get("usd") or 0)
     price  = float(pair.get("priceUsd") or 0)
     pc     = pair.get("priceChange") or {}
+    vol    = pair.get("volume") or {}
     symbol = (pair.get("baseToken") or {}).get("symbol", "???")
     return {
         "market_cap":    mc,
@@ -235,6 +236,12 @@ async def fetch_live_data(address: str) -> Optional[dict]:
             "h1":  float(pc.get("h1")  or 0),
             "h6":  float(pc.get("h6")  or 0),
             "h24": float(pc.get("h24") or 0),
+        },
+        "volume": {
+            "m5":  float(vol.get("m5")  or 0),
+            "h1":  float(vol.get("h1")  or 0),
+            "h6":  float(vol.get("h6")  or 0),
+            "h24": float(vol.get("h24") or 0),
         },
     }
 

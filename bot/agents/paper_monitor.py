@@ -20,11 +20,20 @@ from database.models import (
     get_open_paper_trades,
     close_paper_trade,
     update_paper_trade_peak,
+    update_paper_dead_tracking,
     get_recently_closed_paper_trades,
     update_paper_post_close,
     compute_paper_balance,
 )
 from bot.agents.trade_profiles import resolve_trade_params
+
+# ── Dead-position detection thresholds ──────────────────────────────────────
+ZERO_VOLUME_HOURS      = 2       # 0/null volume for 2+ hours → dead
+PRICE_FLAT_HOURS       = 4       # < 2% move in 4+ hours → dead
+PRICE_MOVE_THRESHOLD   = 0.02    # 2%
+DEAD_LIQUIDITY_FLOOR   = 1000    # liquidity < $1K → rugged
+STALE_AGE_HOURS        = 24      # age > 24h AND multi < 0.5 → dead
+STALE_MULT_THRESHOLD   = 0.5
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +49,103 @@ def _parse_pattern_tags(pattern_type: str | None) -> list[str]:
     if not pattern_type:
         return []
     return [t.strip() for t in pattern_type.split(",") if t.strip()]
+
+
+async def _update_dead_tracking(pt, live: dict, current_mc: float, now: datetime) -> tuple:
+    """
+    Advance the dead-tracking state for this paper trade based on the
+    current tick. Returns the (possibly-updated) (zero_volume_since,
+    last_move_at, last_move_mc) so the caller can hand them to
+    _is_dead_position without a second DB read.
+
+    State transitions:
+      - volume h1 == 0 and zero_volume_since is None  →  set it to now
+      - volume h1 > 0  and zero_volume_since is set   →  clear it
+      - |current_mc − last_move_mc| / last_move_mc ≥ 2%  →  bump last_move_*
+      - last_move_at is None (fresh trade)             →  initialize to opened_at / entry_mc
+    """
+    volume_h1 = (live.get("volume") or {}).get("h1")
+    zero_vol_since = pt.zero_volume_since
+    last_move_at = pt.last_move_at
+    last_move_mc = pt.last_move_mc
+
+    # Initialize last_move_* for trades opened before this feature shipped
+    if last_move_at is None or last_move_mc is None:
+        last_move_at = pt.opened_at or now
+        last_move_mc = pt.entry_mc or current_mc
+
+    updates = {}
+
+    # Volume tracking
+    if volume_h1 is None or volume_h1 <= 0:
+        if zero_vol_since is None:
+            zero_vol_since = now
+            updates["zero_volume_since"] = now
+    else:
+        if zero_vol_since is not None:
+            zero_vol_since = None
+            updates["zero_volume_since"] = None
+
+    # Price movement tracking
+    if last_move_mc and last_move_mc > 0:
+        drift = abs(current_mc - last_move_mc) / last_move_mc
+        if drift >= PRICE_MOVE_THRESHOLD:
+            last_move_at = now
+            last_move_mc = current_mc
+            updates["last_move_at"] = now
+            updates["last_move_mc"] = current_mc
+
+    # Persist anything that actually changed; also persist the initialization
+    # if last_move_at came in None from the DB
+    if pt.last_move_at is None:
+        updates.setdefault("last_move_at", last_move_at)
+        updates.setdefault("last_move_mc", last_move_mc)
+
+    if updates:
+        await update_paper_dead_tracking(pt.id, **updates)
+
+    return zero_vol_since, last_move_at, last_move_mc
+
+
+def _check_dead(
+    pt,
+    live: dict,
+    current_mc: float,
+    zero_vol_since: datetime | None,
+    last_move_at: datetime | None,
+    now: datetime,
+) -> tuple[bool, str]:
+    """
+    Returns (is_dead, reason_label). Uses pre-computed tracking state so
+    we don't re-read from the DB. Rules match the user spec exactly.
+    """
+    # Rule 3: liquidity rug (cheapest check first)
+    liquidity = live.get("liquidity_usd") or 0
+    if liquidity < DEAD_LIQUIDITY_FLOOR:
+        return True, f"liquidity ${liquidity:.0f}"
+
+    # Rule 4: stale age with sub-0.5x multiplier
+    opened = pt.opened_at
+    entry_mc = pt.entry_mc or 1
+    if opened:
+        age_hours = (now - opened).total_seconds() / 3600
+        mult = current_mc / entry_mc if entry_mc > 0 else 0
+        if age_hours >= STALE_AGE_HOURS and mult < STALE_MULT_THRESHOLD:
+            return True, f"stale {mult:.2f}x @ {age_hours:.0f}h"
+
+    # Rule 1: no volume for 2+ hours
+    if zero_vol_since is not None:
+        hours_zero = (now - zero_vol_since).total_seconds() / 3600
+        if hours_zero >= ZERO_VOLUME_HOURS:
+            return True, "no volume 2h+"
+
+    # Rule 2: price flat (< 2% move) for 4+ hours
+    if last_move_at is not None:
+        hours_flat = (now - last_move_at).total_seconds() / 3600
+        if hours_flat >= PRICE_FLAT_HOURS:
+            return True, f"flat {hours_flat:.0f}h"
+
+    return False, ""
 
 
 async def _check_open_trades(bot) -> None:
@@ -72,6 +178,36 @@ async def _check_open_trades(bot) -> None:
             # per open trade per 5 min.
             tags = _parse_pattern_tags(pt.pattern_type)
             resolved = await resolve_trade_params(tags) if tags else None
+
+            # Advance dead-tracking state and check before TP/SL so a dead
+            # token doesn't accidentally trigger an SL at the drift floor.
+            now = datetime.utcnow()
+            zero_vol_since, last_move_at, _last_mc = await _update_dead_tracking(
+                pt, live, current_mc, now,
+            )
+            is_dead, dead_reason = _check_dead(
+                pt, live, current_mc, zero_vol_since, last_move_at, now,
+            )
+            if is_dead:
+                pnl = round(sol * (current_mult - 1), 4)
+                await close_paper_trade(pt.id, "dead_token", pnl, peak_mc, peak_mult)
+                bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+                state.paper_balance = bal
+                loss_pct = (current_mult - 1) * 100
+                logger.info(
+                    "Paper: DEAD %s — %s %.2fx %+.4f SOL bal=%.4f tags=%s",
+                    name, dead_reason, current_mult, pnl, bal, ",".join(tags) or "-",
+                )
+                try:
+                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                        f"💀 DEAD POSITION CLOSED",
+                        f"🪙 ${name} | {dead_reason} | {loss_pct:+.0f}%",
+                        f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
+                        f"PnL: {pnl:+.4f} SOL | Balance: {bal:.2f} SOL",
+                    ]))
+                except Exception:
+                    pass
+                continue
 
             # Check TP
             if current_mult >= pt.take_profit_x:

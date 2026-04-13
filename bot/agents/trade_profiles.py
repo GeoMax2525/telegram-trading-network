@@ -116,6 +116,9 @@ ALL_PATTERN_TYPES = [
     # Chart patterns (mapped from chart_detector output)
     "bull_flag_confirmed", "launchpad_setup", "insider_accumulation",
     "fakeout_recovery", "double_bottom", "ascending_triangle",
+    # Outcome tracking — not an entry matcher, populated by
+    # _optimize_trade_params from closed trades with close_reason="dead_token"
+    "dead_token",
 ]
 
 # Default rows seeded on first boot. Baseline tp=3.0 / sl=30.0 / trail off
@@ -158,6 +161,11 @@ DEFAULT_AI_TRADE_PARAMS = {
     "fakeout_recovery":       _default(),
     "double_bottom":          _default(),
     "ascending_triangle":     _default(),
+    # dead_token: never matched at entry; Agent 6 populates stats from
+    # closed trades with close_reason="dead_token". TP/SL values here are
+    # placeholders — they're not used for opening new trades since the
+    # resolver never sees dead_token in the matched list.
+    "dead_token":             _default(),
 }
 
 

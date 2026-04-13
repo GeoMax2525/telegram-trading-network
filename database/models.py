@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
+
+# Sentinel for "field not provided" in partial-update helpers (None means
+# "explicitly set to null" so we need a distinct value).
+class _Unset:
+    pass
+
+
+_UNSET = _Unset()
+
 # Log DB type immediately at import so Railway shows it on every boot
 _is_postgres = DATABASE_URL.startswith("postgresql")
 _db_type     = "PostgreSQL" if _is_postgres else "SQLite"
@@ -227,6 +236,10 @@ class PaperTrade(Base):
     peak_after_close  = Column(Float,       nullable=True)
     sold_too_early    = Column(Boolean,     nullable=True)  # price went 50%+ higher after close
     sold_too_late     = Column(Boolean,     nullable=True)  # SL hit but recovered within 1h
+    # Dead-position detection state (updated every monitor tick while open)
+    zero_volume_since = Column(DateTime,    nullable=True)  # first tick volume hit 0/null
+    last_move_at      = Column(DateTime,    nullable=True)  # last tick with >=2% price move
+    last_move_mc      = Column(Float,       nullable=True)  # MC at last_move_at (reference)
 
     # Aliases so PaperTrade instances can be consumed by code written against Position
     # (Agent 6 learning loop treats paper trades as first-class learning signal).
@@ -378,13 +391,16 @@ _NEW_CANDIDATE_COLS = [
 ]
 
 _NEW_PAPER_TRADE_COLS = [
-    ("mc_1h_after",      "REAL"),
-    ("mc_4h_after",      "REAL"),
-    ("mc_6h_after",      "REAL"),
-    ("mc_24h_after",     "REAL"),
-    ("peak_after_close", "REAL"),
-    ("sold_too_early",   "BOOLEAN"),
-    ("sold_too_late",    "BOOLEAN"),
+    ("mc_1h_after",       "REAL"),
+    ("mc_4h_after",       "REAL"),
+    ("mc_6h_after",       "REAL"),
+    ("mc_24h_after",      "REAL"),
+    ("peak_after_close",  "REAL"),
+    ("sold_too_early",    "BOOLEAN"),
+    ("sold_too_late",     "BOOLEAN"),
+    ("zero_volume_since", "TIMESTAMP"),
+    ("last_move_at",      "TIMESTAMP"),
+    ("last_move_mc",      "REAL"),
 ]
 
 _NEW_AI_TRADE_PARAMS_COLS = [
@@ -2066,6 +2082,33 @@ async def update_paper_trade_peak(trade_id: int, current_mc: float, peak_mc: flo
             pt.peak_mc = peak_mc
             pt.peak_multiple = peak_mult
             await session.commit()
+
+
+async def update_paper_dead_tracking(
+    trade_id: int,
+    zero_volume_since=_UNSET,
+    last_move_at=_UNSET,
+    last_move_mc=_UNSET,
+) -> None:
+    """
+    Update dead-position tracking fields on a paper trade. Pass `_UNSET` to
+    leave a field alone; pass `None` to explicitly null it. Used by the
+    paper monitor to advance `zero_volume_since` / `last_move_at` state
+    each tick without clobbering unrelated fields.
+    """
+    async with AsyncSessionLocal() as session:
+        pt = (await session.execute(
+            select(PaperTrade).where(PaperTrade.id == trade_id)
+        )).scalar_one_or_none()
+        if pt is None:
+            return
+        if zero_volume_since is not _UNSET:
+            pt.zero_volume_since = zero_volume_since
+        if last_move_at is not _UNSET:
+            pt.last_move_at = last_move_at
+        if last_move_mc is not _UNSET:
+            pt.last_move_mc = last_move_mc
+        await session.commit()
 
 
 async def get_paper_trade_stats() -> dict:

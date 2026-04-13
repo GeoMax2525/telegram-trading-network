@@ -483,6 +483,9 @@ async def _optimize_trade_params(regime: str) -> int:
 
     updated = 0
     for ptype, trades in groups.items():
+        # dead_token is an outcome tag, not an entry tag — handled below
+        if ptype == "dead_token":
+            continue
         if len(trades) < MIN_SAMPLE_FOR_LEARNING:
             continue
 
@@ -492,8 +495,9 @@ async def _optimize_trade_params(regime: str) -> int:
         cur_sl  = float(current.optimal_sl_pct) if current else DEFAULT_SL_PCT
 
         n = len(trades)
-        sl_hits = sum(1 for t in trades if t.close_reason == "sl_hit")
-        tp_hits = sum(1 for t in trades if t.close_reason == "tp_hit")
+        sl_hits   = sum(1 for t in trades if t.close_reason == "sl_hit")
+        tp_hits   = sum(1 for t in trades if t.close_reason == "tp_hit")
+        dead_hits = sum(1 for t in trades if t.close_reason == "dead_token")
         wins    = sum(1 for t in trades if (t.paper_pnl_sol or 0) > 0)
         win_rate = wins / n
 
@@ -501,7 +505,8 @@ async def _optimize_trade_params(regime: str) -> int:
         avg_peak = sum(peaks) / len(peaks) if peaks else 1.0
         peak_exceeds_tp = sum(1 for p in peaks if p > cur_tp) / n
 
-        sl_hit_rate = sl_hits / n
+        sl_hit_rate   = sl_hits / n
+        dead_hit_rate = dead_hits / n
 
         # Sold-too-early signal: across trades with a 1h-after snapshot,
         # did price trend higher than exit?
@@ -521,6 +526,15 @@ async def _optimize_trade_params(regime: str) -> int:
         if sl_hit_rate > 0.50:
             new_sl = min(50.0, cur_sl + 5.0)
             reasons.append(f"sl_hit_rate={sl_hit_rate:.0%}>50%")
+
+        # Dead hits are a different failure mode than SL hits — the price
+        # didn't crash, it went stale. A wider SL won't help but a smaller
+        # position or earlier exit would. For now we also widen SL by a
+        # smaller step (+3) so Agent 6 at least registers the pattern as
+        # unfavorable.
+        if dead_hit_rate > 0.40:
+            new_sl = min(50.0, new_sl + 3.0)
+            reasons.append(f"dead_hit_rate={dead_hit_rate:.0%}>40%")
 
         if peak_exceeds_tp > 0.60:
             new_tp = min(10.0, new_tp + 0.5)
@@ -594,6 +608,36 @@ async def _optimize_trade_params(regime: str) -> int:
             ptype, cur_tp, new_tp, cur_sl, new_sl, n, win_rate * 100, avg_peak, reason_str,
         )
         updated += 1
+
+    # ── dead_token outcome row ──────────────────────────────────────
+    # Purely a stats/reporting row: aggregates every paper trade that
+    # closed with close_reason="dead_token" regardless of its entry tags.
+    # We update sample_size + win_rate + avg_multiple so /params shows
+    # the death count. TP/SL are left at defaults — they're not used
+    # for entry (resolver never sees dead_token in the matched list).
+    dead_trades = [t for t in all_trades if t.close_reason == "dead_token"]
+    if dead_trades:
+        dn = len(dead_trades)
+        dead_wins = sum(1 for t in dead_trades if (t.paper_pnl_sol or 0) > 0)
+        dead_mults = []
+        for t in dead_trades:
+            if t.paper_sol_spent and t.paper_sol_spent > 0 and t.paper_pnl_sol is not None:
+                dead_mults.append(max(0.1, 1.0 + t.paper_pnl_sol / max(t.paper_sol_spent, 0.01)))
+        dead_avg_mult = sum(dead_mults) / len(dead_mults) if dead_mults else 1.0
+        await upsert_trade_params(
+            pattern_type="dead_token",
+            optimal_tp_x=DEFAULT_TP_X,
+            optimal_sl_pct=DEFAULT_SL_PCT,
+            optimal_position_pct=DEFAULT_POSITION_PCT,
+            sample_size=dn,
+            win_rate=round(dead_wins / dn, 4),
+            avg_multiple=round(dead_avg_mult, 2),
+            confidence=min(100.0, dn * 2.0),
+        )
+        logger.info(
+            "Agent6: dead_token stats updated — n=%d avg_mult=%.2fx",
+            dn, dead_avg_mult,
+        )
 
     return updated
 
