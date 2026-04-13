@@ -899,31 +899,24 @@ async def run_once() -> tuple[int, int]:
                 logger.info("Scanner: paper balance depleted (%.4f SOL), skipping", state.paper_balance)
                 continue
 
-            # Confidence-based position sizing from DB params (% of balance),
-            # floored at 0 and capped by:
+            # Position sizing is now learned per pattern_type by Agent 6:
+            # confidence_engine's resolver returns position_pct as the
+            # mean of trained ai_trade_params.optimal_position_pct across
+            # matched rows. Agent 6 updates that per pattern_type based
+            # on win_rate + market regime.
+            #
+            # Hardcoded confidence tiers (size_confidence_*) are now
+            # ignored. The two remaining caps are:
             #   - 20% of balance (tail risk cap)
-            #   - max_position_sol (absolute cap to prevent runaway
-            #     compounding where winners balloon the balance and
-            #     the next trade opens at an unrealistic size)
-            sp = await get_params(
-                "size_confidence_20", "size_confidence_50",
-                "size_confidence_70", "size_confidence_80",
-                "max_position_sol",
-            )
-            conf = scored.get("confidence_score", 0)
-            if conf >= 80:
-                size_pct = sp["size_confidence_80"] / 100.0
-            elif conf >= 70:
-                size_pct = sp["size_confidence_70"] / 100.0
-            elif conf >= 50:
-                size_pct = sp["size_confidence_50"] / 100.0
-            else:
-                size_pct = sp["size_confidence_20"] / 100.0
-
+            #   - max_position_sol (absolute cap to block the runaway
+            #     compounding loop when balance inflates)
+            sp = await get_params("max_position_sol")
             max_abs = float(sp.get("max_position_sol") or 5.0)
+
+            learned_pct = float(scored.get("trade_position_pct", 10.0)) / 100.0
             paper_sol = round(
                 min(
-                    state.paper_balance * size_pct,
+                    state.paper_balance * learned_pct,
                     state.paper_balance * 0.20,
                     max_abs,
                 ),

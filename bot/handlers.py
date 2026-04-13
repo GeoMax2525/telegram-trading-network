@@ -1128,6 +1128,7 @@ async def cmd_tradeparams(message: Message):
 
         lines.append(
             f"{r.pattern_type:<20} tp={r.optimal_tp_x:.2f}x sl={r.optimal_sl_pct:.0f}% "
+            f"pos={r.optimal_position_pct:.1f}% "
             f"n={r.sample_size} wr={r.win_rate * 100:.0f}% "
             f"avg={r.avg_multiple:.2f}x{trail_str} ({age})"
         )

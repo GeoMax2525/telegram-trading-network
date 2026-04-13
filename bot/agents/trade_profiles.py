@@ -324,11 +324,13 @@ async def resolve_trade_params(pattern_types: list[str]) -> dict:
 
     trained_tps: list[float] = []
     trained_sls: list[float] = []
+    trained_pos: list[float] = []
     trained_types: list[str] = []
     trained_trail_triggers: list[float] = []
 
     untrained_tps: list[float] = []
     untrained_sls: list[float] = []
+    untrained_pos: list[float] = []
 
     for pt in pattern_types:
         row = rows.get(pt)
@@ -336,10 +338,12 @@ async def resolve_trade_params(pattern_types: list[str]) -> dict:
             continue
         tp_val = float(row.optimal_tp_x or 3.0)
         sl_val = float(row.optimal_sl_pct or 30.0)
+        pos_val = float(row.optimal_position_pct or 10.0)
         n = int(row.sample_size or 0)
         if n >= 1:
             trained_tps.append(tp_val)
             trained_sls.append(sl_val)
+            trained_pos.append(pos_val)
             trained_types.append(pt)
             if int(getattr(row, "trail_sl_enabled", 0) or 0) == 1:
                 trained_trail_triggers.append(
@@ -348,6 +352,7 @@ async def resolve_trade_params(pattern_types: list[str]) -> dict:
         else:
             untrained_tps.append(tp_val)
             untrained_sls.append(sl_val)
+            untrained_pos.append(pos_val)
 
     # Globals — kill switch and trail distance
     g = await get_params("trail_sl_enabled", "trail_sl_pct")
@@ -357,16 +362,22 @@ async def resolve_trade_params(pattern_types: list[str]) -> dict:
     if trained_tps:
         tp_x  = max(trained_tps)
         sl_pct = min(trained_sls)
+        # For position sizing, use the MEAN of trained pcts (not max) so
+        # no single aggressive pattern_type dominates. Conservative by
+        # design — we'd rather under-size than over-size.
+        position_pct = sum(trained_pos) / len(trained_pos)
     elif untrained_tps:
         # Fresh install fallback: mean of seeded defaults. Not max/min,
         # because with everything untrained the max would be the same
         # inflated insider_wallet 4.0 we're trying to suppress.
         tp_x = sum(untrained_tps) / len(untrained_tps)
         sl_pct = sum(untrained_sls) / len(untrained_sls)
+        position_pct = sum(untrained_pos) / len(untrained_pos) if untrained_pos else 10.0
         fallback_used = True
     else:
         tp_x = 3.0
         sl_pct = 30.0
+        position_pct = 10.0
         fallback_used = True
 
     trail_enabled = bool(global_trail_on and trained_trail_triggers)
@@ -376,6 +387,7 @@ async def resolve_trade_params(pattern_types: list[str]) -> dict:
     return {
         "tp_x":          round(tp_x, 2),
         "sl_pct":        round(sl_pct, 1),
+        "position_pct":  round(position_pct, 1),
         "trail_enabled": trail_enabled,
         "trail_trigger": trail_trigger,
         "trail_pct":     trail_pct,

@@ -2525,7 +2525,8 @@ AGENT_PARAM_DEFAULTS = {
     # Paper balance
     "paper_starting_balance": 20.0,
     "paper_balance_offset": 0.0,
-    "paper_reset_v20_done": 0.0,   # one-shot migration flag
+    "paper_reset_v20_done": 0.0,   # one-shot migration flag (legacy)
+    "paper_reset_v3_done":  0.0,   # v3: re-reset to 20 after balance inflation
 
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
     "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
@@ -2722,6 +2723,60 @@ async def init_agent_params() -> int:
             await session.commit()
 
         _log.info("Wallet re-score: %d rows updated under new tier thresholds", updated)
+        added += 1
+
+    # ── One-shot: reset paper balance to 20 SOL (v3) ──────────────────
+    # Runs once per DB (gated by paper_reset_v3_done). Same mechanism
+    # as the v20 migration: closes no trades, just writes an offset
+    # that brings the computed balance back to exactly 20 SOL. Used
+    # after the compounding-size bug inflated the balance to ~976 SOL.
+    # Open trades stay open. Closed trade history is preserved so
+    # Agent 6 can still learn from it.
+    async with AsyncSessionLocal() as session:
+        v3_flag = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "paper_reset_v3_done")
+        )).scalar_one_or_none()
+        v3_done = v3_flag is not None and v3_flag.param_value >= 1.0
+
+    if not v3_done:
+        # Zero the existing offset, compute raw balance, write new
+        # offset so computed balance snaps to exactly 20 SOL.
+        async with AsyncSessionLocal() as session:
+            off_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "paper_balance_offset")
+            )).scalar_one_or_none()
+            if off_row is None:
+                session.add(AgentParam(param_name="paper_balance_offset", param_value=0.0))
+            else:
+                off_row.param_value = 0.0
+                off_row.updated_at = datetime.utcnow()
+            await session.commit()
+
+        raw = await compute_paper_balance(20.0)
+        needed_offset = round(20.0 - raw, 4)
+
+        async with AsyncSessionLocal() as session:
+            off_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "paper_balance_offset")
+            )).scalar_one_or_none()
+            off_row.param_value = needed_offset
+            off_row.updated_at = datetime.utcnow()
+
+            flag_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "paper_reset_v3_done")
+            )).scalar_one_or_none()
+            if flag_row is None:
+                session.add(AgentParam(param_name="paper_reset_v3_done", param_value=1.0))
+            else:
+                flag_row.param_value = 1.0
+                flag_row.updated_at = datetime.utcnow()
+            await session.commit()
+
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "Paper balance v3 reset to 20 SOL (offset=%+.4f, raw_was=%.4f)",
+            needed_offset, raw,
+        )
         added += 1
 
     return added

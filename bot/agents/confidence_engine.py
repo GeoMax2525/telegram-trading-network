@@ -437,7 +437,7 @@ async def score_candidate(candidate: dict) -> dict:
 
     trade_tp_x         = resolved["tp_x"]
     trade_sl_pct       = resolved["sl_pct"]
-    trade_position_pct = 10.0  # kept for back-compat; actual sizing lives in scanner_agent
+    trade_position_pct = resolved.get("position_pct", 10.0)  # learned per pattern_type
     trail_enabled      = resolved["trail_enabled"]
     trail_trigger      = resolved["trail_trigger"]
     trail_pct          = resolved["trail_pct"]
