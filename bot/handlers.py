@@ -892,6 +892,123 @@ async def cmd_autotrade(message: Message):
 
 # ── /papertrades ──────────────────────────────────────────────────────────────
 
+# ── /whyloss — Diagnostic: why did the last N closed paper trades lose? ────
+
+@router.message(Command("whyloss"))
+async def cmd_whyloss(message: Message):
+    """
+    Dumps the last 10 (or N) closed paper trades with every signal that
+    fired at entry time plus what actually happened. Used to figure out
+    why the confidence engine is scoring losing tokens highly — strategy
+    diagnosis, not code debugging.
+    """
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    parts = (message.text or "").split()
+    n = 10
+    if len(parts) >= 2:
+        try:
+            n = max(1, min(30, int(parts[1])))
+        except ValueError:
+            pass
+
+    from database.models import (
+        AsyncSessionLocal, select, PaperTrade, Candidate,
+    )
+
+    async with AsyncSessionLocal() as session:
+        closed_trades = (await session.execute(
+            select(PaperTrade)
+            .where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+            .order_by(PaperTrade.closed_at.desc())
+            .limit(n)
+        )).scalars().all()
+
+    if not closed_trades:
+        await message.reply("No closed paper trades yet.", parse_mode=None)
+        return
+
+    lines = [
+        f"🔬 LAST {len(closed_trades)} CLOSED PAPER TRADES",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    wins = 0
+    losses = 0
+    for pt in closed_trades:
+        # Look up the most-recent Candidate row for this token (the one
+        # that triggered the trade, or close to it)
+        async with AsyncSessionLocal() as session:
+            cand = (await session.execute(
+                select(Candidate)
+                .where(Candidate.token_address == pt.token_address)
+                .order_by(Candidate.id.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+
+        name = (pt.token_name or "?")[:24]
+        conf = pt.confidence_score or 0
+        pnl = pt.paper_pnl_sol or 0
+        peak = pt.peak_multiple or 1.0
+        reason = pt.close_reason or "?"
+        tags = pt.pattern_type or "-"
+        # Truncate tags to one line
+        if len(tags) > 70:
+            tags = tags[:67] + "..."
+
+        icon = "✅" if pnl > 0 else "❌"
+        if pnl > 0:
+            wins += 1
+        else:
+            losses += 1
+
+        # Component scores (may be None if Candidate row is stale or missing)
+        if cand is not None:
+            chart = cand.chart_score or 0
+            insider = cand.insider_score or 0
+            rug = cand.rug_score or 0
+            caller = cand.caller_score or 0
+            fp = cand.fingerprint_score or 0
+            chart_pat = cand.chart_pattern or "-"
+            scores_line = (
+                f"   chart={chart:.0f} insider={insider:.0f} rug={rug:.0f} "
+                f"caller={caller:.0f} fp={fp:.0f}"
+            )
+            pattern_line = f"   chart_pattern: {chart_pat}"
+        else:
+            scores_line = "   (no Candidate row found — scores unavailable)"
+            pattern_line = None
+
+        header = f"{icon} {name}  conf={conf:.0f}  peak={peak:.2f}x  {reason}  pnl={pnl:+.4f}"
+        lines.append(header)
+        lines.append(scores_line)
+        if pattern_line:
+            lines.append(pattern_line)
+        lines.append(f"   tags: {tags}")
+        lines.append("")
+
+    # Summary
+    total = wins + losses
+    wr = (wins / total * 100) if total else 0
+    lines.append(f"Summary: {wins}W {losses}L | {wr:.0f}% win rate")
+
+    # Diagnostic hints
+    lines.append("")
+    lines.append("Look for:")
+    lines.append("  • chart>75 + insider<30 losing: chart pattern overweight")
+    lines.append("  • rug<50 losing: rugcheck gate too loose")
+    lines.append("  • conf<40 triggered anyway: paper_threshold too low")
+    lines.append("  • same tags on losers: that combo is losing")
+
+    # Plain text — no markdown — so we don't have to escape token names
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 @router.message(Command("papertrades"))
 async def cmd_papertrades(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
