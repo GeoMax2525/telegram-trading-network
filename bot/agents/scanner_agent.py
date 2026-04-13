@@ -396,7 +396,9 @@ async def _source2_insider_wallets() -> list[dict]:
     """
     wallets = await get_tier_wallets(max_tier=2)
     if not wallets:
+        logger.info("Scanner source2: no tier1/tier2 wallets in DB — source will return empty until Agent 2 promotes some")
         return []
+    logger.info("Scanner source2: checking %d tier1/2 wallets for recent buys", len(wallets[:15]))
 
     since_ts = int(time.time()) - INSIDER_WINDOW
     # mint -> {1: count, 2: count}
@@ -533,6 +535,59 @@ async def _source3_volume_spikes() -> list[dict]:
     for r in results:
         if isinstance(r, dict):
             candidates.append(r)
+    return candidates
+
+
+# ── Source 4: GMGN-flagged tokens (trending + smart money) ─────────────────
+
+async def _source4_gmgn_flagged() -> list[dict]:
+    """
+    Pulls tokens from the local Token table that gmgn_agent has flagged
+    as either trending on GMGN or touched by smart money. Filters to
+    recent (last 6h) tokens within the scanner's mcap/liquidity bands,
+    and tags them with source="gmgn_smart" so trade_profiles matches
+    the `trending_gmgn` / `smart_money_gmgn` pattern_types.
+
+    This is the ONLY source that actually reads the Token table —
+    source 1 and source 3 both just hit the DexScreener profiles
+    endpoint so they'd only pick up GMGN tokens by coincidence.
+    """
+    try:
+        cutoff = datetime.utcnow() - timedelta(hours=6)
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(Token)
+                .where(
+                    (Token.gmgn_trending == True) | (Token.gmgn_smart_money == True),
+                    Token.first_seen_at >= cutoff,
+                    Token.source != "dead",
+                )
+                .order_by(Token.last_updated_at.desc())
+                .limit(25)
+            )).scalars().all()
+    except Exception as exc:
+        logger.warning("Scanner source4 DB fetch failed: %s", exc)
+        return []
+
+    if not rows:
+        return []
+
+    candidates = []
+    for tok in rows:
+        mcap = float(tok.market_cap or 0) if tok.market_cap else 0
+        liquidity = float(tok.liquidity_usd or 0) if tok.liquidity_usd else 0
+        # Soft mcap window — in paper mode this isn't enforced anyway,
+        # but don't ship tokens with zero data
+        if mcap <= 0:
+            continue
+        candidates.append({
+            "mint":      tok.mint,
+            "name":      tok.name or "Unknown",
+            "symbol":    tok.symbol or "???",
+            "mcap":      mcap,
+            "liquidity": liquidity,
+            "source":    "gmgn_smart" if tok.gmgn_smart_money else "new_launch",
+        })
     return candidates
 
 
@@ -707,24 +762,51 @@ async def run_once() -> tuple[int, int]:
     state.scanner_status = "running"
     pattern = await get_pattern_by_type("winner_2x")
 
-    # Gather raw candidates from all 3 sources concurrently
-    s1, s2, s3 = await asyncio.gather(
+    # Gather raw candidates from all 4 sources concurrently. Source 1 and
+    # Source 3 both hit DexScreener PROFILES_URL (historically); Source 2
+    # uses Helius wallet-history; Source 4 reads the local Token table
+    # for GMGN-flagged tokens (trending / smart money).
+    s1, s2, s3, s4 = await asyncio.gather(
         _source1_new_launches(),
         _source2_insider_wallets(),
         _source3_volume_spikes(),
+        _source4_gmgn_flagged(),
         return_exceptions=True,
     )
 
     raw_candidates: list[dict] = []
-    for result in (s1, s2, s3):
+    per_source_counts = {"s1_new_launch": 0, "s2_insider": 0, "s3_volume": 0, "s4_gmgn": 0}
+    for label, result in zip(
+        ("s1_new_launch", "s2_insider", "s3_volume", "s4_gmgn"),
+        (s1, s2, s3, s4),
+    ):
         if isinstance(result, list):
+            per_source_counts[label] = len(result)
             raw_candidates.extend(result)
         elif isinstance(result, Exception):
-            logger.warning("Scanner source error: %s", result)
+            logger.warning("Scanner %s error: %s", label, result)
+
+    # Per-source visibility: see at a glance which sources are pulling weight
+    logger.info(
+        "Scanner sources: s1=%d s2=%d s3=%d s4=%d raw_total=%d",
+        per_source_counts["s1_new_launch"],
+        per_source_counts["s2_insider"],
+        per_source_counts["s3_volume"],
+        per_source_counts["s4_gmgn"],
+        len(raw_candidates),
+    )
 
     if not raw_candidates:
         state.scanner_status = "idle"
-        await log_agent_run("scanner", tokens_found=0, tokens_saved=0, notes="no raw candidates")
+        await log_agent_run(
+            "scanner", tokens_found=0, tokens_saved=0,
+            notes=(
+                f"s1={per_source_counts['s1_new_launch']} "
+                f"s2={per_source_counts['s2_insider']} "
+                f"s3={per_source_counts['s3_volume']} "
+                f"s4={per_source_counts['s4_gmgn']}"
+            ),
+        )
         return 0, 0
 
     logger.info("Scanner: %d raw candidates from all sources", len(raw_candidates))
@@ -867,9 +949,10 @@ async def run_once() -> tuple[int, int]:
         tokens_found=candidates_found,
         tokens_saved=queued,
         notes=(
-            f"sources: s1={len(s1) if isinstance(s1, list) else 0} "
-            f"s2={len(s2) if isinstance(s2, list) else 0} "
-            f"s3={len(s3) if isinstance(s3, list) else 0} "
+            f"s1={per_source_counts['s1_new_launch']} "
+            f"s2={per_source_counts['s2_insider']} "
+            f"s3={per_source_counts['s3_volume']} "
+            f"s4={per_source_counts['s4_gmgn']} "
             f"queued={queued}"
         ),
     )
