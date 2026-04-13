@@ -2266,11 +2266,34 @@ async def get_open_paper_trades() -> list["PaperTrade"]:
 
 
 async def has_open_paper_trade(token_address: str) -> bool:
-    """Returns True if there's already an open paper trade for this token."""
+    """Returns True if there's already an open paper trade for this mint."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(func.count(PaperTrade.id)).where(
                 PaperTrade.token_address == token_address,
+                PaperTrade.status == "open",
+            )
+        )
+        return (result.scalar() or 0) > 0
+
+
+async def has_open_paper_trade_by_name(token_name: str | None) -> bool:
+    """
+    Secondary duplicate guard: returns True if there's already an open
+    paper trade with this display name.
+
+    pump.fun lets anyone mint a token with any name, so two different
+    mints can both be called "$The Story Crypto Told First". The mint-
+    based has_open_paper_trade check correctly treats them as different
+    tokens — but for the user that's effectively a duplicate since
+    display name is what they see in /hub. This function catches those.
+    """
+    if not token_name:
+        return False
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.token_name == token_name,
                 PaperTrade.status == "open",
             )
         )
@@ -2636,6 +2659,7 @@ AGENT_PARAM_DEFAULTS = {
     "paper_reset_v20_done": 0.0,   # one-shot migration flag (legacy)
     "paper_reset_v3_done":  0.0,   # v3: re-reset to 20 after balance inflation
     "sl_floor_20_applied":  0.0,   # raise learned SLs to >=20% once
+    "force_reset_v4_done":  0.0,   # v4: nuke all paper trades + reset on boot
 
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
     "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
@@ -2931,6 +2955,81 @@ async def init_agent_params() -> int:
         import logging as _logging
         _logging.getLogger(__name__).info(
             "SL floor migration: raised %d ai_trade_params rows to 20%%", raised,
+        )
+        added += 1
+
+    # ── One-shot v4: force wipe all paper trades + reset balance ──────
+    # Triggered by the user observing corrupted open trades (duplicates
+    # on same token name, trades opening on already-dead tokens). Runs
+    # once per DB then stays set. Deletes every paper_trades row,
+    # zeros ai_trade_params sample_size/wr/avg_multiple, resets offset
+    # to 0 and paper_starting_balance to 20.0. Next scanner tick will
+    # operate on a pristine state.
+    async with AsyncSessionLocal() as session:
+        v4_flag = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "force_reset_v4_done")
+        )).scalar_one_or_none()
+        v4_done = v4_flag is not None and v4_flag.param_value >= 1.0
+
+    if not v4_done:
+        async with AsyncSessionLocal() as session:
+            pt_open = (await session.execute(
+                select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+            )).scalar() or 0
+            pt_closed = (await session.execute(
+                select(func.count(PaperTrade.id)).where(PaperTrade.status == "closed")
+            )).scalar() or 0
+
+            # Wipe every paper_trades row
+            await session.execute(PaperTrade.__table__.delete())
+
+            # Zero ai_trade_params sample counts so Agent 6 restarts learning
+            atp_rows = (await session.execute(select(AITradeParams))).scalars().all()
+            atp_count = 0
+            for r in atp_rows:
+                r.sample_size = 0
+                r.win_rate = 0.0
+                r.avg_multiple = 1.0
+                r.confidence = 0.0
+                r.updated_at = datetime.utcnow()
+                atp_count += 1
+
+            # Reset balance bookkeeping
+            off_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "paper_balance_offset")
+            )).scalar_one_or_none()
+            if off_row is None:
+                session.add(AgentParam(param_name="paper_balance_offset", param_value=0.0))
+            else:
+                off_row.param_value = 0.0
+                off_row.updated_at = datetime.utcnow()
+
+            start_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "paper_starting_balance")
+            )).scalar_one_or_none()
+            if start_row is None:
+                session.add(AgentParam(param_name="paper_starting_balance", param_value=20.0))
+            else:
+                start_row.param_value = 20.0
+                start_row.updated_at = datetime.utcnow()
+
+            # Flip the flag so this block only fires once
+            flag_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "force_reset_v4_done")
+            )).scalar_one_or_none()
+            if flag_row is None:
+                session.add(AgentParam(param_name="force_reset_v4_done", param_value=1.0))
+            else:
+                flag_row.param_value = 1.0
+                flag_row.updated_at = datetime.utcnow()
+
+            await session.commit()
+
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "Force reset v4: deleted %d paper_trades rows (%d open + %d closed), "
+            "zeroed %d ai_trade_params samples, balance → 20 SOL",
+            pt_open + pt_closed, pt_open, pt_closed, atp_count,
         )
         added += 1
 

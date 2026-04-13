@@ -49,6 +49,7 @@ from database.models import (
     get_token_count,
     open_paper_trade,
     has_open_paper_trade,
+    has_open_paper_trade_by_name,
     has_recent_manual_close,
     get_params,
     compute_paper_balance,
@@ -899,9 +900,17 @@ async def run_once() -> tuple[int, int]:
         if scored.get("paper_trade"):
             # Check for duplicate — one position per token
             mint_addr = scored.get("mint", "")
+            token_name = scored.get("name")
             if mint_addr and await has_open_paper_trade(mint_addr):
-                logger.info("Scanner: skip paper trade %s — already have open position",
-                            scored.get("name", "?")[:20])
+                logger.info("Scanner: skip paper trade %s — already have open position (mint match)",
+                            (token_name or "?")[:20])
+                continue
+            # Secondary guard by display name: pump.fun lets anyone mint
+            # a token with any name, so two different mints can share
+            # the same display name and the mint check won't catch it.
+            if token_name and await has_open_paper_trade_by_name(token_name):
+                logger.info("Scanner: skip paper trade %s — already have open position (name match)",
+                            token_name[:20])
                 continue
 
             # "Rage quit" cooldown — if the user recently manually closed
@@ -924,6 +933,34 @@ async def run_once() -> tuple[int, int]:
                             continue
                     except Exception as exc:
                         logger.debug("Scanner: manual_close cooldown check failed: %s", exc)
+
+            # Stale-price gate: the candidate was evaluated N ms ago and
+            # a pump.fun token can drop 50-70% in seconds. Re-fetch live
+            # MC right now and reject if it's significantly below eval.
+            # Also use the fresh MC as the entry value — we're buying
+            # at current price, not some cached price from 2 seconds ago.
+            eval_mc = float(scored.get("mcap") or 0)
+            fresh_mc = eval_mc
+            if mint_addr and eval_mc > 0:
+                try:
+                    fresh_pair = await fetch_token_data(mint_addr)
+                    if fresh_pair is not None:
+                        fresh_metrics = parse_token_metrics(fresh_pair)
+                        new_mc = float(fresh_metrics.get("market_cap") or 0)
+                        if new_mc > 0:
+                            fresh_mc = new_mc
+                            drop_ratio = (eval_mc - new_mc) / eval_mc
+                            if drop_ratio > 0.10:
+                                logger.info(
+                                    "Scanner: skip paper trade %s — stale price, "
+                                    "eval_mc=%.0f → now=%.0f (%.0f%% drop since eval)",
+                                    (token_name or "?")[:20],
+                                    eval_mc, new_mc, drop_ratio * 100,
+                                )
+                                continue
+                except Exception as exc:
+                    logger.debug("Scanner: fresh MC re-fetch failed for %s: %s",
+                                 mint_addr[:12], exc)
 
             # Compute true balance from DB
             state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
@@ -968,11 +1005,14 @@ async def run_once() -> tuple[int, int]:
                 # pattern_type now stores the COMMA-SEPARATED list of matched
                 # ai_trade_params keys so Agent 6 can learn per-bucket from a
                 # single PaperTrade row. See trade_profiles.match_pattern_types.
+                # entry_mc uses the FRESH re-fetched value (fresh_mc) so the
+                # peak_multiple/TP/SL math starts from current price, not
+                # the cached eval-time price.
                 pt = await open_paper_trade(
                     token_address=scored.get("mint", ""),
                     token_name=scored.get("name"),
-                    entry_mc=scored.get("mcap"),
-                    entry_price=scored.get("mcap"),
+                    entry_mc=fresh_mc if fresh_mc > 0 else scored.get("mcap"),
+                    entry_price=fresh_mc if fresh_mc > 0 else scored.get("mcap"),
                     paper_sol=paper_sol,
                     confidence=scored.get("confidence_score", 0),
                     pattern_type=scored.get("profile_tag") or scored.get("source"),
