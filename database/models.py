@@ -2230,16 +2230,24 @@ AGENT_PARAM_DEFAULTS = {
     "paper_starting_balance": 20.0,
     "paper_balance_offset": 0.0,
     "paper_reset_v20_done": 0.0,   # one-shot migration flag
-    "mc_weights_reset_v2_done": 0.0,  # one-shot MC weight reset flag
 
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
     "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
     "trail_sl_pct":          0.20, # distance from peak when trailing active
+
+    # Self-healing state (Agent 6)
+    "last_wr_snapshot_at": 0.0,    # trades_analyzed at last WR snapshot
+    "last_wr_snapshot_wr": 0.0,    # win rate at last snapshot
 }
 
 
-# Baseline MC-bucket weights (also the reset target). Each bucket sums to 1.0.
-# Enforced by _clamp_and_normalize_bucket in learning_loop.
+# Baseline MC-bucket weights — kept as reference for consumers that want
+# to render "how different is current from baseline" stats. Agent 6 no
+# longer hard-resets to these; instead _self_heal_weights normalizes the
+# existing (possibly drifted) weights proportionally to preserve learned
+# ratios. The 0.45/0.02 bounds below are DETECTION thresholds only, not
+# enforcement — a weight above 0.45 triggers a normalize pass but the
+# output may still exceed 0.45 if that's what the learned ratios produce.
 MC_WEIGHT_DEFAULTS = {
     "low_mc_": {
         "insider": 0.35, "fingerprint": 0.28, "chart": 0.05,
@@ -2254,8 +2262,8 @@ MC_WEIGHT_DEFAULTS = {
         "rug": 0.15, "caller": 0.10, "market": 0.05,
     },
 }
-MC_WEIGHT_MIN = 0.02
-MC_WEIGHT_MAX = 0.45
+MC_WEIGHT_DRIFT_HIGH = 0.45   # detection trigger only, not a hard cap
+MC_WEIGHT_DRIFT_LOW  = 0.02   # detection trigger only, not a hard cap
 
 
 async def init_agent_params() -> int:
@@ -2337,46 +2345,9 @@ async def init_agent_params() -> int:
         )
         added += 1
 
-    # ── One-shot migration: reset MC weights to safe defaults ───────────
-    # Prior versions of _auto_adjust_params polarized weights toward 0.45/0.02
-    # without normalizing the bucket, yielding insider=45%, caller=45%,
-    # rest=2% by the time enough cycles ran. This block force-writes the
-    # user-approved baseline values so Agent 6 starts from a known state.
-    async with AsyncSessionLocal() as session:
-        mc_flag = (await session.execute(
-            select(AgentParam).where(AgentParam.param_name == "mc_weights_reset_v2_done")
-        )).scalar_one_or_none()
-        mc_already_done = mc_flag is not None and mc_flag.param_value >= 1.0
-
-    if not mc_already_done:
-        import logging as _logging
-        _log = _logging.getLogger(__name__)
-        async with AsyncSessionLocal() as session:
-            for prefix, weights in MC_WEIGHT_DEFAULTS.items():
-                for component, value in weights.items():
-                    pname = f"{prefix}{component}"
-                    row = (await session.execute(
-                        select(AgentParam).where(AgentParam.param_name == pname)
-                    )).scalar_one_or_none()
-                    if row is None:
-                        session.add(AgentParam(param_name=pname, param_value=float(value)))
-                    else:
-                        row.param_value = float(value)
-                        row.updated_at = datetime.utcnow()
-
-            flag_row = (await session.execute(
-                select(AgentParam).where(AgentParam.param_name == "mc_weights_reset_v2_done")
-            )).scalar_one_or_none()
-            if flag_row is None:
-                session.add(AgentParam(param_name="mc_weights_reset_v2_done", param_value=1.0))
-            else:
-                flag_row.param_value = 1.0
-                flag_row.updated_at = datetime.utcnow()
-
-            await session.commit()
-
-        _log.info("MC weights reset to safe defaults (18 params force-written)")
-        added += 1
+    # MC weight healing is handled by learning_loop._self_heal_weights()
+    # which runs on every poll tick and normalizes drifted buckets
+    # proportionally without overwriting learned ratios. No hard reset.
 
     return added
 

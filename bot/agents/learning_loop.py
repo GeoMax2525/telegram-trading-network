@@ -23,6 +23,7 @@ Weekly performance report every Monday 9am UTC.
 
 import asyncio
 import logging
+import random
 import re
 from datetime import datetime, timedelta
 
@@ -56,8 +57,8 @@ from database.models import (
     get_recent_param_changes,
     get_post_close_stats,
     MC_WEIGHT_DEFAULTS,
-    MC_WEIGHT_MIN,
-    MC_WEIGHT_MAX,
+    MC_WEIGHT_DRIFT_HIGH,
+    MC_WEIGHT_DRIFT_LOW,
     get_paper_trade_stats,
     get_token_count,
     get_top_wallets,
@@ -822,11 +823,10 @@ async def _auto_adjust_params(
             changes.append(f"min_mc: ${cur_min_mc:.0f}→${new_min_mc:.0f} (bad WR)")
 
     # ── MC weight adjustment (most/least predictive) ─────────────────
-    # Adjust the best/worst component per bucket by ±0.02, THEN clamp
-    # every weight to [MC_WEIGHT_MIN, MC_WEIGHT_MAX] and normalize the
-    # whole bucket to sum = 1.0. Without this normalization step the
-    # previous implementation drifted buckets toward 0.45/0.02 extremes
-    # over many cycles (insider=45% caller=45% rest=2% bug).
+    # Bump the best component +0.02 and the worst -0.02, then re-normalize
+    # the bucket proportionally (sum = 1.0). No hard caps — learned ratios
+    # are preserved. _self_heal_weights runs every poll to keep buckets
+    # consistent if anything drifts.
     for prefix, label in [("low_mc_", "low"), ("mid_mc_", "mid"), ("high_mc_", "high")]:
         keys = {k: f"{prefix}{k}" for k in COMPONENT_KEYS}
         cur = {}
@@ -836,46 +836,28 @@ async def _auto_adjust_params(
         best_k = max(cur, key=cur.get)
         worst_k = min(cur, key=cur.get)
 
-        # Only bump if there's room in both directions
-        bumped = False
-        if cur[best_k] < MC_WEIGHT_MAX and cur[worst_k] > MC_WEIGHT_MIN:
-            cur[best_k]  = min(MC_WEIGHT_MAX, cur[best_k]  + 0.02)
-            cur[worst_k] = max(MC_WEIGHT_MIN, cur[worst_k] - 0.02)
-            bumped = True
+        # Bump top signal up, weakest signal down (soft floor at 0.01
+        # so we don't accidentally zero a component)
+        cur[best_k]  = cur[best_k]  + 0.02
+        cur[worst_k] = max(0.01, cur[worst_k] - 0.02)
 
-        # Project onto the bounded simplex: every weight in [MIN, MAX] and
-        # sum = 1.0. Plain clamp-then-normalize can push a capped value
-        # back above the cap (e.g. input 0.50 → clamp 0.45 → ÷0.95 → 0.47),
-        # so we instead clamp once then spread the remaining deficit/excess
-        # only across components that have headroom in the needed direction.
-        working = {k: max(MC_WEIGHT_MIN, min(MC_WEIGHT_MAX, v)) for k, v in cur.items()}
-        for _ in range(20):
-            total = sum(working.values())
-            diff = 1.0 - total
-            if abs(diff) < 1e-6:
-                break
-            if diff > 0:
-                movable = [k for k, v in working.items() if v < MC_WEIGHT_MAX]
-            else:
-                movable = [k for k, v in working.items() if v > MC_WEIGHT_MIN]
-            if not movable:
-                break
-            step = diff / len(movable)
-            for k in movable:
-                working[k] = max(MC_WEIGHT_MIN, min(MC_WEIGHT_MAX, working[k] + step))
-        normalized = {k: round(v, 4) for k, v in working.items()}
+        # Proportional normalize — preserves ratios learned so far
+        total = sum(cur.values())
+        if total <= 0:
+            continue  # pathological, leave alone
+        normalized = {k: round(v / total, 4) for k, v in cur.items()}
 
-        # Persist any key that moved meaningfully
         any_change = False
         for short, full in keys.items():
             old = await get_param(full)
             new = normalized[short]
             if abs(new - old) >= 0.0005:
-                reason = f"{label} MC: bucket clamp+normalize"
-                if bumped and short == best_k:
+                if short == best_k:
                     reason = f"{label} MC: boosting top signal"
-                elif bumped and short == worst_k:
+                elif short == worst_k:
                     reason = f"{label} MC: reducing weakest signal"
+                else:
+                    reason = f"{label} MC: proportional renorm"
                 await set_param(full, new, reason, total_analyzed, recent_wr)
                 any_change = True
 
@@ -905,6 +887,208 @@ async def _auto_adjust_params(
     # params — so it has been removed.
 
     return changes
+
+
+# ── Self-healing (runs every poll tick, no hard resets) ─────────────────────
+
+# Rule thresholds
+NO_TRADE_SOFT_HOURS     = 2      # rule 1: lower threshold by 3
+NO_TRADE_HARD_HOURS     = 3      # rule 4: lower threshold by 5
+PAPER_THRESHOLD_FLOOR   = 20     # never drop below 20
+PAPER_THRESHOLD_CEILING = 50     # never rise above 50
+STUCK_WR_TRADES         = 50     # check every N analyzed trades
+STUCK_WR_MIN_IMPROVEMENT = 0.02  # 2 points required to count as "improving"
+EXPLORATION_SHIFT       = 0.02   # ±0.02 random shift per weight
+
+
+def _proportional_normalize(weights: dict[str, float]) -> dict[str, float]:
+    """
+    Divide every weight by the sum so the bucket totals 1.0. Preserves
+    relative ratios exactly — the whole point of self-healing per user
+    spec. Returns a new dict rounded to 4 decimals.
+    """
+    # Guard against negative / zero values that would blow up the sum
+    positive = {k: max(0.0001, v) for k, v in weights.items()}
+    total = sum(positive.values()) or 1.0
+    return {k: round(v / total, 4) for k, v in positive.items()}
+
+
+def _weights_unbalanced(weights: dict[str, float]) -> bool:
+    """
+    Detection: bucket is unbalanced if sum drifts from 1.0 by >=0.02
+    OR any single weight exceeds the drift-high bound OR dips below
+    the drift-low bound. These are TRIGGERS not enforcement bounds —
+    the heal action is proportional normalize, which may still leave
+    values outside [LOW, HIGH] if that's what the learned ratios imply.
+    """
+    total = sum(weights.values())
+    if abs(total - 1.0) >= 0.02:
+        return True
+    for v in weights.values():
+        if v > MC_WEIGHT_DRIFT_HIGH or v < MC_WEIGHT_DRIFT_LOW:
+            return True
+    return False
+
+
+async def _self_heal_weights() -> int:
+    """
+    Rule 2 — detect MC-bucket drift and proportionally normalize each
+    bucket so sum == 1.0. Preserves every ratio Agent 6 has learned.
+    Returns the number of buckets that were healed this tick.
+    """
+    healed = 0
+    for prefix, label in [("low_mc_", "low"), ("mid_mc_", "mid"), ("high_mc_", "high")]:
+        cur = {}
+        for k in COMPONENT_KEYS:
+            cur[k] = await get_param(f"{prefix}{k}")
+
+        if not _weights_unbalanced(cur):
+            continue
+
+        normalized = _proportional_normalize(cur)
+
+        for k in COMPONENT_KEYS:
+            old = cur[k]
+            new = normalized[k]
+            if abs(new - old) >= 0.0005:
+                await set_param(
+                    f"{prefix}{k}", new,
+                    reason=f"{label} self-heal: normalize ratios",
+                )
+        bucket_str = " ".join(f"{k}={normalized[k]:.2f}" for k in COMPONENT_KEYS)
+        logger.info(
+            "Weights normalized — kept learned ratios (%s: %s)",
+            label, bucket_str,
+        )
+        healed += 1
+    return healed
+
+
+async def _latest_paper_open_time() -> datetime | None:
+    """Return the most recent PaperTrade.opened_at, or None if the table is empty."""
+    async with AsyncSessionLocal() as session:
+        ts = (await session.execute(
+            select(func.max(PaperTrade.opened_at))
+        )).scalar()
+    return ts
+
+
+async def _self_heal_threshold() -> None:
+    """
+    Rules 1 & 4 — if no paper trades have opened in 2+ hours, gently
+    lower conf_paper_threshold to explore; if 3+ hours, drop harder.
+    Always clamped to [PAPER_THRESHOLD_FLOOR, PAPER_THRESHOLD_CEILING].
+    """
+    latest = await _latest_paper_open_time()
+    now = datetime.utcnow()
+
+    if latest is None:
+        # No paper trades yet — count from bot start (best effort: use
+        # learning_loop_last_run as a proxy since it advances on boot)
+        ref = getattr(state, "learning_loop_last_run", None) or now
+        hours_since = (now - ref).total_seconds() / 3600
+    else:
+        hours_since = (now - latest).total_seconds() / 3600
+
+    if hours_since < NO_TRADE_SOFT_HOURS:
+        return
+
+    cur = await get_param("conf_paper_threshold")
+
+    if hours_since >= NO_TRADE_HARD_HOURS:
+        # Rule 4: aggressive drop (-5)
+        new = max(PAPER_THRESHOLD_FLOOR, min(PAPER_THRESHOLD_CEILING, cur - 5))
+        if new != cur:
+            await set_param(
+                "conf_paper_threshold", new,
+                reason=f"no trades {hours_since:.1f}h — aggressive drop",
+            )
+            logger.info(
+                "Agent6: Threshold too high — lowering to %d (was %d, no trades %.1fh)",
+                int(new), int(cur), hours_since,
+            )
+    else:
+        # Rule 1: soft drop (-3)
+        new = max(PAPER_THRESHOLD_FLOOR, min(PAPER_THRESHOLD_CEILING, cur - 3))
+        if new != cur:
+            await set_param(
+                "conf_paper_threshold", new,
+                reason=f"no trades {hours_since:.1f}h — exploring lower threshold",
+            )
+            logger.info(
+                "Agent6: No trades %.1fh — exploring lower threshold %d→%d",
+                hours_since, int(cur), int(new),
+            )
+
+
+async def _random_weight_exploration() -> None:
+    """
+    Apply a random ±EXPLORATION_SHIFT shift to each MC-bucket weight
+    and re-normalize proportionally. Explores nearby parameter space
+    without wiping learned ratios.
+    """
+    for prefix in ("low_mc_", "mid_mc_", "high_mc_"):
+        cur = {}
+        for k in COMPONENT_KEYS:
+            cur[k] = await get_param(f"{prefix}{k}")
+        shifted = {
+            k: v + random.uniform(-EXPLORATION_SHIFT, EXPLORATION_SHIFT)
+            for k, v in cur.items()
+        }
+        normalized = _proportional_normalize(shifted)
+        for k in COMPONENT_KEYS:
+            await set_param(
+                f"{prefix}{k}", normalized[k],
+                reason="stuck-wr exploration",
+            )
+
+
+async def _self_heal_stuck_wr() -> None:
+    """
+    Rule 3 — if trades_analyzed has grown by STUCK_WR_TRADES since the
+    last snapshot AND current WR hasn't improved by STUCK_WR_MIN_IMPROVEMENT,
+    kick the weights slightly to explore nearby parameter space.
+
+    Snapshots live in agent_params under last_wr_snapshot_at/_wr so we
+    survive restarts without special state.
+    """
+    current_row = await get_current_weights()
+    if current_row is None:
+        return
+    current_analyzed = int(current_row.trades_analyzed or 0)
+
+    last_at = int(await get_param("last_wr_snapshot_at"))
+    last_wr = float(await get_param("last_wr_snapshot_wr"))
+
+    if current_analyzed - last_at < STUCK_WR_TRADES:
+        return  # not time to check yet
+
+    # Time to compare
+    current_wr = await _recent_win_rate(STUCK_WR_TRADES)
+
+    # If no previous snapshot (fresh install), just record this one
+    if last_at == 0 and last_wr == 0.0:
+        await set_param("last_wr_snapshot_at", float(current_analyzed),
+                        reason="initial stuck-wr snapshot")
+        await set_param("last_wr_snapshot_wr", current_wr,
+                        reason="initial stuck-wr snapshot")
+        return
+
+    improvement = current_wr - last_wr
+    if improvement < STUCK_WR_MIN_IMPROVEMENT:
+        # Stuck — explore
+        await _random_weight_exploration()
+        logger.info(
+            "Exploring new parameters — win rate stuck at %.0f%% "
+            "(was %.0f%% after %d more trades)",
+            current_wr * 100, last_wr * 100, STUCK_WR_TRADES,
+        )
+
+    # Always advance the snapshot so we re-check in another 50 trades
+    await set_param("last_wr_snapshot_at", float(current_analyzed),
+                    reason="stuck-wr snapshot advance")
+    await set_param("last_wr_snapshot_wr", current_wr,
+                    reason="stuck-wr snapshot advance")
 
 
 # ── Main run ─────────────────────────────────────────────────────────────────
@@ -1372,6 +1556,22 @@ async def learning_loop(bot) -> None:
                 "Agent6 heartbeat: closed_trades=%d analyzed=%d pending=%d mode=%s (micro=%d)",
                 total_closed, analyzed, pending, hb_mode, hb_micro,
             )
+
+            # Self-healing — runs BEFORE run_once each tick so learning
+            # always operates on a sane state. All three rules preserve
+            # whatever Agent 6 has learned; none of them hard-reset.
+            try:
+                await _self_heal_weights()
+            except Exception as exc:
+                logger.error("self_heal_weights error: %s", exc)
+            try:
+                await _self_heal_threshold()
+            except Exception as exc:
+                logger.error("self_heal_threshold error: %s", exc)
+            try:
+                await _self_heal_stuck_wr()
+            except Exception as exc:
+                logger.error("self_heal_stuck_wr error: %s", exc)
 
             # Market regime check every cycle
             await _detect_market_regime()
