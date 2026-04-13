@@ -306,17 +306,27 @@ def _detect_launchpad_setup(data: dict) -> tuple[float, bool]:
     change_h1 = data.get("change_h1", 0)
     change_m5 = data.get("change_m5", 0)
     txns = data.get("txns", {})
+    volume_m5 = data.get("volume_m5", 0) or 0
+    volume_h1 = data.get("volume_h1", 0) or 0
 
-    score = 0.0
-
-    # Check age (should be young)
+    # Age gate: must be 15min-4hr old
     if created_at and isinstance(created_at, (int, float)):
         import time
         age_hours = (time.time() * 1000 - created_at) / 3_600_000
-        if 0.25 <= age_hours <= 4:
-            score += 20.0
-        elif age_hours > 4:
-            return 0.0, False  # too old for launchpad
+        if age_hours > 4 or age_hours < 0.25:
+            return 0.0, False
+
+    # Hard activity gate — no free points for age alone.
+    # Require either real volume acceleration or real buyer flow.
+    buys_m5 = txns.get("m5", {}).get("buys", 0) or 0
+    # Volume increasing: current 5m pace exceeds h1 average pace by 50%+
+    volume_accelerating = volume_m5 * 12 >= volume_h1 * 1.5 and volume_m5 > 0
+    # Buyer count >20 in last 15min proxy: m5 buys * 3 >= 20 → buys_m5 >= 7
+    buyers_strong = buys_m5 >= 7
+    if not (volume_accelerating or buyers_strong):
+        return 0.0, False
+
+    score = 20.0  # base for passing age + activity gate
 
     # Below launch high (h1 negative = pulled back)
     if change_h1 < -20:
@@ -326,15 +336,14 @@ def _detect_launchpad_setup(data: dict) -> tuple[float, bool]:
     if -5 <= change_m5 <= 5:
         score += 25.0
 
-    # Buyer activity still present
-    buys_m5 = txns.get("m5", {}).get("buys", 0) or 0
-    if buys_m5 >= 5:
+    # Buyer activity bonus
+    if buys_m5 >= 15:
         score += 20.0
-    elif buys_m5 >= 3:
+    elif buys_m5 >= 7:
         score += 10.0
 
     # Volume still flowing
-    if data.get("volume_m5", 0) > 200:
+    if volume_m5 > 200:
         score += 15.0
 
     return min(score, 100.0), score >= 50
@@ -535,9 +544,9 @@ async def analyze_chart(candidate: dict) -> dict:
 
         # Check for confluence bonus
         if len(detected) >= 3:
-            base_score += 50.0  # 3+ patterns
+            base_score += 25.0  # 3+ patterns
         elif len(detected) >= 2:
-            base_score += 25.0  # 2 patterns
+            base_score += 15.0  # 2 patterns
 
         # Check for conflicting patterns (some bearish + bullish)
         bearish_patterns = {"falling_wedge", "fakeout_recovery", "double_bottom"}
