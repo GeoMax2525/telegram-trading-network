@@ -404,16 +404,23 @@ async def score_candidate(candidate: dict) -> dict:
         and decision in ("execute_full", "execute_half")
     )
 
-    # PAPER execution: DB-driven threshold, no hard gates
+    # PAPER execution: DB-driven confidence threshold + rug floor.
+    # Previously had no hard gates, which let garbage tokens through
+    # whenever the weighted score happened to land above the (low)
+    # paper threshold. Rug floor at 40 keeps obvious scams out of
+    # the learning corpus without being as strict as the live gate.
+    paper_rug_floor_pass = rug >= 40
     paper_trade = (
         state.trade_mode == "paper"
         and confidence >= t_paper
+        and paper_rug_floor_pass
     )
 
     logger.info(
-        "Agent5: PAPER CHECK — %s mode=%s conf=%.1f threshold=%.0f result=%s",
+        "Agent5: PAPER CHECK — %s mode=%s conf=%.1f threshold=%.0f rug=%.0f(floor=40) result=%s",
         candidate.get("name", "?")[:20], state.trade_mode, confidence, t_paper,
-        "TRIGGER" if paper_trade else f"SKIP(mode={state.trade_mode},conf={confidence:.1f})",
+        rug,
+        "TRIGGER" if paper_trade else f"SKIP(mode={state.trade_mode},conf={confidence:.1f},rug_ok={paper_rug_floor_pass})",
     )
 
     if paper_trade:

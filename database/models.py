@@ -2673,16 +2673,15 @@ AGENT_PARAM_DEFAULTS = {
     "scanner_min_mc": 10000, "scanner_max_mc": 5000000, "scanner_min_liquidity": 5000,
     "scanner_min_ai_score": 40, "scanner_rugcheck_max_risk": 500,
     "scanner_interval_seconds": 15, "scanner_max_candidates": 10,
-    # Wallet tiers
+    # Wallet tiers — live tunables are the tier{n}_min_{wr,mult,trades,score}
+    # block further below. tier1/2/3_min_score kept here for legacy callers.
     "tier1_min_score": 80, "tier2_min_score": 60, "tier3_min_score": 40,
-    "tier1_min_winrate": 0.65, "tier2_min_winrate": 0.45,
-    "tier1_min_avg_mult": 5.0, "tier2_min_avg_mult": 2.0, "tier3_min_avg_mult": 1.5,
     "tier1_min_trades": 5, "tier2_min_trades": 3, "tier3_min_trades": 2,
     "wallet_analyst_interval_min": 30,
     # Pattern engine
     "pattern_min_samples": 3, "pattern_interval_hours": 6,
     # Confidence thresholds
-    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 20,
+    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 45,
     # MC weights — low
     "low_mc_insider": 0.35, "low_mc_fingerprint": 0.28, "low_mc_chart": 0.05,
     "low_mc_rug": 0.20, "low_mc_caller": 0.08, "low_mc_market": 0.04,
@@ -2692,9 +2691,6 @@ AGENT_PARAM_DEFAULTS = {
     # MC weights — high
     "high_mc_insider": 0.20, "high_mc_fingerprint": 0.20, "high_mc_chart": 0.30,
     "high_mc_rug": 0.15, "high_mc_caller": 0.10, "high_mc_market": 0.05,
-    # Position sizing (% of balance)
-    "size_confidence_20": 5, "size_confidence_50": 10,
-    "size_confidence_70": 15, "size_confidence_80": 20,
     # Learning loop
     "learning_micro_batch": 3, "learning_full_batch": 5, "learning_major_batch": 15,
     "learning_max_weight_shift": 0.10,
