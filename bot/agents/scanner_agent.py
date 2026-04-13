@@ -770,6 +770,17 @@ async def run_once() -> tuple[int, int]:
         state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
     except Exception as exc:
         logger.debug("Scanner balance refresh failed: %s", exc)
+
+    # Clear cross-tick dedupe list. This was an append-only cache that
+    # grew forever — any mint evaluated once was permanently excluded
+    # from future ticks. When user toggled trade_mode between off/paper,
+    # candidates scored during "off" windows were appended to pending
+    # but never reached the open path, and couldn't be re-evaluated
+    # once mode flipped back to paper. Cross-tick dedup is now handled
+    # by DB gates (has_open_paper_trade + has_recent_manual_close)
+    # which are correct and respect the actual trade state.
+    state.pending_candidates.clear()
+
     pattern = await get_pattern_by_type("winner_2x")
 
     # Gather raw candidates from all 4 sources concurrently. Source 1 and
