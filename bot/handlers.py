@@ -1019,6 +1019,117 @@ async def cmd_nukepaper(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
+# ── /forcenuke — Immediate paper trade wipe, no confirmation ──────────────
+
+@router.message(Command("forcenuke"))
+async def cmd_forcenuke(message: Message):
+    """
+    DESTRUCTIVE + IMMEDIATE. Wipes all paper_trades, zeros ai_trade_params
+    samples, resets balance to 20 SOL. No dry-run, no confirm gate, runs
+    the instant you send the command. Use this when /nukepaper's dry-run
+    flow is too slow or you just want it gone.
+
+    Performs the SQL equivalent of:
+      DELETE FROM paper_trades;
+      UPDATE agent_params SET param_value=0  WHERE param_name='paper_balance_offset';
+      UPDATE agent_params SET param_value=20 WHERE param_name='paper_starting_balance';
+    """
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    try:
+        from database.models import (
+            AsyncSessionLocal, select, func,
+            PaperTrade, AITradeParams, AgentParam,
+        )
+
+        # Step 1: count + delete
+        async with AsyncSessionLocal() as session:
+            before = (await session.execute(
+                select(func.count(PaperTrade.id))
+            )).scalar() or 0
+            await session.execute(PaperTrade.__table__.delete())
+            await session.commit()
+
+        # Step 2: zero ai_trade_params samples (preserve tp/sl/trail config)
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(select(AITradeParams))).scalars().all()
+            atp_count = 0
+            for r in rows:
+                r.sample_size = 0
+                r.win_rate = 0.0
+                r.avg_multiple = 1.0
+                r.confidence = 0.0
+                r.updated_at = datetime.utcnow()
+                atp_count += 1
+            await session.commit()
+
+        # Step 3: reset balance params
+        async with AsyncSessionLocal() as session:
+            for name, val in [
+                ("paper_balance_offset", 0.0),
+                ("paper_starting_balance", 20.0),
+            ]:
+                row = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == name)
+                )).scalar_one_or_none()
+                if row is None:
+                    session.add(AgentParam(param_name=name, param_value=val))
+                else:
+                    row.param_value = val
+                    row.updated_at = datetime.utcnow()
+            await session.commit()
+
+        # Step 4: clear in-memory state so next scanner/monitor tick
+        # doesn't act on stale cached data
+        state.pending_candidates.clear()
+        state.paper_balance = 20.0
+        state.PAPER_STARTING_BALANCE = 20.0
+        state.paper_trades_today = 0
+        state.learning_loop_last_analyzed = 0
+
+        # Step 5: verify from DB
+        async with AsyncSessionLocal() as session:
+            after = (await session.execute(
+                select(func.count(PaperTrade.id))
+            )).scalar() or 0
+            real_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+
+        state.paper_balance = real_balance
+
+    except Exception as exc:
+        logger.exception("forcenuke failed")
+        await message.reply(f"❌ forcenuke error: {exc}", parse_mode=None)
+        return
+
+    lines = [
+        "💥 FORCE NUKE — EXECUTED",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"paper_trades before: {before}",
+        f"paper_trades after : {after}  {'OK' if after == 0 else 'LEAKED ' + str(after)}",
+        "",
+        f"ai_trade_params samples zeroed: {atp_count}",
+        "",
+        "Balance:",
+        f"  paper_starting_balance = 20.0",
+        f"  paper_balance_offset   = 0.0",
+        f"  computed balance       = {real_balance:.4f} SOL",
+        "",
+        "In-memory state:",
+        f"  state.paper_balance   = {state.paper_balance:.4f}",
+        f"  paper_trades_today    = 0",
+        f"  pending_candidates    = cleared",
+        "",
+        "Next scanner tick will see a fully clean DB.",
+    ]
+    logger.warning(
+        "FORCE NUKE executed by %s: deleted=%d → after=%d, atp=%d, bal=%.4f",
+        message.from_user.id, before, after, atp_count, real_balance,
+    )
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /scannerwhy — Diagnose why scanner isn't opening paper trades ─────────
 
 @router.message(Command("scannerwhy"))

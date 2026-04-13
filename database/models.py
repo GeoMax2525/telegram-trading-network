@@ -2660,6 +2660,7 @@ AGENT_PARAM_DEFAULTS = {
     "paper_reset_v3_done":  0.0,   # v3: re-reset to 20 after balance inflation
     "sl_floor_20_applied":  0.0,   # raise learned SLs to >=20% once
     "force_reset_v4_done":  0.0,   # v4: nuke all paper trades + reset on boot
+    "force_reset_v5_done":  0.0,   # v5: wrapped in defensive try/except
 
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
     "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
@@ -3031,6 +3032,111 @@ async def init_agent_params() -> int:
             "zeroed %d ai_trade_params samples, balance → 20 SOL",
             pt_open + pt_closed, pt_open, pt_closed, atp_count,
         )
+        added += 1
+
+    # ── One-shot v5: defensive force wipe ─────────────────────────────
+    # v4 may have silently failed in an earlier boot (some prior
+    # migration block threw, init_agent_params bailed before reaching
+    # v4, v4_flag stayed at 0 forever, user kept seeing trades). v5
+    # wraps every sub-step in try/except and logs each one at WARNING
+    # level so the Railway log shows EXACTLY what happened.
+    import logging as _fv5_log
+    _fv5 = _fv5_log.getLogger(__name__)
+    try:
+        async with AsyncSessionLocal() as session:
+            v5_flag = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "force_reset_v5_done")
+            )).scalar_one_or_none()
+            v5_done = v5_flag is not None and v5_flag.param_value >= 1.0
+    except Exception as exc:
+        _fv5.error("Force reset v5: flag check failed — %s", exc)
+        v5_done = True  # fail-safe: don't run if we can't even check the flag
+
+    if not v5_done:
+        _fv5.warning("Force reset v5: STARTING — wrapping each step in try/except")
+
+        # Step 1: delete all paper_trades
+        try:
+            async with AsyncSessionLocal() as session:
+                pt_total_before = (await session.execute(
+                    select(func.count(PaperTrade.id))
+                )).scalar() or 0
+                await session.execute(PaperTrade.__table__.delete())
+                await session.commit()
+            _fv5.warning("Force reset v5: STEP 1 deleted %d paper_trades rows", pt_total_before)
+        except Exception as exc:
+            _fv5.error("Force reset v5: STEP 1 FAILED — %s", exc)
+
+        # Step 2: zero ai_trade_params samples
+        try:
+            async with AsyncSessionLocal() as session:
+                atp_rows = (await session.execute(select(AITradeParams))).scalars().all()
+                atp_count = 0
+                for r in atp_rows:
+                    r.sample_size = 0
+                    r.win_rate = 0.0
+                    r.avg_multiple = 1.0
+                    r.confidence = 0.0
+                    r.updated_at = datetime.utcnow()
+                    atp_count += 1
+                await session.commit()
+            _fv5.warning("Force reset v5: STEP 2 zeroed %d ai_trade_params samples", atp_count)
+        except Exception as exc:
+            _fv5.error("Force reset v5: STEP 2 FAILED — %s", exc)
+
+        # Step 3: reset balance params (offset=0, starting=20)
+        try:
+            async with AsyncSessionLocal() as session:
+                off_row = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == "paper_balance_offset")
+                )).scalar_one_or_none()
+                if off_row is None:
+                    session.add(AgentParam(param_name="paper_balance_offset", param_value=0.0))
+                else:
+                    off_row.param_value = 0.0
+                    off_row.updated_at = datetime.utcnow()
+
+                start_row = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == "paper_starting_balance")
+                )).scalar_one_or_none()
+                if start_row is None:
+                    session.add(AgentParam(param_name="paper_starting_balance", param_value=20.0))
+                else:
+                    start_row.param_value = 20.0
+                    start_row.updated_at = datetime.utcnow()
+
+                await session.commit()
+            _fv5.warning("Force reset v5: STEP 3 balance reset (offset=0, starting=20)")
+        except Exception as exc:
+            _fv5.error("Force reset v5: STEP 3 FAILED — %s", exc)
+
+        # Step 4: flip the flag so this only runs once. Separate session
+        # so partial failures above don't prevent the flag from being set.
+        try:
+            async with AsyncSessionLocal() as session:
+                flag_row = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == "force_reset_v5_done")
+                )).scalar_one_or_none()
+                if flag_row is None:
+                    session.add(AgentParam(param_name="force_reset_v5_done", param_value=1.0))
+                else:
+                    flag_row.param_value = 1.0
+                    flag_row.updated_at = datetime.utcnow()
+                await session.commit()
+            _fv5.warning("Force reset v5: STEP 4 flag flipped — will NOT run again")
+        except Exception as exc:
+            _fv5.error("Force reset v5: STEP 4 FAILED — %s (migration will re-attempt next boot)", exc)
+
+        # Step 5: verify by re-querying the DB
+        try:
+            async with AsyncSessionLocal() as session:
+                pt_after = (await session.execute(
+                    select(func.count(PaperTrade.id))
+                )).scalar() or 0
+            _fv5.warning("Force reset v5: POST-WIPE verify — paper_trades rows = %d", pt_after)
+        except Exception as exc:
+            _fv5.error("Force reset v5: STEP 5 verify FAILED — %s", exc)
+
         added += 1
 
     return added
