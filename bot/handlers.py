@@ -565,8 +565,8 @@ async def _build_hub_text(autotrade: bool) -> str:
             lines.append(f"/{idx} ${safe_name}{flag}")
             lines.append(f"MC: `{mc_entry_str}` → `{mc_now_str}` | `{mult_str}`")
             lines.append(
-                f"TP: `{pt.take_profit_x:.0f}x` ({_format_usd(tp_mc)}) | "
-                f"SL: `{pt.stop_loss_pct:.0f}%` ({_format_usd(sl_mc)})"
+                f"TP: `{pt.take_profit_x:.1f}x` ({_format_usd(tp_mc)}) | "
+                f"SL: `{pt.stop_loss_pct:.1f}%` ({_format_usd(sl_mc)})"
             )
             lines.append(f"Opened: _{age}_")
 

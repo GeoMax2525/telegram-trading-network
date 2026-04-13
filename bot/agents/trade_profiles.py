@@ -292,54 +292,94 @@ async def _fetch_rows(pattern_types: list[str]) -> dict:
 
 async def resolve_trade_params(pattern_types: list[str]) -> dict:
     """
-    Look up every matched pattern_type in ai_trade_params and combine:
-        TP    = max(optimal_tp_x)    across matched rows  — most aggressive
-        SL    = min(optimal_sl_pct)  across matched rows  — most protective
-        TRAIL = enabled if global kill switch ON AND any matched row
-                has trail_sl_enabled=1; trigger = min across those rows
-                (earliest activation = most protective)
+    Look up every matched pattern_type in ai_trade_params and combine.
 
-    Returns a dict with keys:
-        tp_x            — float (e.g. 4.0)
+    TRAINED ROWS ONLY: rows with sample_size >= 1 are the only ones that
+    contribute to the tp/sl aggregation. Untrained (n=0) seeded rows like
+    insider_wallet (tp=4.0) and high_caller (tp=3.5) were polluting the
+    max(tp) calculation — any trade tagged with a pre-seeded row would
+    yank TP up to the seed value, overriding everything Agent 6 learned.
+
+    If a matched row has n=0 it's excluded from the aggregation. If ALL
+    matched rows are n=0 (fresh install, first trade ever), we fall back
+    to the arithmetic mean of seeded defaults so the bot still works.
+
+    Combination rules for trained rows:
+        TP    = max(optimal_tp_x)   — most aggressive upside target
+        SL    = min(optimal_sl_pct) — most protective downside
+        TRAIL = enabled if global kill switch ON AND any trained row
+                has trail_sl_enabled=1; trigger = min across those rows
+
+    Returns:
+        tp_x            — float (e.g. 2.1)
         sl_pct          — float in percent (e.g. 25.0)
         trail_enabled   — bool
         trail_trigger   — float (e.g. 0.50 = 50% above entry)
         trail_pct       — float (e.g. 0.20 = 20% below peak)
-        matched_rows    — int  (how many rows contributed)
-        matched_types   — list[str] (the rows we actually found)
+        matched_rows    — int  (trained rows only)
+        matched_types   — list[str] (trained rows only)
+        fallback_used   — bool (True when no matched row had n>=1)
     """
     rows = await _fetch_rows(pattern_types)
 
-    tp_candidates: list[float] = []
-    sl_candidates: list[float] = []
-    trail_triggers: list[float] = []
+    trained_tps: list[float] = []
+    trained_sls: list[float] = []
+    trained_types: list[str] = []
+    trained_trail_triggers: list[float] = []
+
+    untrained_tps: list[float] = []
+    untrained_sls: list[float] = []
 
     for pt in pattern_types:
         row = rows.get(pt)
         if row is None:
             continue
-        tp_candidates.append(float(row.optimal_tp_x or 3.0))
-        sl_candidates.append(float(row.optimal_sl_pct or 30.0))
-        if int(getattr(row, "trail_sl_enabled", 0) or 0) == 1:
-            trail_triggers.append(float(getattr(row, "trail_sl_trigger_pct", 0.50) or 0.50))
+        tp_val = float(row.optimal_tp_x or 3.0)
+        sl_val = float(row.optimal_sl_pct or 30.0)
+        n = int(row.sample_size or 0)
+        if n >= 1:
+            trained_tps.append(tp_val)
+            trained_sls.append(sl_val)
+            trained_types.append(pt)
+            if int(getattr(row, "trail_sl_enabled", 0) or 0) == 1:
+                trained_trail_triggers.append(
+                    float(getattr(row, "trail_sl_trigger_pct", 0.50) or 0.50)
+                )
+        else:
+            untrained_tps.append(tp_val)
+            untrained_sls.append(sl_val)
 
     # Globals — kill switch and trail distance
     g = await get_params("trail_sl_enabled", "trail_sl_pct")
     global_trail_on = g.get("trail_sl_enabled", 0.0) >= 0.5
 
-    tp_x  = max(tp_candidates) if tp_candidates else 3.0
-    sl_pct = min(sl_candidates) if sl_candidates else 30.0
+    fallback_used = False
+    if trained_tps:
+        tp_x  = max(trained_tps)
+        sl_pct = min(trained_sls)
+    elif untrained_tps:
+        # Fresh install fallback: mean of seeded defaults. Not max/min,
+        # because with everything untrained the max would be the same
+        # inflated insider_wallet 4.0 we're trying to suppress.
+        tp_x = sum(untrained_tps) / len(untrained_tps)
+        sl_pct = sum(untrained_sls) / len(untrained_sls)
+        fallback_used = True
+    else:
+        tp_x = 3.0
+        sl_pct = 30.0
+        fallback_used = True
 
-    trail_enabled = bool(global_trail_on and trail_triggers)
-    trail_trigger = min(trail_triggers) if trail_triggers else 0.50
+    trail_enabled = bool(global_trail_on and trained_trail_triggers)
+    trail_trigger = min(trained_trail_triggers) if trained_trail_triggers else 0.50
     trail_pct     = float(g.get("trail_sl_pct", 0.20))
 
     return {
-        "tp_x":          tp_x,
-        "sl_pct":        sl_pct,
+        "tp_x":          round(tp_x, 2),
+        "sl_pct":        round(sl_pct, 1),
         "trail_enabled": trail_enabled,
         "trail_trigger": trail_trigger,
         "trail_pct":     trail_pct,
-        "matched_rows":  len(tp_candidates),
-        "matched_types": list(rows.keys()),
+        "matched_rows":  len(trained_tps),
+        "matched_types": trained_types,
+        "fallback_used": fallback_used,
     }
