@@ -723,7 +723,7 @@ async def cmd_hub(message: Message):
     try:
         text = await _build_hub_text(state.autotrade_enabled)
         await message.reply(
-            text, parse_mode=None,
+            text, parse_mode="HTML",
             reply_markup=_hub_keyboard(state.autotrade_enabled),
         )
     except Exception as exc:
