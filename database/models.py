@@ -2613,6 +2613,22 @@ async def get_paper_trade_stats() -> dict:
             )
         )).scalar() or 0.0
 
+        today_strategy_closed = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.closed_at >= today,
+                PaperTrade.paper_pnl_sol.is_not(None),
+                PaperTrade.close_reason.in_(strategy_reasons),
+            )
+        )).scalar() or 0
+
+        today_strategy_wins = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.closed_at >= today,
+                PaperTrade.paper_pnl_sol > 0,
+                PaperTrade.close_reason.in_(strategy_reasons),
+            )
+        )).scalar() or 0
+
         open_count = (await session.execute(
             select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
         )).scalar() or 0
@@ -2624,6 +2640,10 @@ async def get_paper_trade_stats() -> dict:
 
     win_rate = round(wins / closed * 100) if closed > 0 else 0
     strategy_win_rate = round(strategy_wins / strategy_closed * 100) if strategy_closed > 0 else 0
+    today_strategy_win_rate = (
+        round(today_strategy_wins / today_strategy_closed * 100)
+        if today_strategy_closed > 0 else 0
+    )
 
     return {
         "total": total, "closed": closed, "wins": wins,
@@ -2638,6 +2658,9 @@ async def get_paper_trade_stats() -> dict:
         "meta_pnl": float(meta_pnl),
         "today_strategy_pnl": float(today_strategy_pnl),
         "today_meta_pnl": float(today_meta_pnl),
+        "today_strategy_closed": today_strategy_closed,
+        "today_strategy_wins": today_strategy_wins,
+        "today_strategy_win_rate": today_strategy_win_rate,
     }
 
 

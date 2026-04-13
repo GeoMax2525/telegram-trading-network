@@ -517,35 +517,38 @@ async def _build_hub_text(autotrade: bool) -> str:
         chart_detail = "—"
     lines.append(_fmt_agent("Charts", "✅", chart_detail, "—"))
 
-    # ── Performance ──────────────────────────────────────────────────
+    # ── Performance (strategy-only, meta excluded) ──────────────────
     candidates_today = ce_stats.get("scored_today", 0) or state.scanner_candidates_today
+    perf_today_pnl = paper_stats.get("today_strategy_pnl", 0.0)
+    perf_alltime_pnl = paper_stats.get("strategy_pnl", 0.0)
+    perf_wr = paper_stats.get("strategy_win_rate", 0)
+    perf_closed = paper_stats.get("strategy_closed", 0)
     lines += [
         "",
         DIVIDER,
         "📊 PERFORMANCE",
-        f"Today: {today_pnl:+.2f} SOL  |  All Time: {alltime_pnl:+.2f} SOL",
-        f"Win Rate: {win_rate}%  |  Closed: {total_closed} bot  |  Candidates: {candidates_today}",
+        f"Today: {perf_today_pnl:+.2f} SOL  |  All Time: {perf_alltime_pnl:+.2f} SOL",
+        f"Win Rate: {perf_wr}%  |  Closed: {perf_closed} bot  |  Candidates: {candidates_today}",
     ]
 
-    # ── Paper trading breakdown ─────────────────────────────────────
-    p_open      = paper_stats.get("open_count", 0)
-    p_today_n   = paper_stats.get("today_count", 0)
-    p_today_pnl = paper_stats.get("today_pnl", 0.0)
-    p_strat_wr  = paper_stats.get("strategy_win_rate", 0)
-    p_strat_n   = paper_stats.get("strategy_closed", 0)
-    p_strat_pnl = paper_stats.get("strategy_pnl", 0.0)
-    p_meta_pnl  = paper_stats.get("meta_pnl", 0.0)
-    p_all_wr    = paper_stats.get("win_rate", 0)
-    p_all_pnl   = paper_stats.get("total_pnl", 0.0)
+    # ── Paper trading breakdown (strategy-only, meta excluded) ──────
+    p_open            = paper_stats.get("open_count", 0)
+    p_today_n         = paper_stats.get("today_count", 0)
+    p_today_strat_pnl = paper_stats.get("today_strategy_pnl", 0.0)
+    p_today_strat_wr  = paper_stats.get("today_strategy_win_rate", 0)
+    p_strat_wr        = paper_stats.get("strategy_win_rate", 0)
+    p_strat_n         = paper_stats.get("strategy_closed", 0)
+    p_strat_pnl       = paper_stats.get("strategy_pnl", 0.0)
+    p_meta_pnl        = paper_stats.get("meta_pnl", 0.0)
 
     lines += [
         "",
         DIVIDER,
         f"📋 PAPER TRADING ({p_open} open)",
-        f"Today: {p_today_n} trades  |  Win Rate: {p_strat_wr}%  |  {p_today_pnl:+.2f} SOL",
+        f"Today: {p_today_n} trades  |  Win Rate: {p_today_strat_wr}%  |  {p_today_strat_pnl:+.2f} SOL",
         f"Bot-closed: {p_strat_n} trades  |  {p_strat_wr}% WR  |  {p_strat_pnl:+.2f} SOL",
         f"Manual: {p_meta_pnl:+.2f} SOL — not learned from",
-        f"All Time: {p_all_wr}% WR  |  {p_all_pnl:+.2f} SOL",
+        f"All Time: {p_strat_wr}% WR  |  {p_strat_pnl:+.2f} SOL",
     ]
 
     # ── Open trades ─────────────────────────────────────────────────
