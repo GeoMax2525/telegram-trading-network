@@ -570,9 +570,40 @@ async def _build_hub_text(autotrade: bool) -> str:
             )
             lines.append(f"Opened: _{age}_")
 
+    # Wallet summary line — counts by type + clusters
+    try:
+        from database.models import (
+            AsyncSessionLocal as _ASL, select as _select, func as _func,
+            Wallet as _Wallet, get_all_wallet_clusters as _gacs,
+        )
+        async with _ASL() as _session:
+            total_wallets = (await _session.execute(
+                _select(_func.count(_Wallet.address))
+            )).scalar() or 0
+            early_insider_count = (await _session.execute(
+                _select(_func.count(_Wallet.address)).where(
+                    _Wallet.wallet_type == "early_insider"
+                )
+            )).scalar() or 0
+            coordinated_count = (await _session.execute(
+                _select(_func.count(_Wallet.address)).where(
+                    _Wallet.wallet_type == "coordinated_group"
+                )
+            )).scalar() or 0
+        cluster_rows = await _gacs()
+        cluster_total = len(cluster_rows)
+    except Exception:
+        total_wallets = early_insider_count = coordinated_count = cluster_total = 0
+
     lines += [
         "",
         "🔥 *TOP WALLETS*",
+        (
+            f"👛 Wallets: `{total_wallets}` total | "
+            f"`{early_insider_count}` early_insider | "
+            f"`{coordinated_count}` coordinated | "
+            f"`{cluster_total}` clusters"
+        ),
     ]
 
     top_wallets = await get_top_wallets(limit=3)
@@ -581,10 +612,13 @@ async def _build_hub_text(autotrade: bool) -> str:
     else:
         for i, w in enumerate(top_wallets, 1):
             short = f"{w.address[:4]}...{w.address[-4:]}"
+            wtype = getattr(w, "wallet_type", None) or "unknown"
+            cluster = getattr(w, "cluster_id", None)
+            suffix = f" [{cluster}]" if cluster else ""
             lines.append(
                 f"#{i} `{short}` | Score: {w.score:.0f} | "
-                f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | {w.avg_multiple:.1f}x | T{w.tier}"
-                + (f" | {w.source}" if getattr(w, "source", None) else "")
+                f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | T{w.tier}"
+                f" | {wtype}{suffix}"
             )
 
     # Show recent paper trades (ONLY from PaperTrades table, never Positions)
@@ -799,9 +833,13 @@ async def cmd_wallets(message: Message):
     lines = ["👛 *TOP WALLETS*\n"]
     for i, w in enumerate(wallets, 1):
         short = f"{w.address[:4]}...{w.address[-4:]}"
+        wtype = getattr(w, "wallet_type", None) or "unknown"
+        cluster = getattr(w, "cluster_id", None)
+        cluster_suffix = f" [{cluster}]" if cluster else ""
         lines.append(
             f"#{i} `{short}` | Score: {w.score:.0f} | "
-            f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | Avg: {w.avg_multiple:.1f}x | Tier {w.tier}"
+            f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | Tier {w.tier} | "
+            f"{wtype}{cluster_suffix}"
         )
     await message.reply("\n".join(lines), parse_mode="Markdown")
 

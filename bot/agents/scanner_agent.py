@@ -401,11 +401,13 @@ async def _source2_insider_wallets() -> list[dict]:
     since_ts = int(time.time()) - INSIDER_WINDOW
     # mint -> {1: count, 2: count}
     mint_tier_counts: dict[str, dict[int, int]] = {}
+    # mint -> list of (wallet_addr, cluster_id_or_None) for cluster grouping
+    mint_wallet_clusters: dict[str, list[tuple[str, str | None]]] = {}
 
-    async def _check_wallet(wallet_addr: str, wallet_tier: int) -> tuple[int, list[str]]:
+    async def _check_wallet(wallet_addr: str, wallet_tier: int, cluster_id: str | None) -> tuple[int, list[str], str, str | None]:
         sigs = await _get_wallet_sigs(wallet_addr, since_ts)
         if not sigs:
-            return wallet_tier, []
+            return wallet_tier, [], wallet_addr, cluster_id
         parsed = await _parse_transactions(sigs)
         found_mints = []
         for tx in parsed:
@@ -414,29 +416,50 @@ async def _source2_insider_wallets() -> list[dict]:
                     mint = transfer.get("mint")
                     if mint:
                         found_mints.append(mint)
-        return wallet_tier, found_mints
+        return wallet_tier, found_mints, wallet_addr, cluster_id
 
-    tasks = [_check_wallet(w.address, int(w.tier or 2)) for w in wallets[:15]]
+    tasks = [
+        _check_wallet(w.address, int(w.tier or 2), getattr(w, "cluster_id", None))
+        for w in wallets[:15]
+    ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for res in results:
         if not isinstance(res, tuple):
             continue
-        tier, mints = res
+        tier, mints, addr, cid = res
         for m in mints:
             bucket = mint_tier_counts.setdefault(m, {1: 0, 2: 0})
             bucket[tier] = bucket.get(tier, 0) + 1
+            mint_wallet_clusters.setdefault(m, []).append((addr, cid))
 
     candidates = []
     for mint, tc in mint_tier_counts.items():
         t1 = tc.get(1, 0)
         t2 = tc.get(2, 0)
+
+        # Cluster-aware buy count: how many distinct clusters bought
+        # this token, AND the max wallets from a single cluster
+        entries = mint_wallet_clusters.get(mint, [])
+        cluster_counts: dict[str, int] = {}
+        for _, cid in entries:
+            if cid:
+                cluster_counts[cid] = cluster_counts.get(cid, 0) + 1
+        # The strongest signal: highest wallet count from a single cluster
+        cluster_buy_count = max(cluster_counts.values()) if cluster_counts else 0
+        cluster_id_hit = (
+            max(cluster_counts.items(), key=lambda x: x[1])[0]
+            if cluster_counts else None
+        )
+
         candidates.append({
             "mint": mint,
             "source": "insider_wallet",
             "insider_count": t1 + t2,
             "insider_tier_1_count": t1,
             "insider_tier_2_count": t2,
+            "cluster_buy_count": cluster_buy_count,
+            "cluster_id_hit": cluster_id_hit,
         })
 
     candidates.sort(key=lambda x: x["insider_count"], reverse=True)
@@ -663,6 +686,8 @@ async def _evaluate_candidate(
         "volume_h1":             volume_h1,
         "insider_tier_1_count":  raw.get("insider_tier_1_count", 0),
         "insider_tier_2_count":  raw.get("insider_tier_2_count", 0),
+        "cluster_buy_count":     raw.get("cluster_buy_count", 0),
+        "cluster_id_hit":        raw.get("cluster_id_hit"),
         "gmgn_trending":         gmgn_trending,
         "gmgn_smart_money":      gmgn_smart_money,
         "lp_burned":             safety["lp_burned"],

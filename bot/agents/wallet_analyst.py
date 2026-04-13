@@ -31,7 +31,10 @@ from bot.config import HELIUS_RPC_URL, HELIUS_API_KEY
 from bot.scanner import fetch_token_data, parse_token_metrics
 from database.models import (
     get_last_agent_run, log_agent_run,
-    get_winning_scans, upsert_wallet,
+    get_winning_scans, upsert_wallet, get_params,
+    upsert_wallet_token_trade, get_wallet_token_trades,
+    upsert_wallet_cluster, get_all_wallet_clusters,
+    AsyncSessionLocal, select, Wallet, WalletTokenTrade, Token,
 )
 
 logger = logging.getLogger(__name__)
@@ -245,20 +248,33 @@ async def _analyze_wallet_trades(wallet_address: str) -> dict:
             "multiples": [float, ...],
             "entry_mcs": [float, ...],
             "early_entries": int,
+            "per_token": [
+                {
+                    "mint": str,
+                    "first_buy_at": datetime | None,
+                    "last_sell_at": datetime | None,
+                    "bought_sol": float,
+                    "sold_sol": float,
+                    "multiple": float | None,
+                    "entry_mcap": float | None,
+                }, ...
+            ]
         }
     """
+    empty = {"wins": 0, "losses": 0, "total_trades": 0,
+             "multiples": [], "entry_mcs": [], "early_entries": 0,
+             "per_token": []}
+
     sigs_data = await _get_signatures(wallet_address, limit=200)
     if not sigs_data:
-        return {"wins": 0, "losses": 0, "total_trades": 0,
-                "multiples": [], "entry_mcs": [], "early_entries": 0}
+        return empty
 
     valid_sigs = [
         s["signature"] for s in sigs_data
         if s.get("blockTime") and not s.get("err")
     ]
     if not valid_sigs:
-        return {"wins": 0, "losses": 0, "total_trades": 0,
-                "multiples": [], "entry_mcs": [], "early_entries": 0}
+        return empty
 
     # Parse transactions in batches of 100
     all_parsed = []
@@ -267,14 +283,18 @@ async def _analyze_wallet_trades(wallet_address: str) -> dict:
         parsed = await _parse_transactions(batch)
         all_parsed.extend(parsed)
 
-    # Track token flows: mint -> {bought_amount, sold_amount, buy_time}
+    # Track token flows: mint -> {bought_sol, sold_sol, first_buy_ts, last_sell_ts}
     token_flows: dict[str, dict] = defaultdict(
-        lambda: {"bought_sol": 0.0, "sold_sol": 0.0, "buy_time": None}
+        lambda: {
+            "bought_sol": 0.0, "sold_sol": 0.0,
+            "first_buy_ts": None, "last_sell_ts": None,
+        }
     )
 
     for tx in all_parsed:
         transfers = tx.get("tokenTransfers") or []
         native_transfers = tx.get("nativeTransfers") or []
+        tx_ts = tx.get("timestamp")  # seconds epoch
 
         # Calculate SOL spent/received in this tx
         sol_out = sum(
@@ -293,22 +313,25 @@ async def _analyze_wallet_trades(wallet_address: str) -> dict:
             if not mint:
                 continue
 
+            flow = token_flows[mint]
             # Token received = buy
             if transfer.get("toUserAccount") == wallet_address:
-                token_flows[mint]["bought_sol"] += sol_out
-                if token_flows[mint]["buy_time"] is None:
-                    token_flows[mint]["buy_time"] = tx.get("timestamp")
-
+                flow["bought_sol"] += sol_out
+                if tx_ts and (flow["first_buy_ts"] is None or tx_ts < flow["first_buy_ts"]):
+                    flow["first_buy_ts"] = tx_ts
             # Token sent out = sell
             elif transfer.get("fromUserAccount") == wallet_address:
-                token_flows[mint]["sold_sol"] += sol_in
+                flow["sold_sol"] += sol_in
+                if tx_ts and (flow["last_sell_ts"] is None or tx_ts > flow["last_sell_ts"]):
+                    flow["last_sell_ts"] = tx_ts
 
-    # Analyze completed trades (tokens that were both bought and sold)
+    # Analyze completed trades + build per-token records
     wins = 0
     losses = 0
     multiples = []
     entry_mcs = []
     early_entries = 0
+    per_token: list[dict] = []
 
     for mint, flow in token_flows.items():
         bought = flow["bought_sol"]
@@ -317,10 +340,32 @@ async def _analyze_wallet_trades(wallet_address: str) -> dict:
         if bought <= 0.001:
             continue  # skip dust / airdrops
 
-        # Only count as a trade if there was meaningful activity
+        first_buy_at = datetime.utcfromtimestamp(flow["first_buy_ts"]) if flow["first_buy_ts"] else None
+        last_sell_at = datetime.utcfromtimestamp(flow["last_sell_ts"]) if flow["last_sell_ts"] else None
+
+        # Check entry MC from DexScreener
+        entry_mcap = None
+        pair = await fetch_token_data(mint)
+        if pair:
+            metrics = parse_token_metrics(pair)
+            mc = metrics.get("market_cap", 0) or 0
+            if mc > 0:
+                entry_mcap = mc
+
+        record = {
+            "mint": mint,
+            "first_buy_at": first_buy_at,
+            "last_sell_at": last_sell_at,
+            "bought_sol": round(bought, 6),
+            "sold_sol": round(sold, 6),
+            "multiple": None,
+            "entry_mcap": entry_mcap,
+        }
+
+        # Only count as a completed trade if there was meaningful sell volume
         if sold > 0.001:
-            # Completed trade
             multiple = sold / bought if bought > 0 else 0
+            record["multiple"] = round(multiple, 2)
             multiples.append(round(multiple, 2))
 
             if multiple >= 1.0:
@@ -328,15 +373,12 @@ async def _analyze_wallet_trades(wallet_address: str) -> dict:
             else:
                 losses += 1
 
-            # Check entry MC
-            pair = await fetch_token_data(mint)
-            if pair:
-                metrics = parse_token_metrics(pair)
-                mc = metrics.get("market_cap", 0) or 0
-                if mc > 0:
-                    entry_mcs.append(mc)
-                    if mc < EARLY_MC_THRESHOLD:
-                        early_entries += 1
+            if entry_mcap:
+                entry_mcs.append(entry_mcap)
+                if entry_mcap < EARLY_MC_THRESHOLD:
+                    early_entries += 1
+
+        per_token.append(record)
 
     total_trades = wins + losses
 
@@ -347,35 +389,27 @@ async def _analyze_wallet_trades(wallet_address: str) -> dict:
         "multiples": multiples,
         "entry_mcs": entry_mcs,
         "early_entries": early_entries,
+        "per_token": per_token,
     }
 
 
 # ── Scoring ──────────────────────────────────────────────────────────────────
 
-def _score_wallet(
+def _score_wallet_raw(
     wins: int,
     losses: int,
     total_trades: int,
     avg_multiple: float,
     early_entry_rate: float,
-) -> tuple[float, int]:
+) -> float:
     """
-    Scores a wallet 0–100 using real trade data.
-    Returns (score, tier).
-
-    Components (sum to 100 max):
-      win_rate      × 40  (100% WR = 40 pts)
-      avg_multiple  × 25  (tiered: 5x+=25, 3-5x=18, 2-3x=12, 1-2x=6)
-      early_entry   × 15  (100% early = 15 pts)
-      consistency   × 10  (1+=3, 3+=6, 5+=8, 10+=10)
-      volume        × 10  (1+=3, 3+=6, 5+=10)
+    Compute the 0-100 base score from trade stats. Pure function — the
+    tier assignment uses DB-driven thresholds and lives in _score_wallet.
     """
     win_rate = wins / total_trades if total_trades > 0 else 0.0
 
-    # Win rate (40 pts max)
     score = win_rate * 40
 
-    # Avg multiple — tiered scoring (25 pts max)
     if avg_multiple >= 5.0:
         score += 25
     elif avg_multiple >= 3.0:
@@ -385,10 +419,8 @@ def _score_wallet(
     elif avg_multiple >= 1.0:
         score += 6
 
-    # Early entry rate (15 pts max)
     score += early_entry_rate * 15
 
-    # Consistency (10 pts max)
     if total_trades >= 10:
         score += 10
     elif total_trades >= 5:
@@ -398,7 +430,6 @@ def _score_wallet(
     elif total_trades >= 1:
         score += 3
 
-    # Volume/wins (10 pts max)
     if wins >= 5:
         score += 10
     elif wins >= 3:
@@ -406,19 +437,312 @@ def _score_wallet(
     elif wins >= 1:
         score += 3
 
-    score = round(score, 1)
+    return round(score, 1)
 
-    # Multi-criteria tier assignment
-    if score >= 80 and win_rate >= 0.65 and avg_multiple >= 5.0 and total_trades >= 5:
+
+async def _score_wallet(
+    wins: int,
+    losses: int,
+    total_trades: int,
+    avg_multiple: float,
+    early_entry_rate: float,
+    score_bonus: float = 0.0,
+) -> tuple[float, int]:
+    """
+    Scores a wallet 0–100 and assigns tier 1/2/3/0 using thresholds
+    from agent_params. `score_bonus` is added AFTER the base score
+    (classification bonuses from _classify_wallet).
+
+    Returns (final_score, tier).
+    """
+    base = _score_wallet_raw(wins, losses, total_trades, avg_multiple, early_entry_rate)
+    score = round(min(100.0, base + float(score_bonus)), 1)
+
+    win_rate = wins / total_trades if total_trades > 0 else 0.0
+
+    # Thresholds from agent_params (user-specified realistic values)
+    p = await get_params(
+        "tier1_min_wr", "tier1_min_mult", "tier1_min_trades", "tier1_min_score",
+        "tier2_min_wr", "tier2_min_mult", "tier2_min_trades", "tier2_min_score",
+        "tier3_min_wr", "tier3_min_trades", "tier3_min_score",
+    )
+
+    if (
+        score      >= p["tier1_min_score"]
+        and win_rate >= p["tier1_min_wr"]
+        and avg_multiple >= p["tier1_min_mult"]
+        and total_trades >= p["tier1_min_trades"]
+    ):
         tier = 1
-    elif score >= 60 and win_rate >= 0.45 and avg_multiple >= 2.0 and total_trades >= 3:
+    elif (
+        score      >= p["tier2_min_score"]
+        and win_rate >= p["tier2_min_wr"]
+        and avg_multiple >= p["tier2_min_mult"]
+        and total_trades >= p["tier2_min_trades"]
+    ):
         tier = 2
-    elif score >= 40 and avg_multiple >= 1.5 and total_trades >= 2:
+    elif (
+        score      >= p["tier3_min_score"]
+        and win_rate >= p["tier3_min_wr"]
+        and total_trades >= p["tier3_min_trades"]
+    ):
         tier = 3
     else:
         tier = 0
 
     return score, tier
+
+
+# ── Classification thresholds ────────────────────────────────────────────────
+
+EARLY_INSIDER_MIN_TOKENS      = 3        # 3+ tokens matching
+EARLY_INSIDER_MIN_MULTIPLE    = 2.0      # peak >= 2x
+EARLY_INSIDER_MAX_ENTRY_MCAP  = 200_000  # entry mcap <= $200K
+EARLY_INSIDER_MAX_ENTRY_DELAY = 600      # seconds (10 minutes) after launch
+
+SNIPER_BUY_WINDOW_SEC         = 60       # buy within 60s of launch
+SNIPER_MIN_HOLD_SEC           = 1800     # held 30+ min
+SNIPER_MIN_TOKENS             = 3
+
+COORDINATED_MIN_SHARED_TOKENS = 3        # share 3+ tokens
+COORDINATED_COTIMING_WINDOW_SEC = 300    # buy within 5 min of each other
+
+EARLY_INSIDER_BONUS     = 10
+COORDINATED_BONUS       = 15
+SNIPER_HOLDER_BONUS     = 10
+
+
+async def _classify_wallet(wallet_address: str) -> tuple[str, float]:
+    """
+    Return (wallet_type, score_bonus) based on persisted wallet_token_trades.
+
+    Priority (strongest first, highest bonus wins on ties):
+      coordinated_group (+15)  — handled by _detect_clusters, passthrough
+      early_insider     (+10)  — 3+ tokens ≥2x peak, entry_mcap ≤ $200K,
+                                 entered within 10 min of first_seen_at
+      sniper_holder     (+10)  — 3+ tokens bought within 60s of launch
+                                 AND held 30+ min
+      gmgn_smart        (0)    — source == "gmgn"
+      unknown           (0)    — nothing matched
+
+    Cluster assignment happens separately in _detect_clusters after all
+    wallets have been analyzed this run. This function does NOT override
+    a pre-existing coordinated_group classification.
+    """
+    trades = await get_wallet_token_trades(wallet_address)
+
+    # Check existing row — if already in a cluster, keep it
+    async with AsyncSessionLocal() as session:
+        existing = (await session.execute(
+            select(Wallet).where(Wallet.address == wallet_address)
+        )).scalar_one_or_none()
+    if existing and existing.cluster_id:
+        return "coordinated_group", COORDINATED_BONUS
+
+    # Early-insider check
+    early_insider_hits = 0
+    for t in trades:
+        if t.multiple is None or t.multiple < EARLY_INSIDER_MIN_MULTIPLE:
+            continue
+        if t.entry_mcap is None or t.entry_mcap > EARLY_INSIDER_MAX_ENTRY_MCAP:
+            continue
+        # Entry within 10 min of launch — delay = first_buy - launch
+        # Negative delta means wallet bought BEFORE we first saw the token
+        # (they're definitely "first in") so treat as 0.
+        if t.first_buy_at is None or t.token_launch_at is None:
+            # No launch time → can't verify "first 10 min" — skip (honest miss)
+            continue
+        delay = (t.first_buy_at - t.token_launch_at).total_seconds()
+        if delay > EARLY_INSIDER_MAX_ENTRY_DELAY:
+            continue
+        early_insider_hits += 1
+
+    if early_insider_hits >= EARLY_INSIDER_MIN_TOKENS:
+        return "early_insider", EARLY_INSIDER_BONUS
+
+    # Sniper-holder check
+    sniper_hits = 0
+    for t in trades:
+        if t.first_buy_at is None or t.token_launch_at is None:
+            continue
+        delay = (t.first_buy_at - t.token_launch_at).total_seconds()
+        if delay > SNIPER_BUY_WINDOW_SEC:
+            continue
+        # Hold duration = last_sell_at - first_buy_at, or "still holding"
+        if t.last_sell_at is None:
+            # Still holding — count as held long enough if older than threshold
+            held_sec = (datetime.utcnow() - t.first_buy_at).total_seconds()
+        else:
+            held_sec = (t.last_sell_at - t.first_buy_at).total_seconds()
+        if held_sec >= SNIPER_MIN_HOLD_SEC:
+            sniper_hits += 1
+
+    if sniper_hits >= SNIPER_MIN_TOKENS:
+        return "sniper_holder", SNIPER_HOLDER_BONUS
+
+    # GMGN fallback
+    if existing and existing.source == "gmgn":
+        return "gmgn_smart", 0.0
+
+    return "unknown", 0.0
+
+
+async def _detect_clusters(wallet_addresses: list[str]) -> int:
+    """
+    Find wallets that co-timed their buys: a pair of wallets is
+    coordinated if they share >= COORDINATED_MIN_SHARED_TOKENS tokens
+    where their first_buy_at timestamps were within COORDINATED_COTIMING_WINDOW_SEC
+    of each other. Assigns the shared cluster_id to all matching wallets
+    and upserts a WalletCluster row. Returns the number of clusters
+    created/updated this run.
+    """
+    if len(wallet_addresses) < 2:
+        return 0
+
+    # Load all trades for these wallets, grouped by wallet
+    wallet_trades: dict[str, list] = {}
+    for addr in wallet_addresses:
+        wallet_trades[addr] = await get_wallet_token_trades(addr)
+
+    # Build per-token list: token → [(wallet, first_buy_at), ...]
+    token_buyers: dict[str, list] = {}
+    for addr, trades in wallet_trades.items():
+        for t in trades:
+            if t.first_buy_at is None:
+                continue
+            token_buyers.setdefault(t.token_address, []).append((addr, t.first_buy_at))
+
+    # For each token, find pairs of buyers within 5 min
+    # Build adjacency: pair (a, b) → count of co-timing tokens
+    from collections import defaultdict as _dd
+    pair_counts: dict[tuple[str, str], int] = _dd(int)
+    for mint, buyers in token_buyers.items():
+        if len(buyers) < 2:
+            continue
+        # Sort by buy time
+        buyers.sort(key=lambda x: x[1])
+        for i in range(len(buyers)):
+            for j in range(i + 1, len(buyers)):
+                a_addr, a_time = buyers[i]
+                b_addr, b_time = buyers[j]
+                if a_addr == b_addr:
+                    continue
+                delta = (b_time - a_time).total_seconds()
+                if delta > COORDINATED_COTIMING_WINDOW_SEC:
+                    break  # later buyers will be even further
+                pair = tuple(sorted((a_addr, b_addr)))
+                pair_counts[pair] += 1
+
+    # Build clusters via union-find on pairs that hit the threshold
+    parent: dict[str, str] = {}
+
+    def _find(x: str) -> str:
+        while parent.get(x, x) != x:
+            parent[x] = parent.get(parent[x], parent[x])
+            x = parent[x]
+        return x
+
+    def _union(a: str, b: str) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    qualified_pairs = 0
+    for (a, b), count in pair_counts.items():
+        if count >= COORDINATED_MIN_SHARED_TOKENS:
+            parent.setdefault(a, a)
+            parent.setdefault(b, b)
+            _union(a, b)
+            qualified_pairs += 1
+
+    if not parent:
+        return 0
+
+    # Group wallets by their union-find root
+    groups: dict[str, list[str]] = {}
+    for addr in list(parent.keys()):
+        root = _find(addr)
+        groups.setdefault(root, []).append(addr)
+
+    # Assign cluster_ids — stable, hashed from the sorted member list
+    import hashlib as _hashlib
+    clusters_updated = 0
+    for root, members in groups.items():
+        if len(members) < 2:
+            continue
+        members_sorted = sorted(set(members))
+        cid_raw = ",".join(members_sorted)
+        cid = "cluster_" + _hashlib.md5(cid_raw.encode()).hexdigest()[:8]
+
+        # Aggregate stats across the cluster's members
+        total_wins = 0
+        total_losses = 0
+        total_trades_all = 0
+        multiples_all = []
+        last_active = None
+        for addr in members_sorted:
+            async with AsyncSessionLocal() as session:
+                w = (await session.execute(
+                    select(Wallet).where(Wallet.address == addr)
+                )).scalar_one_or_none()
+            if w is None:
+                continue
+            total_wins += w.wins
+            total_losses += w.losses
+            total_trades_all += w.total_trades
+            multiples_all.append(w.avg_multiple)
+            if w.last_updated_at and (last_active is None or w.last_updated_at > last_active):
+                last_active = w.last_updated_at
+
+        cwr = total_wins / total_trades_all if total_trades_all > 0 else 0.0
+        cmult = sum(multiples_all) / len(multiples_all) if multiples_all else 1.0
+
+        await upsert_wallet_cluster(
+            cluster_id=cid,
+            wallet_addresses=members_sorted,
+            wins=total_wins,
+            losses=total_losses,
+            win_rate=round(cwr, 4),
+            avg_multiple=round(cmult, 2),
+            last_active=last_active,
+        )
+
+        # Tag each member wallet with the cluster_id + upgrade type
+        for addr in members_sorted:
+            async with AsyncSessionLocal() as session:
+                w = (await session.execute(
+                    select(Wallet).where(Wallet.address == addr)
+                )).scalar_one_or_none()
+                if w is None:
+                    continue
+                old_type = w.wallet_type or "unknown"
+                old_cid = w.cluster_id
+                w.cluster_id = cid
+                # Upgrade type to coordinated_group unless already stronger
+                if old_type in ("unknown", "gmgn_smart", "sniper_holder", "early_insider"):
+                    w.wallet_type = "coordinated_group"
+                    if old_type != "coordinated_group":
+                        logger.info(
+                            "Wallet %s..%s upgraded: %s → coordinated_group [%s]",
+                            addr[:4], addr[-4:], old_type, cid,
+                        )
+                # Re-score with cluster bonus
+                try:
+                    score, tier = await _score_wallet(
+                        wins=w.wins, losses=w.losses, total_trades=w.total_trades,
+                        avg_multiple=w.avg_multiple, early_entry_rate=0.0,
+                        score_bonus=COORDINATED_BONUS,
+                    )
+                    w.score = score
+                    w.tier = tier
+                except Exception:
+                    pass
+                w.last_updated_at = datetime.utcnow()
+                await session.commit()
+
+        clusters_updated += 1
+
+    return clusters_updated
 
 
 # ── Main run ─────────────────────────────────────────────────────────────────
@@ -495,9 +819,48 @@ async def run_once() -> tuple[int, int]:
         win_rate = wins / total if total > 0 else 0.0
         early_rate = early_entries / total if total > 0 else 0.0
 
-        score, tier = _score_wallet(wins, losses, total, avg_mult, early_rate)
-        if tier == 0:
-            continue  # below threshold
+        # Persist per-token records so classifiers + cluster detection
+        # can read timestamps later. Token.first_seen_at is the best-effort
+        # launch-time proxy — we look up each token once.
+        for rec in stats.get("per_token", []):
+            mint = rec["mint"]
+            token_launch_at = None
+            try:
+                async with AsyncSessionLocal() as s:
+                    tok = (await s.execute(
+                        select(Token).where(Token.mint == mint)
+                    )).scalar_one_or_none()
+                    if tok and tok.first_seen_at:
+                        token_launch_at = tok.first_seen_at
+            except Exception:
+                pass
+            try:
+                await upsert_wallet_token_trade(
+                    wallet_address=address,
+                    token_address=mint,
+                    first_buy_at=rec["first_buy_at"],
+                    last_sell_at=rec["last_sell_at"],
+                    total_bought_sol=rec["bought_sol"],
+                    total_sold_sol=rec["sold_sol"],
+                    multiple=rec["multiple"],
+                    entry_mcap=rec["entry_mcap"],
+                    token_launch_at=token_launch_at,
+                )
+            except Exception as exc:
+                logger.debug("persist wallet_token_trade %s/%s failed: %s",
+                             address[:12], mint[:12], exc)
+
+        # Classify now that per-token rows are fresh
+        wallet_type, score_bonus = await _classify_wallet(address)
+
+        score, tier = await _score_wallet(
+            wins, losses, total, avg_mult, early_rate,
+            score_bonus=score_bonus,
+        )
+        # wallet_min_score_to_save gate — was hardcoded tier>0, now a DB param
+        min_save = (await get_params("wallet_min_score_to_save"))["wallet_min_score_to_save"]
+        if score < min_save:
+            continue
 
         await upsert_wallet(
             address=address,
@@ -509,6 +872,7 @@ async def run_once() -> tuple[int, int]:
             losses=losses,
             total_trades=total,
             avg_entry_mcap=avg_entry,
+            wallet_type=wallet_type,
         )
         wallets_saved += 1
 
@@ -519,16 +883,32 @@ async def run_once() -> tuple[int, int]:
             win_rate * 100, avg_mult, total, early_rate * 100,
         )
 
+    # Step 3: Cluster detection — cross-wallet co-timing. Runs over
+    # every wallet in the Wallet table (not just this batch) so we
+    # catch clusters that span multiple analysis runs.
+    try:
+        async with AsyncSessionLocal() as session:
+            all_addrs = (await session.execute(
+                select(Wallet.address)
+            )).scalars().all()
+        clusters_updated = await _detect_clusters(list(all_addrs))
+    except Exception as exc:
+        logger.error("cluster detection error: %s", exc)
+        clusters_updated = 0
+
     await log_agent_run(
         "wallet_analyst",
         tokens_found=len(winning_scans),
         tokens_saved=wallets_saved,
-        notes=f"{len(all_wallets)} unique wallets, {wallets_saved} scored via Helius",
+        notes=(
+            f"{len(all_wallets)} unique, {wallets_saved} scored, "
+            f"{clusters_updated} clusters"
+        ),
     )
 
     logger.info(
-        "Wallet Analyst: done — tokens=%d wallets=%d saved=%d",
-        len(winning_scans), len(all_wallets), wallets_saved,
+        "Wallet Analyst: done — tokens=%d wallets=%d saved=%d clusters=%d",
+        len(winning_scans), len(all_wallets), wallets_saved, clusters_updated,
     )
     return len(all_wallets), wallets_saved
 

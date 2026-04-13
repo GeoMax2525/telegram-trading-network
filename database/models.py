@@ -102,8 +102,50 @@ class Wallet(Base):
     total_trades    = Column(Integer,    nullable=False, default=0)
     avg_entry_mcap  = Column(Float,      nullable=True)
     source          = Column(String(16), nullable=True)   # helius / gmgn / manual
+    # Agent 2 classification
+    wallet_type     = Column(String(32), nullable=False, default="unknown",
+                             server_default="unknown")
+    # — unknown / early_insider / coordinated_group / sniper_holder / gmgn_smart
+    cluster_id      = Column(String(32), nullable=True)   # shared with other wallets in same cluster
     first_seen_at   = Column(DateTime,   default=datetime.utcnow, nullable=False)
     last_updated_at = Column(DateTime,   default=datetime.utcnow, nullable=False)
+
+
+# ── WalletTokenTrades — per-wallet-per-token trade record ───────────────────
+# One row per (wallet, token) pair, populated by wallet_analyst from Helius
+# transaction history. Enables timestamp-based classification (early entry,
+# sniper hold duration, cross-wallet co-timing).
+
+class WalletTokenTrade(Base):
+    __tablename__ = "wallet_token_trades"
+
+    id                = Column(Integer,    primary_key=True, autoincrement=True)
+    wallet_address    = Column(String(64), nullable=False, index=True)
+    token_address     = Column(String(64), nullable=False, index=True)
+    first_buy_at      = Column(DateTime,   nullable=True)   # earliest observed buy
+    last_sell_at      = Column(DateTime,   nullable=True)   # latest observed sell (NULL = still holding)
+    total_bought_sol  = Column(Float,      nullable=False, default=0.0)
+    total_sold_sol    = Column(Float,      nullable=False, default=0.0)
+    multiple          = Column(Float,      nullable=True)    # sold/bought, populated once closed
+    entry_mcap        = Column(Float,      nullable=True)
+    token_launch_at   = Column(DateTime,   nullable=True)    # from Token.first_seen_at proxy
+    hold_duration_sec = Column(Integer,    nullable=True)    # last_sell_at - first_buy_at
+    updated_at        = Column(DateTime,   default=datetime.utcnow, nullable=False)
+
+
+# ── WalletClusters — groups of co-timing wallets (Agent 2) ──────────────────
+
+class WalletCluster(Base):
+    __tablename__ = "wallet_clusters"
+
+    cluster_id        = Column(String(32),  primary_key=True)
+    wallet_addresses  = Column(String(2048), nullable=False)  # JSON array
+    wins              = Column(Integer,     nullable=False, default=0)
+    losses            = Column(Integer,     nullable=False, default=0)
+    win_rate          = Column(Float,       nullable=False, default=0.0)
+    avg_multiple      = Column(Float,       nullable=False, default=1.0)
+    last_active       = Column(DateTime,    nullable=True)
+    created_at        = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
 
 # ── Patterns table (Agent 3 — Pattern Engine) ────────────────────────────────
@@ -421,7 +463,9 @@ _NEW_TOKEN_COLS = [
 ]
 
 _NEW_WALLET_COLS = [
-    ("source", "TEXT"),
+    ("source",      "TEXT"),
+    ("wallet_type", "TEXT"),
+    ("cluster_id",  "TEXT"),
 ]
 
 async def init_db() -> None:
@@ -1262,6 +1306,8 @@ async def upsert_wallet(
     total_trades: int,
     avg_entry_mcap: float | None,
     source: str | None = None,
+    wallet_type: str | None = None,
+    cluster_id: str | None = None,
 ) -> "Wallet":
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -1275,6 +1321,8 @@ async def upsert_wallet(
                 wins=wins, losses=losses, total_trades=total_trades,
                 avg_entry_mcap=avg_entry_mcap,
                 source=source,
+                wallet_type=wallet_type or "unknown",
+                cluster_id=cluster_id,
             )
             session.add(w)
         else:
@@ -1286,10 +1334,147 @@ async def upsert_wallet(
             w.losses        = losses
             w.total_trades  = total_trades
             w.avg_entry_mcap = avg_entry_mcap
+            if source is not None:
+                w.source = source
+            # Only overwrite type/cluster when explicitly provided so a
+            # second call without classification data doesn't wipe them
+            if wallet_type is not None:
+                w.wallet_type = wallet_type
+            if cluster_id is not None:
+                w.cluster_id = cluster_id
             w.last_updated_at = datetime.utcnow()
         await session.commit()
         await session.refresh(w)
         return w
+
+
+# ── WalletTokenTrades helpers ───────────────────────────────────────────────
+
+async def upsert_wallet_token_trade(
+    wallet_address: str,
+    token_address: str,
+    first_buy_at,
+    last_sell_at,
+    total_bought_sol: float,
+    total_sold_sol: float,
+    multiple: float | None,
+    entry_mcap: float | None,
+    token_launch_at,
+) -> None:
+    """
+    Upsert one per-wallet-per-token trade record. hold_duration_sec is
+    computed from (last_sell_at - first_buy_at) when both present.
+    """
+    hold_duration = None
+    if first_buy_at and last_sell_at:
+        hold_duration = int((last_sell_at - first_buy_at).total_seconds())
+
+    async with AsyncSessionLocal() as session:
+        existing = (await session.execute(
+            select(WalletTokenTrade).where(
+                WalletTokenTrade.wallet_address == wallet_address,
+                WalletTokenTrade.token_address == token_address,
+            )
+        )).scalar_one_or_none()
+
+        if existing is None:
+            session.add(WalletTokenTrade(
+                wallet_address=wallet_address,
+                token_address=token_address,
+                first_buy_at=first_buy_at,
+                last_sell_at=last_sell_at,
+                total_bought_sol=total_bought_sol,
+                total_sold_sol=total_sold_sol,
+                multiple=multiple,
+                entry_mcap=entry_mcap,
+                token_launch_at=token_launch_at,
+                hold_duration_sec=hold_duration,
+            ))
+        else:
+            # Take earliest buy + latest sell across updates
+            if first_buy_at and (existing.first_buy_at is None or first_buy_at < existing.first_buy_at):
+                existing.first_buy_at = first_buy_at
+            if last_sell_at and (existing.last_sell_at is None or last_sell_at > existing.last_sell_at):
+                existing.last_sell_at = last_sell_at
+            existing.total_bought_sol = total_bought_sol
+            existing.total_sold_sol = total_sold_sol
+            existing.multiple = multiple
+            if entry_mcap is not None:
+                existing.entry_mcap = entry_mcap
+            if token_launch_at is not None and existing.token_launch_at is None:
+                existing.token_launch_at = token_launch_at
+            # Recompute hold duration
+            if existing.first_buy_at and existing.last_sell_at:
+                existing.hold_duration_sec = int(
+                    (existing.last_sell_at - existing.first_buy_at).total_seconds()
+                )
+            existing.updated_at = datetime.utcnow()
+
+        await session.commit()
+
+
+async def get_wallet_token_trades(wallet_address: str) -> list["WalletTokenTrade"]:
+    async with AsyncSessionLocal() as session:
+        return list((await session.execute(
+            select(WalletTokenTrade)
+            .where(WalletTokenTrade.wallet_address == wallet_address)
+            .order_by(WalletTokenTrade.first_buy_at.asc())
+        )).scalars().all())
+
+
+async def get_token_buyers_with_timing(token_address: str) -> list["WalletTokenTrade"]:
+    """Every wallet that bought this token, ordered by first_buy_at asc."""
+    async with AsyncSessionLocal() as session:
+        return list((await session.execute(
+            select(WalletTokenTrade)
+            .where(WalletTokenTrade.token_address == token_address)
+            .order_by(WalletTokenTrade.first_buy_at.asc())
+        )).scalars().all())
+
+
+# ── WalletClusters helpers ──────────────────────────────────────────────────
+
+async def upsert_wallet_cluster(
+    cluster_id: str,
+    wallet_addresses: list[str],
+    wins: int = 0,
+    losses: int = 0,
+    win_rate: float = 0.0,
+    avg_multiple: float = 1.0,
+    last_active=None,
+) -> None:
+    import json as _json
+    async with AsyncSessionLocal() as session:
+        existing = (await session.execute(
+            select(WalletCluster).where(WalletCluster.cluster_id == cluster_id)
+        )).scalar_one_or_none()
+
+        if existing is None:
+            session.add(WalletCluster(
+                cluster_id=cluster_id,
+                wallet_addresses=_json.dumps(sorted(wallet_addresses)),
+                wins=wins,
+                losses=losses,
+                win_rate=win_rate,
+                avg_multiple=avg_multiple,
+                last_active=last_active,
+            ))
+        else:
+            existing.wallet_addresses = _json.dumps(sorted(wallet_addresses))
+            existing.wins = wins
+            existing.losses = losses
+            existing.win_rate = win_rate
+            existing.avg_multiple = avg_multiple
+            if last_active is not None:
+                existing.last_active = last_active
+        await session.commit()
+
+
+async def get_all_wallet_clusters() -> list["WalletCluster"]:
+    async with AsyncSessionLocal() as session:
+        return list((await session.execute(
+            select(WalletCluster).order_by(WalletCluster.last_active.desc())
+        )).scalars().all())
 
 
 async def get_top_wallets(limit: int = 10) -> list["Wallet"]:
@@ -2238,6 +2423,23 @@ AGENT_PARAM_DEFAULTS = {
     # Self-healing state (Agent 6)
     "last_wr_snapshot_at": 0.0,    # trades_analyzed at last WR snapshot
     "last_wr_snapshot_wr": 0.0,    # win rate at last snapshot
+
+    # Wallet tier thresholds (Agent 2) — realistic levels per user spec
+    "tier1_min_wr":       0.45,
+    "tier1_min_mult":     2.5,
+    "tier1_min_trades":   3,
+    "tier1_min_score":    70,
+    "tier2_min_wr":       0.35,
+    "tier2_min_mult":     1.8,
+    "tier2_min_trades":   2,
+    "tier2_min_score":    50,
+    "tier3_min_wr":       0.20,
+    "tier3_min_trades":   1,
+    "tier3_min_score":    30,
+    "wallet_min_score_to_save": 25,   # was 40; below this → don't save
+
+    # One-shot migration flag for re-scoring existing wallets under new thresholds
+    "wallet_rescore_v2_done": 0.0,
 }
 
 
@@ -2348,6 +2550,63 @@ async def init_agent_params() -> int:
     # MC weight healing is handled by learning_loop._self_heal_weights()
     # which runs on every poll tick and normalizes drifted buckets
     # proportionally without overwriting learned ratios. No hard reset.
+
+    # ── One-shot: re-score existing wallets with new tier thresholds ────
+    # Run once per DB (gated by wallet_rescore_v2_done flag). Reads every
+    # Wallet row and recomputes tier from its stored stats under the new
+    # agent_params thresholds. Does NOT touch stats, source, or classifier
+    # fields — only updates score + tier.
+    async with AsyncSessionLocal() as session:
+        rescore_flag = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "wallet_rescore_v2_done")
+        )).scalar_one_or_none()
+        rescore_done = rescore_flag is not None and rescore_flag.param_value >= 1.0
+
+    if not rescore_done:
+        # Import lazily to avoid a circular import on module load
+        from bot.agents.wallet_analyst import _score_wallet as _ws
+
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+
+        updated = 0
+        async with AsyncSessionLocal() as session:
+            wallets = (await session.execute(select(Wallet))).scalars().all()
+
+        for w in wallets:
+            try:
+                new_score, new_tier = await _ws(
+                    wins=w.wins, losses=w.losses, total_trades=w.total_trades,
+                    avg_multiple=w.avg_multiple, early_entry_rate=0.0,
+                )
+            except Exception as exc:
+                _log.warning("rescore: failed for %s: %s", w.address[:12], exc)
+                continue
+            async with AsyncSessionLocal() as session:
+                row = (await session.execute(
+                    select(Wallet).where(Wallet.address == w.address)
+                )).scalar_one_or_none()
+                if row is None:
+                    continue
+                row.score = new_score
+                row.tier = new_tier
+                row.last_updated_at = datetime.utcnow()
+                await session.commit()
+            updated += 1
+
+        async with AsyncSessionLocal() as session:
+            flag_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "wallet_rescore_v2_done")
+            )).scalar_one_or_none()
+            if flag_row is None:
+                session.add(AgentParam(param_name="wallet_rescore_v2_done", param_value=1.0))
+            else:
+                flag_row.param_value = 1.0
+                flag_row.updated_at = datetime.utcnow()
+            await session.commit()
+
+        _log.info("Wallet re-score: %d rows updated under new tier thresholds", updated)
+        added += 1
 
     return added
 

@@ -139,7 +139,14 @@ async def _score_fingerprint(candidate: dict, pattern) -> float:
 
 
 async def _score_insider(candidate: dict) -> float:
-    """Score 0–100 based on insider wallet + GMGN smart money activity."""
+    """Score 0–100 based on insider wallet + GMGN smart money activity.
+
+    Cluster boost: when Agent 2 has grouped wallets into coordinated
+    clusters, multiple cluster members buying the same token is a much
+    stronger signal than uncorrelated insider buys. We multiply the
+    insider sub-score by 1.0 / 1.5 / 2.0 depending on how many wallets
+    from the strongest matching cluster are on this token.
+    """
     insider_count = candidate.get("insider_count", 0)
     gmgn_boost = candidate.get("gmgn_wallet_boost", 0)
 
@@ -170,7 +177,27 @@ async def _score_insider(candidate: dict) -> float:
         except Exception:
             pass
 
-    return min(100.0, base + gmgn_boost)
+    combined = min(100.0, base + gmgn_boost)
+
+    # Cluster multiplier — strongest coordinated-group presence wins
+    cluster_buy_count = candidate.get("cluster_buy_count", 0) or 0
+    cluster_id = candidate.get("cluster_id_hit")
+    if cluster_buy_count >= 3:
+        boosted = min(100.0, combined * 2.0)
+        logger.info(
+            "Cluster signal: %s %d wallets → boosted insider score %.0f → %.0f",
+            cluster_id or "?", cluster_buy_count, combined, boosted,
+        )
+        combined = boosted
+    elif cluster_buy_count >= 2:
+        boosted = min(100.0, combined * 1.5)
+        logger.info(
+            "Cluster signal: %s %d wallets → boosted insider score %.0f → %.0f",
+            cluster_id or "?", cluster_buy_count, combined, boosted,
+        )
+        combined = boosted
+
+    return combined
 
 
 async def _score_chart(candidate: dict) -> tuple[float, str]:

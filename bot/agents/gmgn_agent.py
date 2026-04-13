@@ -348,8 +348,10 @@ async def _import_gmgn_wallets() -> int:
 
         tags = (stats.get("common") or {}).get("tags") or []
 
-        # Step 3: Score
-        score, tier = _score_wallet(
+        # Score the wallet but DO NOT gate on tier — per user spec, every
+        # GMGN wallet is saved as gmgn_smart regardless of score. Agent 2
+        # may later upgrade it to early_insider / coordinated_group / etc.
+        score, tier = await _score_wallet(
             wins=max(wins, 1), losses=losses, total_trades=total_trades,
             avg_multiple=avg_mult, early_entry_rate=0.5,
         )
@@ -359,28 +361,12 @@ async def _import_gmgn_wallets() -> int:
             short, total_trades, wr * 100, avg_mult, score, tier, tags[:3],
         )
 
-        if tier <= 0:
-            skip_tier_zero += 1
-            # Explain WHY tier=0 (the three gates in _score_wallet)
-            gate_fail = []
-            if score < 40:
-                gate_fail.append(f"score {score:.0f}<40")
-            if avg_mult < 1.5:
-                gate_fail.append(f"avg_mult {avg_mult:.2f}<1.5")
-            if total_trades < 2:
-                gate_fail.append(f"trades {total_trades}<2")
-            logger.info(
-                "GMGN wallet %s: SKIP tier=0 — %s",
-                short, ", ".join(gate_fail) or "unknown",
-            )
-            await asyncio.sleep(1.5)
-            continue
-
         await upsert_wallet(
             address=address, score=score, tier=tier,
             win_rate=round(wr, 4), avg_multiple=round(avg_mult, 2),
             wins=wins, losses=losses, total_trades=total_trades,
             avg_entry_mcap=None, source="gmgn",
+            wallet_type="gmgn_smart",
         )
         imported += 1
 
