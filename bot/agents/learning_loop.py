@@ -126,6 +126,16 @@ DEFAULT_TP_X = 3.0
 DEFAULT_SL_PCT = 30.0
 DEFAULT_POSITION_PCT = 10.0
 
+# Hard bounds for Agent 6 learning adjustments. SL_FLOOR was 10.0
+# which was too tight — pump.fun tokens routinely wiggle 15-30% on
+# normal price action, so 10% SL guaranteed insta-stopout on every
+# trade. Raised to 20.0 so trades get meaningful room to breathe
+# while still capping downside at a sane loss.
+SL_FLOOR = 20.0
+SL_CEILING = 50.0
+TP_FLOOR = 1.5
+TP_CEILING = 10.0
+
 SOL_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd&include_24hr_change=true"
 
 
@@ -565,30 +575,30 @@ async def _optimize_trade_params(regime: str) -> int:
         # getting stopped out is the wrong direction. User wants losses
         # to be smaller — tighten SL so we exit faster on bad trades.
         if sl_hit_rate > 0.50:
-            new_sl = max(10.0, cur_sl - 5.0)
+            new_sl = max(SL_FLOOR, cur_sl - 5.0)
             reasons.append(f"sl_hit_rate={sl_hit_rate:.0%}>50% → tighten SL")
 
         # Dead hits: same failure family (losing trade that didn't rebound).
         # Also tighten, smaller step than sl_hit since it's a different mode.
         if dead_hit_rate > 0.40:
-            new_sl = max(10.0, new_sl - 3.0)
+            new_sl = max(SL_FLOOR, new_sl - 3.0)
             reasons.append(f"dead_hit_rate={dead_hit_rate:.0%}>40% → tighten SL")
 
         if peak_exceeds_tp > 0.60:
-            new_tp = min(10.0, new_tp + 0.5)
+            new_tp = min(TP_CEILING, new_tp + 0.5)
             reasons.append(f"peak>tp in {peak_exceeds_tp:.0%}")
 
         if avg_peak < cur_tp * 0.80:
-            new_tp = max(1.5, new_tp - 0.3)
+            new_tp = max(TP_FLOOR, new_tp - 0.3)
             reasons.append(f"avg_peak={avg_peak:.2f}x<tp*0.8")
 
         if avg_runup > 1.20 and runup_samples:
-            new_tp = min(10.0, new_tp + 0.3)
+            new_tp = min(TP_CEILING, new_tp + 0.3)
             reasons.append(f"1h_runup={avg_runup:.2f}x (sold early)")
 
         # Clamp just in case
-        new_tp = round(max(1.5, min(10.0, new_tp)), 2)
-        new_sl = round(max(10.0, min(50.0, new_sl)), 1)
+        new_tp = round(max(TP_FLOOR, min(TP_CEILING, new_tp)), 2)
+        new_sl = round(max(SL_FLOOR, min(SL_CEILING, new_sl)), 1)
 
         changed = (abs(new_tp - cur_tp) >= 0.01) or (abs(new_sl - cur_sl) >= 0.1)
         if not changed:

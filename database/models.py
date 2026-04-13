@@ -2635,6 +2635,7 @@ AGENT_PARAM_DEFAULTS = {
     "paper_balance_offset": 0.0,
     "paper_reset_v20_done": 0.0,   # one-shot migration flag (legacy)
     "paper_reset_v3_done":  0.0,   # v3: re-reset to 20 after balance inflation
+    "sl_floor_20_applied":  0.0,   # raise learned SLs to >=20% once
 
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
     "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
@@ -2890,6 +2891,46 @@ async def init_agent_params() -> int:
         _logging.getLogger(__name__).info(
             "Paper balance v3 reset to 20 SOL (offset=%+.4f, raw_was=%.4f)",
             needed_offset, raw,
+        )
+        added += 1
+
+    # ── One-shot: raise SL floor on learned ai_trade_params rows ──────
+    # Prior Agent 6 runs tightened optimal_sl_pct down to the 10% floor
+    # on almost every pattern_type (pre-nuke sl_hit_rate was 90%+). At
+    # 10% SL, pump.fun tokens insta-stopout on normal price wiggle and
+    # no trade gets room to run. User chose to raise the floor to 20%.
+    # This block lifts every row currently below 20% to exactly 20%,
+    # leaves rows already above 20% alone, and flips the flag so it
+    # only runs once.
+    async with AsyncSessionLocal() as session:
+        sl_flag = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "sl_floor_20_applied")
+        )).scalar_one_or_none()
+        sl_done = sl_flag is not None and sl_flag.param_value >= 1.0
+
+    if not sl_done:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(select(AITradeParams))).scalars().all()
+            raised = 0
+            for r in rows:
+                if (r.optimal_sl_pct or 0) < 20.0:
+                    r.optimal_sl_pct = 20.0
+                    r.updated_at = datetime.utcnow()
+                    raised += 1
+
+            flag_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "sl_floor_20_applied")
+            )).scalar_one_or_none()
+            if flag_row is None:
+                session.add(AgentParam(param_name="sl_floor_20_applied", param_value=1.0))
+            else:
+                flag_row.param_value = 1.0
+                flag_row.updated_at = datetime.utcnow()
+            await session.commit()
+
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "SL floor migration: raised %d ai_trade_params rows to 20%%", raised,
         )
         added += 1
 
