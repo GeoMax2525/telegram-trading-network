@@ -402,6 +402,7 @@ async def _build_hub_text(autotrade: bool) -> str:
     wallet_total        = stats["wallet_total"]
     wallet_tier1        = stats["wallet_tier1"]
     wallet_tier2        = stats["wallet_tier2"]
+    wallet_tier3        = stats.get("wallet_tier3", 0)
     last_analyst        = stats["last_analyst"]
     pattern_total       = stats["pattern_total"]
     last_pattern_engine = stats["last_pattern_engine"]
@@ -476,13 +477,17 @@ async def _build_hub_text(autotrade: bool) -> str:
     analyst_age = _fmt_age(last_analyst.run_at if last_analyst else None)
     lines.append(_fmt_agent(
         "Wallets", "✅",
-        f"{wallet_total} ({wallet_tier1}T1/{wallet_tier2}T2)",
+        f"{wallet_total} total ({wallet_tier1}T1/{wallet_tier2}T2/{wallet_tier3}T3)",
         analyst_age,
     ))
 
     try:
         gmgn = await get_gmgn_stats()
-        gmgn_detail = f"{gmgn['wallets']} wallets"
+        gmgn_detail = (
+            f"{gmgn['wallets']} wallets "
+            f"({gmgn.get('tier1', 0)}T1/{gmgn.get('tier2', 0)}T2/{gmgn.get('tier3', 0)}T3) "
+            f"{gmgn.get('trending', 0):,} trending"
+        )
     except Exception:
         gmgn_detail = "starting..."
     lines.append(_fmt_agent("GMGN", "✅", gmgn_detail, "—"))
@@ -620,17 +625,51 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     # ── Top wallets ─────────────────────────────────────────────────
     lines += ["", DIVIDER, "🧠 TOP WALLETS"]
-    top_wallets = await get_top_wallets(limit=3)
+    top_wallets = await get_top_wallets(limit=5)
     if not top_wallets:
         lines.append("No wallets scored yet — Agent 2 is analyzing...")
     else:
         for i, w in enumerate(top_wallets, 1):
             short = f"{w.address[:4]}...{w.address[-4:]}"
             wr = int((w.win_rate or 0) * 100)
+            wl_col = f"{w.wins}W-{w.losses}L"
+            wtype = getattr(w, "wallet_type", None) or ""
             lines.append(
                 f"#{i}  {short}  Score:{w.score:.0f}  "
-                f"{w.wins}W-{w.losses}L  {wr}%  T{w.tier}"
+                f"{wl_col:<8} {wr}%  T{w.tier}  {wtype}".rstrip()
             )
+
+    # Summary footer — counts by wallet_type + clusters
+    try:
+        from database.models import (
+            AsyncSessionLocal as _ASL, select as _select, func as _func,
+            Wallet as _Wallet, get_all_wallet_clusters as _gacs,
+        )
+        async with _ASL() as _session:
+            summary_total = (await _session.execute(
+                _select(_func.count(_Wallet.address))
+            )).scalar() or 0
+            early_insider_count = (await _session.execute(
+                _select(_func.count(_Wallet.address)).where(
+                    _Wallet.wallet_type == "early_insider"
+                )
+            )).scalar() or 0
+            coordinated_count = (await _session.execute(
+                _select(_func.count(_Wallet.address)).where(
+                    _Wallet.wallet_type == "coordinated_group"
+                )
+            )).scalar() or 0
+        cluster_rows = await _gacs()
+        cluster_total = len(cluster_rows)
+    except Exception:
+        summary_total = early_insider_count = coordinated_count = cluster_total = 0
+
+    lines.append(
+        f"👛 {summary_total} total  |  "
+        f"{early_insider_count} early_insider  |  "
+        f"{coordinated_count} coordinated  |  "
+        f"{cluster_total} clusters"
+    )
 
     # ── Recent trades ───────────────────────────────────────────────
     lines += ["", DIVIDER, "📋 RECENT TRADES"]

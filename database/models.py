@@ -1170,12 +1170,24 @@ async def get_gmgn_stats() -> dict:
         gmgn_t1 = (await session.execute(
             select(func.count(Wallet.address)).where(Wallet.source == "gmgn", Wallet.tier == 1)
         )).scalar() or 0
+        gmgn_t2 = (await session.execute(
+            select(func.count(Wallet.address)).where(Wallet.source == "gmgn", Wallet.tier == 2)
+        )).scalar() or 0
+        gmgn_t3 = (await session.execute(
+            select(func.count(Wallet.address)).where(Wallet.source == "gmgn", Wallet.tier == 3)
+        )).scalar() or 0
         gmgn_trending = (await session.execute(
             select(func.count(Token.mint)).where(
                 Token.gmgn_trending == True, Token.last_updated_at >= today,
             )
         )).scalar() or 0
-    return {"wallets": gmgn_wallets, "tier1": gmgn_t1, "trending": gmgn_trending}
+    return {
+        "wallets": gmgn_wallets,
+        "tier1": gmgn_t1,
+        "tier2": gmgn_t2,
+        "tier3": gmgn_t3,
+        "trending": gmgn_trending,
+    }
 
 
 async def get_all_tokens(limit: int = 500) -> list["Token"]:
@@ -1763,6 +1775,10 @@ async def get_hub_stats() -> dict:
             select(func.count(Wallet.address)).where(Wallet.tier == 2)
         )).scalar() or 0
 
+        wallet_tier3 = (await session.execute(
+            select(func.count(Wallet.address)).where(Wallet.tier == 3)
+        )).scalar() or 0
+
         last_analyst = (await session.execute(
             select(AgentLog)
             .where(AgentLog.agent_name == "wallet_analyst")
@@ -1802,6 +1818,7 @@ async def get_hub_stats() -> dict:
         "wallet_total":       wallet_total,
         "wallet_tier1":       wallet_tier1,
         "wallet_tier2":       wallet_tier2,
+        "wallet_tier3":       wallet_tier3,
         "last_analyst":       last_analyst,
         "pattern_total":      pattern_total,
         "pattern_winners":    pattern_winners,
@@ -2740,9 +2757,13 @@ AGENT_PARAM_DEFAULTS = {
     "trail_sl_pct":          0.20, # distance from peak when trailing active
 
     # Time-based exits (meta, not counted as win/loss)
-    "stale_exit_hours":        2.0,   # open >N hours AND <threshold → stale
+    # Expired fires first (wider threshold): any trade open >=2h and
+    # below 1.20x is cut. Stale at 2h/1.05x is effectively unreachable
+    # with expired at the same hour mark and a wider price band — kept
+    # as a dial Agent 6 can split apart later if it learns to.
+    "stale_exit_hours":        2.0,
     "stale_exit_threshold":    1.05,
-    "expired_exit_hours":      4.0,   # open >N hours AND <threshold → expired
+    "expired_exit_hours":      2.0,
     "expired_exit_threshold":  1.20,
 
     # Profit protection (strategy, applied globally in paper monitor)
