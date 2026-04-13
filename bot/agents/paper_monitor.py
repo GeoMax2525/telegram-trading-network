@@ -25,6 +25,7 @@ from database.models import (
     get_recently_closed_paper_trades,
     update_paper_post_close,
     compute_paper_balance,
+    get_params,
 )
 from bot.agents.trade_profiles import resolve_trade_params
 
@@ -58,6 +59,13 @@ async def _check_open_trades(bot) -> None:
         logger.debug("Paper monitor balance refresh failed: %s", exc)
     if not trades:
         return
+
+    # Time-based + profit-protection params (DB-driven so Agent 6 can learn).
+    cfg = await get_params(
+        "stale_exit_hours", "stale_exit_threshold",
+        "expired_exit_hours", "expired_exit_threshold",
+        "breakeven_trigger", "profit_trail_trigger", "profit_trail_pct",
+    )
 
     for pt in trades:
         try:
@@ -106,7 +114,89 @@ async def _check_open_trades(bot) -> None:
             resolved = await resolve_trade_params(tags) if tags else None
 
             # Dead-position auto-close removed. Trades now close only via
-            # TP, trailing stop, or fixed SL.
+            # TP, trailing stop, fixed SL, time-based cleanup, or profit
+            # protection (break-even / profit-trail).
+
+            # ── Time-based exits ─────────────────────────────────────────
+            # Meta close reasons — NOT counted in Agent 6 win/loss math.
+            age_hours = 0.0
+            if pt.opened_at:
+                age_hours = (datetime.utcnow() - pt.opened_at).total_seconds() / 3600.0
+
+            expired_h    = float(cfg.get("expired_exit_hours",     4.0) or 4.0)
+            expired_thr  = float(cfg.get("expired_exit_threshold", 1.20) or 1.20)
+            stale_h      = float(cfg.get("stale_exit_hours",       2.0) or 2.0)
+            stale_thr    = float(cfg.get("stale_exit_threshold",   1.05) or 1.05)
+
+            time_exit_reason = None
+            if age_hours >= expired_h and current_mult < expired_thr:
+                time_exit_reason = "expired"
+            elif age_hours >= stale_h and current_mult < stale_thr:
+                time_exit_reason = "stale"
+
+            if time_exit_reason:
+                pnl = round(sol * (current_mult - 1), 4)
+                await close_paper_trade(pt.id, time_exit_reason, pnl, peak_mc, peak_mult)
+                bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+                state.paper_balance = bal
+                logger.info(
+                    "Paper: %s %s — age=%.1fh mult=%.2fx pnl=%+.4f bal=%.4f tags=%s",
+                    time_exit_reason.upper(), name, age_hours, current_mult, pnl, bal,
+                    ",".join(tags) or "-",
+                )
+                # Intentionally no Telegram broadcast — these are cleanup
+                # closes, not wins or losses. Keeping the group quiet.
+                continue
+
+            # ── Profit protection ────────────────────────────────────────
+            # Break-even SL: once peak crossed the breakeven trigger,
+            # never let the trade close below 1.0x from here on.
+            be_trigger = float(cfg.get("breakeven_trigger", 1.5) or 1.5)
+            if peak_mult >= be_trigger and current_mult <= 1.0:
+                pnl = round(sol * (current_mult - 1), 4)
+                await close_paper_trade(pt.id, "breakeven_stop", pnl, peak_mc, peak_mult)
+                bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+                state.paper_balance = bal
+                logger.info(
+                    "Paper: BREAKEVEN %s — peak=%.2fx now=%.2fx pnl=%+.4f bal=%.4f tags=%s",
+                    name, peak_mult, current_mult, pnl, bal, ",".join(tags) or "-",
+                )
+                try:
+                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                        f"🛡️ PAPER TRADE — BREAK EVEN STOP",
+                        f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
+                        f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
+                        f"Balance: {bal:.2f} SOL",
+                    ]))
+                except Exception:
+                    pass
+                continue
+
+            # Profit trailing stop: once peak crosses the profit trail
+            # trigger (e.g. 2.0x), follow the peak down by profit_trail_pct.
+            pt_trigger = float(cfg.get("profit_trail_trigger", 2.0) or 2.0)
+            pt_pct     = float(cfg.get("profit_trail_pct",     0.15) or 0.15)
+            if peak_mult >= pt_trigger:
+                trail_stop_mult = peak_mult * (1.0 - pt_pct)
+                if current_mult <= trail_stop_mult:
+                    pnl = round(sol * (current_mult - 1), 4)
+                    await close_paper_trade(pt.id, "profit_trail", pnl, peak_mc, peak_mult)
+                    bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+                    state.paper_balance = bal
+                    logger.info(
+                        "Paper: PROFIT-TRAIL %s — peak=%.2fx now=%.2fx pnl=%+.4f bal=%.4f tags=%s",
+                        name, peak_mult, current_mult, pnl, bal, ",".join(tags) or "-",
+                    )
+                    try:
+                        await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                            f"💰 PAPER TRADE — PROFIT TRAIL",
+                            f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
+                            f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
+                            f"Balance: {bal:.2f} SOL",
+                        ]))
+                    except Exception:
+                        pass
+                    continue
 
             # Check TP
             if current_mult >= pt.take_profit_x:

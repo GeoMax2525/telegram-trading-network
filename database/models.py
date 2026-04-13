@@ -39,19 +39,22 @@ AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 # decided on its own. Used to split "strategy PnL" from "meta PnL" in
 # reporting and to exclude user-driven closes from Agent 6 learning.
 STRATEGY_CLOSE_REASONS = frozenset({
-    "tp_hit",     # take-profit auto-close
-    "sl_hit",     # stop-loss auto-close
-    "trail_hit",  # trailing-stop auto-close
-    "dead_token", # dead-position auto-close
-    "expired",    # 7-day expiration auto-close
+    "tp_hit",          # take-profit auto-close
+    "sl_hit",          # stop-loss auto-close
+    "trail_hit",       # trailing-stop auto-close
+    "dead_token",      # dead-position auto-close
+    "breakeven_stop",  # profit-protection break-even SL fired after 1.5x
+    "profit_trail",    # profit-protection trailing stop fired after 2.0x
 })
 
-# Reasons that came from a human action (hub button, /resetbalance, etc.)
-# These must not be counted as strategy wins — Agent 6 would learn
-# "close at 14x" which the strategy can't actually do without a human.
+# Reasons that are NOT strategy decisions — human actions OR time-based
+# cleanup (stale/expired). Kept out of win/loss math so Agent 6 doesn't
+# learn to chase them. The 7-day scans-table expiration also lives here.
 META_CLOSE_REASONS = frozenset({
     "manual_close",
     "reset",
+    "stale",      # open >2h and <1.05x
+    "expired",    # open >4h and <1.20x  (also used by scans 7-day close)
 })
 
 
@@ -2712,6 +2715,17 @@ AGENT_PARAM_DEFAULTS = {
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
     "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
     "trail_sl_pct":          0.20, # distance from peak when trailing active
+
+    # Time-based exits (meta, not counted as win/loss)
+    "stale_exit_hours":        2.0,   # open >N hours AND <threshold → stale
+    "stale_exit_threshold":    1.05,
+    "expired_exit_hours":      4.0,   # open >N hours AND <threshold → expired
+    "expired_exit_threshold":  1.20,
+
+    # Profit protection (strategy, applied globally in paper monitor)
+    "breakeven_trigger":       1.5,   # once peak >=1.5x, SL moves to 1.0x
+    "profit_trail_trigger":    2.0,   # once peak >=2.0x, start trailing
+    "profit_trail_pct":        0.15,  # distance from peak while trailing
 
     # Absolute per-trade position size cap in SOL, prevents the
     # compounding-size runaway loop where winners balloon the balance
