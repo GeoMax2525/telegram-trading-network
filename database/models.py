@@ -2277,6 +2277,35 @@ async def has_open_paper_trade(token_address: str) -> bool:
         return (result.scalar() or 0) > 0
 
 
+async def has_recent_manual_close(token_address: str, within_hours: float = 24.0) -> bool:
+    """
+    Returns True if this token was manually closed (via /hub Close All
+    or similar) in the last `within_hours`. Used by the scanner to
+    prevent "rage quit" tokens from being reopened on the next tick
+    just because DexScreener still lists them as trending.
+    """
+    cutoff = datetime.utcnow() - timedelta(hours=within_hours)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.token_address == token_address,
+                PaperTrade.close_reason == "manual_close",
+                PaperTrade.closed_at >= cutoff,
+            )
+        )
+        return (result.scalar() or 0) > 0
+
+
+async def get_recent_paper_trades(limit: int = 10) -> list["PaperTrade"]:
+    """Returns the last N paper trades regardless of status, newest first."""
+    async with AsyncSessionLocal() as session:
+        return list((await session.execute(
+            select(PaperTrade)
+            .order_by(PaperTrade.id.desc())
+            .limit(limit)
+        )).scalars().all())
+
+
 async def close_paper_trade(
     trade_id: int, close_reason: str, pnl_sol: float, peak_mc: float | None, peak_mult: float | None,
 ) -> None:
@@ -2536,6 +2565,12 @@ AGENT_PARAM_DEFAULTS = {
     # compounding-size runaway loop where winners balloon the balance
     # and the next trade opens at an unrealistic size.
     "max_position_sol": 5.0,
+
+    # When a paper trade is manually closed via /hub, don't re-enter
+    # the same token mint for this many hours. Prevents the "rage quit
+    # reopens next tick" loop when the token stays on DexScreener
+    # trending.
+    "manual_close_cooldown_hours": 24.0,
 
     # Self-healing state (Agent 6)
     "last_wr_snapshot_at": 0.0,    # trades_analyzed at last WR snapshot

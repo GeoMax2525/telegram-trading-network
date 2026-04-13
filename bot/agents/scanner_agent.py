@@ -49,6 +49,7 @@ from database.models import (
     get_token_count,
     open_paper_trade,
     has_open_paper_trade,
+    has_recent_manual_close,
     get_params,
     compute_paper_balance,
     AsyncSessionLocal,
@@ -891,6 +892,27 @@ async def run_once() -> tuple[int, int]:
                 logger.info("Scanner: skip paper trade %s — already have open position",
                             scored.get("name", "?")[:20])
                 continue
+
+            # "Rage quit" cooldown — if the user recently manually closed
+            # this token, don't reopen it just because DexScreener still
+            # has it on trending. Tunable via agent_params.
+            if mint_addr:
+                cooldown_cfg = await get_params("manual_close_cooldown_hours")
+                cooldown_hours = float(cooldown_cfg.get("manual_close_cooldown_hours") or 24.0)
+                if cooldown_hours > 0:
+                    try:
+                        if await has_recent_manual_close(mint_addr, within_hours=cooldown_hours):
+                            logger.info(
+                                "Scanner: skip paper trade %s — manual_close cooldown (%.1fh)",
+                                scored.get("name", "?")[:20], cooldown_hours,
+                            )
+                            # Also add to pending_candidates so this tick's
+                            # in-memory dedupe holds across ticks until the
+                            # cooldown elapses
+                            state.pending_candidates.append(scored)
+                            continue
+                    except Exception as exc:
+                        logger.debug("Scanner: manual_close cooldown check failed: %s", exc)
 
             # Compute true balance from DB
             state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)

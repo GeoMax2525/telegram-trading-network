@@ -370,12 +370,17 @@ async def _manual_close_all_open(bot) -> int:
             except Exception:
                 pass
         except Exception as exc:
-            logger.debug("manual close_all error on %s: %s",
-                         (pt.token_address or "?")[:12], exc)
+            # Bumped from debug to info so a silent per-trade failure
+            # doesn't make the user think close_all worked when it
+            # didn't. If you ever see "closed 0 positions" but trades
+            # are still open, check Railway logs for these lines.
+            logger.info("manual close_all SKIPPED trade id=%s %s: %s",
+                        getattr(pt, "id", "?"),
+                        (pt.token_address or "?")[:12], exc)
 
-    if closed:
-        state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-        logger.info("Manual close_all: closed %d positions", closed)
+    state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+    logger.info("Manual close_all: closed %d of %d open positions",
+                closed, len(trades))
 
     return closed
 
@@ -897,6 +902,59 @@ async def cmd_autotrade(message: Message):
 
 
 # ── /papertrades ──────────────────────────────────────────────────────────────
+
+# ── /closedcheck — Raw state of the last 10 paper_trades rows ─────────────
+
+@router.message(Command("closedcheck"))
+async def cmd_closedcheck(message: Message):
+    """
+    Dumps the last 10 paper_trades rows regardless of status so you can
+    verify whether manually-closed trades actually moved to status='closed'
+    in the DB (vs being re-opened, duplicated, or stuck open).
+    """
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    try:
+        from database.models import get_recent_paper_trades
+        rows = await get_recent_paper_trades(limit=10)
+    except Exception as exc:
+        logger.exception("closedcheck failed")
+        await message.reply(f"❌ closedcheck error: {exc}", parse_mode=None)
+        return
+
+    if not rows:
+        await message.reply("No paper_trades rows yet.", parse_mode=None)
+        return
+
+    now = datetime.utcnow()
+    lines = [
+        "🔎 LAST 10 PAPER_TRADES ROWS",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+    for pt in rows:
+        mint_short = (pt.token_address or "?")[:8]
+        name = (pt.token_name or "?")[:18]
+        status = pt.status or "?"
+        reason = pt.close_reason or "-"
+        pnl = pt.paper_pnl_sol
+        pnl_str = f"{pnl:+7.3f}" if pnl is not None else "  none "
+        sol = pt.paper_sol_spent or 0
+        opened = pt.opened_at.strftime("%H:%M:%S") if pt.opened_at else "?"
+        closed = pt.closed_at.strftime("%H:%M:%S") if pt.closed_at else "-"
+
+        icon = {"open": "🟡", "closed": "✅" if (pnl or 0) > 0 else "❌"}.get(status, "?")
+        lines.append(
+            f"{icon} id={pt.id:<4} {mint_short}..  {name:<18} "
+            f"{status:<6} {reason:<13} sol={sol:>5.2f} "
+            f"pnl={pnl_str}  o={opened} c={closed}"
+        )
+
+    lines.append("")
+    lines.append("icon: 🟡=open  ✅=closed win  ❌=closed loss/flat")
+    await message.reply("\n".join(lines), parse_mode=None)
+
 
 # ── /balancecheck — Audit paper balance math + show today's closes ─────────
 
