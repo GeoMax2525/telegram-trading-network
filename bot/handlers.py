@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import re
 from datetime import datetime, timezone, timedelta
@@ -385,10 +386,19 @@ async def _manual_close_all_open(bot) -> int:
     return closed
 
 
+def _esc(value) -> str:
+    """HTML-escape an arbitrary value for Telegram HTML parse mode."""
+    if value is None:
+        return ""
+    return html.escape(str(value), quote=False)
+
+
 async def _build_hub_text(autotrade: bool) -> str:
     """
-    Revolt Agent Hub — scannable plain-text dashboard.
-    Renders with parse_mode=None, so no markdown escaping needed.
+    Revolt Agent Hub — scannable dashboard rendered with parse_mode=HTML.
+    HTML is used instead of Markdown so contract addresses can be wrapped
+    in <code>...</code> for one-tap copy on mobile. Every user-provided
+    string must be passed through _esc() before interpolation.
     """
     DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -433,7 +443,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         DIVIDER,
         "🔑 REVOLT AGENT HUB",
         f"Trade Mode: {mode_word}  |  Chaos Mode: {chaos_word}",
-        f"Balance: {real_balance:.2f} / {starting:.2f} SOL  |  P&L: {pnl_val:+.2f} SOL ({pnl_pct:+.1f}%)",
+        f"Balance: {real_balance:.2f} / {starting:.2f} SOL  |  P&amp;L: {pnl_val:+.2f} SOL ({pnl_pct:+.1f}%)",
         DIVIDER,
         "",
         "⚙️ AGENTS",
@@ -614,13 +624,13 @@ async def _build_hub_text(autotrade: bool) -> str:
             ca = pt.token_address or "?"
 
             lines.append("")
-            lines.append(f"{idx}. ${raw_name}  {mult_str} {color}")
+            lines.append(f"{idx}. ${_esc(raw_name)}  {mult_str} {color}")
             lines.append(f"   MC: {_format_usd(entry_mc)} → {_format_usd(current_mc)}")
             lines.append(
                 f"   TP: {(pt.take_profit_x or 0):.1f}x ({_format_usd(tp_mc)})  "
                 f"SL: {(pt.stop_loss_pct or 0):.0f}% ({_format_usd(sl_mc)})"
             )
-            lines.append(f"   CA: {ca}")
+            lines.append(f"   CA: <code>{_esc(ca)}</code>")
             lines.append(f"   Opened: {age}")
 
     # ── Top wallets ─────────────────────────────────────────────────
@@ -635,8 +645,8 @@ async def _build_hub_text(autotrade: bool) -> str:
             wl_col = f"{w.wins}W-{w.losses}L"
             wtype = getattr(w, "wallet_type", None) or ""
             lines.append(
-                f"#{i}  {short}  Score:{w.score:.0f}  "
-                f"{wl_col:<8} {wr}%  T{w.tier}  {wtype}".rstrip()
+                f"#{i}  {_esc(short)}  Score:{w.score:.0f}  "
+                f"{wl_col:<8} {wr}%  T{w.tier}  {_esc(wtype)}".rstrip()
             )
 
     # Summary footer — counts by wallet_type + clusters
@@ -688,7 +698,7 @@ async def _build_hub_text(autotrade: bool) -> str:
     if recent:
         for pt in recent[:5]:
             raw_name = (pt.token_name or "?").replace("_", " ")
-            name_col = raw_name[:15]
+            name_col = _esc(raw_name[:15])
             if pt.status == "open":
                 lines.append(f"🟡 {name_col:<15}  open")
             elif pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
@@ -730,7 +740,7 @@ async def cb_hub(callback: CallbackQuery):
         text = await _build_hub_text(state.autotrade_enabled)
         try:
             await callback.message.edit_text(
-                text, parse_mode=None,
+                text, parse_mode="HTML",
                 reply_markup=_hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
@@ -750,7 +760,7 @@ async def cb_hub(callback: CallbackQuery):
         try:
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(
-                text, parse_mode=None,
+                text, parse_mode="HTML",
                 reply_markup=_hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
@@ -774,7 +784,7 @@ async def cb_hub(callback: CallbackQuery):
         try:
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(
-                text, parse_mode=None,
+                text, parse_mode="HTML",
                 reply_markup=_hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
