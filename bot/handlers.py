@@ -2878,6 +2878,19 @@ async def cmd_settradeparam(message: Message):
                 ptype, field, old_value, value, message.from_user.id)
 
 
+# ── /whoami — reply with caller's telegram user id ─────────────────────────
+
+@router.message(Command("whoami"))
+async def cmd_whoami(message: Message):
+    uid = message.from_user.id if message.from_user else None
+    uname = message.from_user.username if message.from_user else None
+    await message.reply(
+        f"Your Telegram user id: {uid}\n"
+        f"Username: @{uname if uname else '(none)'}\n\n"
+        f"Add this id to the ADMIN_IDS env var in Railway to get admin access.",
+    )
+
+
 # ── /setparam — edit a row in agent_params (global tunables) ────────────────
 
 @router.message(Command("setparam"))
