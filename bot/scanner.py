@@ -44,12 +44,22 @@ def _pair_dex_id(pair: dict) -> str:
 
 # ── Data Fetching ─────────────────────────────────────────────────────────────
 
-async def fetch_token_data(address: str) -> Optional[dict]:
+async def fetch_token_data(
+    address: str,
+    allow_any_dex: bool = False,
+) -> Optional[dict]:
     """
     Calls the DexScreener API for the given contract address.
-    Returns the highest-liquidity pair among ALLOWED_DEXES, or None if
-    the request fails or no pair is on a supported DEX. Pre-graduation
-    pump.fun bonding-curve pairs are rejected here at the source.
+
+    Default mode (allow_any_dex=False) enforces the DEX allowlist so
+    new candidates coming from Agent 1 / Agent 4 never leak a pump.fun
+    bonding-curve or meteora pair into the trading pipeline.
+
+    allow_any_dex=True bypasses the allowlist and just returns the
+    highest-liquidity pair. Used by the paper monitor and live-data
+    helpers so trades already open on now-unsupported DEXes can still
+    be tracked to exit — filtering them there would orphan the
+    position with current_mc=0 forever.
     """
     url = DEXSCREENER_URL.format(address=address)
 
@@ -65,6 +75,10 @@ async def fetch_token_data(address: str) -> Optional[dict]:
     pairs = data.get("pairs")
     if not pairs:
         return None
+
+    if allow_any_dex:
+        pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
+        return pairs[0]
 
     # DEX allowlist — drop unsupported pairs before picking best
     allowed = [p for p in pairs if _pair_dex_id(p) in ALLOWED_DEXES]
@@ -243,8 +257,13 @@ def calculate_ai_score(metrics: dict) -> dict:
 
 async def fetch_current_market_cap(address: str) -> Optional[float]:
     """Returns the current market cap (USD) for an address, or None on failure.
-    Falls back to fdv if marketCap is null (common on pump.fun tokens)."""
-    pair = await fetch_token_data(address)
+    Falls back to fdv if marketCap is null (common on pump.fun tokens).
+
+    Uses allow_any_dex=True so trades already open on now-unsupported
+    DEXes can still be tracked to exit; the DEX allowlist only gates
+    the scanner's open path.
+    """
+    pair = await fetch_token_data(address, allow_any_dex=True)
     if pair is None:
         return None
     return float(pair.get("marketCap") or pair.get("fdv") or 0) or None
@@ -254,8 +273,12 @@ async def fetch_live_data(address: str) -> Optional[dict]:
     """
     Returns live token data dict, or None on failure.
     Keys: market_cap, liquidity_usd, price_usd, symbol, price_changes, volume
+
+    Uses allow_any_dex=True so the paper monitor can track trades
+    opened before the filter (or against DEXes that later dropped off
+    the allowlist) all the way to their TP/SL/expired exit.
     """
-    pair = await fetch_token_data(address)
+    pair = await fetch_token_data(address, allow_any_dex=True)
     if pair is None:
         return None
     mc     = float(pair.get("marketCap") or pair.get("fdv") or 0)
