@@ -331,6 +331,25 @@ async def score_candidate(candidate: dict) -> dict:
     Returns enriched dict with confidence_score, component scores, and decision.
     All candidates are saved to the database silently.
     """
+    # Defensive DEX allowlist check — scanner_agent already filters, but
+    # this hard-stops any pre-graduation pump.fun bonding-curve token
+    # (or any other unsupported DEX) that somehow reached Agent 5.
+    from bot.scanner import ALLOWED_DEXES
+    dex_id = (candidate.get("dex_id") or "").lower()
+    if dex_id and dex_id not in ALLOWED_DEXES:
+        logger.info(
+            "Agent5: REJECTED %s — unsupported DEX %s (allowed: %s)",
+            candidate.get("name", "?")[:20], dex_id, ",".join(sorted(ALLOWED_DEXES)),
+        )
+        return {
+            "mint": candidate.get("mint"),
+            "confidence_score": 0,
+            "decision": "discard",
+            "executed": False,
+            "paper_trade": False,
+            "reason": f"unsupported_dex:{dex_id}",
+        }
+
     pattern = await get_pattern_by_type("winner_2x")
     mcap = candidate.get("mcap", 0) or 0
     weights, weight_set = await _load_weights(mcap)

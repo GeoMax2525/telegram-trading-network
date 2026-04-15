@@ -11,10 +11,35 @@ Scoring categories (total 100 pts):
   Deployer Reputation  10 pts
 """
 
+import logging
 import aiohttp
 import asyncio
 from typing import Optional
 from bot.config import DEXSCREENER_URL, SCORE_WEIGHTS, VERDICT_THRESHOLDS
+
+logger = logging.getLogger(__name__)
+
+
+# ── DEX allowlist ────────────────────────────────────────────────────────────
+#
+# Only tokens trading on these DEXes are allowed through the pipeline. Any
+# pre-graduation pump.fun bonding-curve pair reports dexId="pumpfun" (or a
+# close variant) and will be dropped at the source by fetch_token_data().
+#
+# Per-DEX minimum liquidity floors are enforced downstream in
+# bot/agents/scanner_agent.py::_evaluate_candidate.
+ALLOWED_DEXES = {"raydium", "pumpswap", "orca"}
+
+# Per-DEX min liquidity floors (USD) used by scanner_agent._evaluate_candidate.
+MIN_LIQUIDITY_BY_DEX = {
+    "raydium":  10_000,
+    "pumpswap": 5_000,
+    "orca":     10_000,
+}
+
+
+def _pair_dex_id(pair: dict) -> str:
+    return (pair.get("dexId") or "").lower()
 
 
 # ── Data Fetching ─────────────────────────────────────────────────────────────
@@ -22,7 +47,9 @@ from bot.config import DEXSCREENER_URL, SCORE_WEIGHTS, VERDICT_THRESHOLDS
 async def fetch_token_data(address: str) -> Optional[dict]:
     """
     Calls the DexScreener API for the given contract address.
-    Returns the first pair found, or None if the request fails.
+    Returns the highest-liquidity pair among ALLOWED_DEXES, or None if
+    the request fails or no pair is on a supported DEX. Pre-graduation
+    pump.fun bonding-curve pairs are rejected here at the source.
     """
     url = DEXSCREENER_URL.format(address=address)
 
@@ -39,9 +66,19 @@ async def fetch_token_data(address: str) -> Optional[dict]:
     if not pairs:
         return None
 
+    # DEX allowlist — drop unsupported pairs before picking best
+    allowed = [p for p in pairs if _pair_dex_id(p) in ALLOWED_DEXES]
+    if not allowed:
+        seen_dexes = sorted({_pair_dex_id(p) or "unknown" for p in pairs})
+        logger.info(
+            "Rejected %s: unsupported DEX(es) %s (allowed: %s)",
+            address[:12], ",".join(seen_dexes), ",".join(sorted(ALLOWED_DEXES)),
+        )
+        return None
+
     # Pick the pair with the highest liquidity (most reliable data)
-    pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
-    return pairs[0]
+    allowed.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
+    return allowed[0]
 
 
 def parse_token_metrics(pair: dict) -> dict:
@@ -71,6 +108,7 @@ def parse_token_metrics(pair: dict) -> dict:
         "estimated_holders": estimated_holders,
         "dex_url":        pair.get("url", ""),
         "chain":          pair.get("chainId", "unknown"),
+        "dex_id":         _pair_dex_id(pair),
     }
 
 

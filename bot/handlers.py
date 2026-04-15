@@ -258,9 +258,20 @@ def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="⚙️ Settings",      callback_data="hub:settings"),
     )
 
-    # Row 5: Manual close-all button
+    # Row 5: Manual close-all + reset balance
     builder.row(
-        InlineKeyboardButton(text="🗑️ Close All", callback_data="hub:close_all"),
+        InlineKeyboardButton(text="🗑️ Close All",     callback_data="hub:close_all"),
+        InlineKeyboardButton(text="💰 Reset Balance", callback_data="hub:reset_confirm"),
+    )
+    return builder.as_markup()
+
+
+def _hub_reset_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Yes / No inline keyboard shown when the Reset Balance button is tapped."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Yes, reset", callback_data="hub:reset_yes"),
+        InlineKeyboardButton(text="❌ No",          callback_data="hub:reset_no"),
     )
     return builder.as_markup()
 
@@ -772,6 +783,57 @@ async def cb_hub(callback: CallbackQuery):
             "Use /autotrade live when ready.",
             show_alert=True,
         )
+
+    elif action == "reset_confirm":
+        await callback.answer()
+        prompt = (
+            f"💰 Reset paper balance to {state.PAPER_STARTING_BALANCE:.0f} SOL?\n\n"
+            f"This will close every open position as 'reset' (PnL 0) and\n"
+            f"nudge the offset so your effective balance is exactly\n"
+            f"{state.PAPER_STARTING_BALANCE:.0f} SOL. Historical trades are preserved.\n\n"
+            f"Yes / No?"
+        )
+        try:
+            await callback.message.edit_text(
+                prompt, parse_mode=None,
+                reply_markup=_hub_reset_confirm_keyboard(),
+            )
+        except Exception:
+            pass
+
+    elif action == "reset_yes":
+        closed = await _do_reset_paper_balance("Manual reset via /hub button")
+        await callback.answer(
+            f"✅ Balance reset to {state.PAPER_STARTING_BALANCE:.0f} SOL",
+            show_alert=False,
+        )
+        try:
+            await callback.message.reply(
+                f"✅ Paper balance reset to {state.PAPER_STARTING_BALANCE:.0f} SOL\n"
+                f"Closed {closed} open position(s). Historical data preserved.",
+                parse_mode=None,
+            )
+        except Exception:
+            pass
+        try:
+            text = await _build_hub_text(state.autotrade_enabled)
+            await callback.message.edit_text(
+                text, parse_mode="HTML",
+                reply_markup=_hub_keyboard(state.autotrade_enabled),
+            )
+        except Exception:
+            pass
+
+    elif action == "reset_no":
+        await callback.answer("Reset cancelled")
+        try:
+            text = await _build_hub_text(state.autotrade_enabled)
+            await callback.message.edit_text(
+                text, parse_mode="HTML",
+                reply_markup=_hub_keyboard(state.autotrade_enabled),
+            )
+        except Exception:
+            pass
 
     elif action == "close_all":
         await callback.answer("🗑️ Closing all open positions…")
@@ -2444,32 +2506,42 @@ async def cmd_dbcheck(message: Message):
 
 # ── /resetbalance — Reset paper trading virtual balance ───────────────────────
 
-@router.message(Command("resetbalance"))
-async def cmd_resetbalance(message: Message):
-    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
-        return
+async def _do_reset_paper_balance(reason: str) -> int:
+    """
+    Shared reset logic used by both /resetbalance and the /hub button.
+    Closes every open paper trade as "reset" (PnL=0), then nudges
+    paper_balance_offset so compute_paper_balance() returns exactly
+    PAPER_STARTING_BALANCE. Returns the number of trades closed.
+    """
+    from database.models import (
+        get_open_paper_trades, close_paper_trade, get_param,
+    )
 
-    # Close open positions (mark as reset, PnL = 0)
-    from database.models import get_open_paper_trades, close_paper_trade
     open_trades = await get_open_paper_trades()
     for pt in open_trades:
         await close_paper_trade(pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple)
 
-    # Store a new offset so effective balance == PAPER_STARTING_BALANCE.
-    # compute_paper_balance() already applies the current offset, so the new
-    # offset we need = current_offset + (starting - current_effective).
     current = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
     current_offset = await get_param("paper_balance_offset")
     new_offset = round(current_offset + (state.PAPER_STARTING_BALANCE - current), 4)
-    await set_param("paper_balance_offset", new_offset, "Manual reset via /resetbalance")
+    await set_param("paper_balance_offset", new_offset, reason)
 
     state.paper_balance = state.PAPER_STARTING_BALANCE
     state.paper_resets += 1
     state.paper_trades_today = 0
 
+    return len(open_trades)
+
+
+@router.message(Command("resetbalance"))
+async def cmd_resetbalance(message: Message):
+    if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
+        return
+
+    closed = await _do_reset_paper_balance("Manual reset via /resetbalance")
     await message.reply(
         f"✅ Balance reset to {state.PAPER_STARTING_BALANCE:.0f} SOL\n"
-        f"Closed {len(open_trades)} open positions\n"
+        f"Closed {closed} open positions\n"
         f"All historical data preserved",
         parse_mode=None,
     )

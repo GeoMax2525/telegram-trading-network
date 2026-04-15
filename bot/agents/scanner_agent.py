@@ -39,7 +39,10 @@ import aiohttp
 
 from bot import state
 from bot.config import HELIUS_RPC_URL, HELIUS_API_KEY
-from bot.scanner import fetch_token_data, parse_token_metrics, scan_token
+from bot.scanner import (
+    fetch_token_data, parse_token_metrics, scan_token,
+    ALLOWED_DEXES, MIN_LIQUIDITY_BY_DEX,
+)
 from bot.agents.confidence_engine import score_candidate
 from database.models import (
     log_agent_run,
@@ -626,14 +629,40 @@ async def _evaluate_candidate(
     # raw-dict values below.
     pair = await fetch_token_data(mint)
     if pair is None and (not mcap or not liquidity):
-        logger.info("Scanner REJECTED %s (%s): DexScreener returned no data", name, mint[:12])
+        # fetch_token_data returns None for unsupported DEXes (pump.fun
+        # bonding curves, etc.) as well as plain fetch failures. Either
+        # way the candidate is out.
+        logger.info(
+            "Scanner REJECTED %s (%s): no pair on allowed DEX (%s) or fetch failed",
+            name, mint[:12], ",".join(sorted(ALLOWED_DEXES)),
+        )
         return None
+    dex_id = ""
     if pair is not None:
         metrics   = parse_token_metrics(pair)
         mcap      = mcap      or metrics.get("market_cap",    0) or 0
         liquidity = liquidity or metrics.get("liquidity_usd", 0) or 0
         name      = metrics.get("name",   name)
         symbol    = metrics.get("symbol", symbol)
+        dex_id    = metrics.get("dex_id", "") or ""
+
+        # Defensive re-check: fetch_token_data already filters to ALLOWED_DEXES,
+        # but this guards against future code paths that hand a pair in directly.
+        if dex_id not in ALLOWED_DEXES:
+            logger.info(
+                "Scanner REJECTED %s (%s): unsupported DEX %s",
+                name, mint[:12], dex_id or "unknown",
+            )
+            return None
+
+        # Per-DEX min liquidity floor (applied in both paper and live modes).
+        min_liq_dex = MIN_LIQUIDITY_BY_DEX.get(dex_id, 10_000)
+        if liquidity and liquidity < min_liq_dex:
+            logger.info(
+                "Scanner REJECTED %s: %s liquidity $%.0f < $%.0f floor",
+                name, dex_id, liquidity, min_liq_dex,
+            )
+            return None
 
     # Rugcheck
     rc_data = await _fetch_rugcheck(mint)
@@ -753,6 +782,7 @@ async def _evaluate_candidate(
         "dev_wallet_pct":        safety["dev_wallet_pct"],
         "holder_count":          safety["holder_count"],
         "top_10_concentration":  safety["top_10_concentration"],
+        "dex_id":                dex_id,
     }
 
 
