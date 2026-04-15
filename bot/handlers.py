@@ -802,7 +802,7 @@ async def cb_hub(callback: CallbackQuery):
             pass
 
     elif action == "reset_yes":
-        closed = await _do_reset_paper_balance("Manual reset via /hub button")
+        closed, archived = await _do_reset_paper_balance("Manual reset via /hub button")
         await callback.answer(
             f"✅ Balance reset to {state.PAPER_STARTING_BALANCE:.0f} SOL",
             show_alert=False,
@@ -810,7 +810,9 @@ async def cb_hub(callback: CallbackQuery):
         try:
             await callback.message.reply(
                 f"✅ Paper balance reset to {state.PAPER_STARTING_BALANCE:.0f} SOL\n"
-                f"Closed {closed} open position(s). Historical data preserved.",
+                f"Closed {closed} open position(s)\n"
+                f"Archived {archived} historical trade(s) from strategy stats\n"
+                f"All rows preserved — only stats reset.",
                 parse_mode=None,
             )
         except Exception:
@@ -2506,20 +2508,32 @@ async def cmd_dbcheck(message: Message):
 
 # ── /resetbalance — Reset paper trading virtual balance ───────────────────────
 
-async def _do_reset_paper_balance(reason: str) -> int:
+async def _do_reset_paper_balance(reason: str) -> tuple[int, int]:
     """
     Shared reset logic used by both /resetbalance and the /hub button.
-    Closes every open paper trade as "reset" (PnL=0), then nudges
-    paper_balance_offset so compute_paper_balance() returns exactly
-    PAPER_STARTING_BALANCE. Returns the number of trades closed.
+
+    Three steps:
+      1. Close every open paper trade as "reset" (PnL=0).
+      2. Reclassify every historical strategy-close (tp_hit, sl_hit,
+         trail_hit, dead_token, breakeven_stop, profit_trail) to "reset"
+         so strategy_pnl / strategy_win_rate aggregates fall back to
+         zero. Rows are preserved for audit, just dropped from the
+         learning corpus.
+      3. Nudge paper_balance_offset so compute_paper_balance() returns
+         exactly PAPER_STARTING_BALANCE.
+
+    Returns (closed_open_count, archived_history_count).
     """
     from database.models import (
         get_open_paper_trades, close_paper_trade, get_param,
+        reclassify_strategy_history_as_reset,
     )
 
     open_trades = await get_open_paper_trades()
     for pt in open_trades:
         await close_paper_trade(pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple)
+
+    archived = await reclassify_strategy_history_as_reset()
 
     current = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
     current_offset = await get_param("paper_balance_offset")
@@ -2530,7 +2544,7 @@ async def _do_reset_paper_balance(reason: str) -> int:
     state.paper_resets += 1
     state.paper_trades_today = 0
 
-    return len(open_trades)
+    return len(open_trades), archived
 
 
 @router.message(Command("resetbalance"))
@@ -2538,11 +2552,12 @@ async def cmd_resetbalance(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         return
 
-    closed = await _do_reset_paper_balance("Manual reset via /resetbalance")
+    closed, archived = await _do_reset_paper_balance("Manual reset via /resetbalance")
     await message.reply(
         f"✅ Balance reset to {state.PAPER_STARTING_BALANCE:.0f} SOL\n"
-        f"Closed {closed} open positions\n"
-        f"All historical data preserved",
+        f"Closed {closed} open position(s)\n"
+        f"Archived {archived} historical trade(s) from strategy stats\n"
+        f"All rows preserved — only stats reset",
         parse_mode=None,
     )
 

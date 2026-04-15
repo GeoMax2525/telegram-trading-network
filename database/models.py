@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, DateTime, BigInteger,
-    select, func, text
+    select, func, text, update,
 )
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
@@ -2679,6 +2679,31 @@ async def get_paper_trade_stats() -> dict:
         "today_strategy_wins": today_strategy_wins,
         "today_strategy_win_rate": today_strategy_win_rate,
     }
+
+
+async def reclassify_strategy_history_as_reset() -> int:
+    """
+    Flip every closed paper trade whose close_reason is in STRATEGY_CLOSE_REASONS
+    to "reset" so strategy aggregates (strategy_pnl, strategy_win_rate,
+    today_strategy_pnl, etc.) fall back to zero on the next /hub render.
+
+    Used by the /hub Reset Balance button to wipe stats that were inflated
+    by early liquidity-trap bugs — rows stay for audit but stop contributing
+    to the Agent 6 learning corpus aggregates.
+
+    Returns the number of rows updated.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(PaperTrade)
+            .where(
+                PaperTrade.status == "closed",
+                PaperTrade.close_reason.in_(list(STRATEGY_CLOSE_REASONS)),
+            )
+            .values(close_reason="reset")
+        )
+        await session.commit()
+        return int(result.rowcount or 0)
 
 
 async def compute_paper_balance(starting: float = 20.0) -> float:
