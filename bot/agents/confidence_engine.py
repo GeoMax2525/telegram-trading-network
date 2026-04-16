@@ -173,11 +173,14 @@ async def _score_insider(candidate: dict) -> float:
     """
     t1 = candidate.get("insider_tier_1_count", 0) or 0
     t2 = candidate.get("insider_tier_2_count", 0) or 0
+    t3 = candidate.get("insider_tier_3_count", 0) or 0
     gmgn_boost = candidate.get("gmgn_wallet_boost", 0)
     buy_age_s = candidate.get("insider_buy_age_s")
 
-    # Weighted insider strength: tier-1 wallets count double
-    weighted = t1 * 2 + t2
+    # Weighted insider strength: T1=2x, T2=1x, T3=0.5x
+    # T3 includes most GMGN smart-money wallets — weaker signal
+    # but still valuable since they have proven trading records.
+    weighted = t1 * 2 + t2 + t3 * 0.5
     if weighted >= 5:
         base = 100.0
     elif weighted >= 3:

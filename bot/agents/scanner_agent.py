@@ -513,14 +513,14 @@ async def _source2_insider_wallets() -> list[dict]:
     Checks recent buys by Tier 1/2 wallets via Helius.
     Returns list of {mint, source, insider_count, insider_tier_1_count, insider_tier_2_count}.
     """
-    wallets = await get_tier_wallets(max_tier=2)
+    wallets = await get_tier_wallets(max_tier=3)
     if not wallets:
-        logger.info("Scanner source2: no tier1/tier2 wallets in DB — source will return empty until Agent 2 promotes some")
+        logger.info("Scanner source2: no tiered wallets in DB — source will return empty until Agent 2 or GMGN imports some")
         return []
     logger.info("Scanner source2: checking %d tier1/2 wallets for recent buys", len(wallets[:15]))
 
     since_ts = int(time.time()) - INSIDER_WINDOW
-    # mint -> {1: count, 2: count}
+    # mint -> {1: count, 2: count, 3: count}
     mint_tier_counts: dict[str, dict[int, int]] = {}
     # mint -> list of (wallet_addr, cluster_id_or_None) for cluster grouping
     mint_wallet_clusters: dict[str, list[tuple[str, str | None]]] = {}
@@ -554,7 +554,7 @@ async def _source2_insider_wallets() -> list[dict]:
             continue
         tier, mints, addr, cid, newest_bt = res
         for m in mints:
-            bucket = mint_tier_counts.setdefault(m, {1: 0, 2: 0})
+            bucket = mint_tier_counts.setdefault(m, {1: 0, 2: 0, 3: 0})
             bucket[tier] = bucket.get(tier, 0) + 1
             mint_wallet_clusters.setdefault(m, []).append((addr, cid))
             if newest_bt:
@@ -565,6 +565,7 @@ async def _source2_insider_wallets() -> list[dict]:
     for mint, tc in mint_tier_counts.items():
         t1 = tc.get(1, 0)
         t2 = tc.get(2, 0)
+        t3 = tc.get(3, 0)
 
         entries = mint_wallet_clusters.get(mint, [])
         cluster_counts: dict[str, int] = {}
@@ -583,9 +584,10 @@ async def _source2_insider_wallets() -> list[dict]:
         candidates.append({
             "mint": mint,
             "source": "insider_wallet",
-            "insider_count": t1 + t2,
+            "insider_count": t1 + t2 + t3,
             "insider_tier_1_count": t1,
             "insider_tier_2_count": t2,
+            "insider_tier_3_count": t3,
             "cluster_buy_count": cluster_buy_count,
             "cluster_id_hit": cluster_id_hit,
             "insider_buy_age_s": buy_age_s,
