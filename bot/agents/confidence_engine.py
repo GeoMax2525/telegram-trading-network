@@ -160,26 +160,43 @@ async def _score_fingerprint(candidate: dict, pattern) -> float:
 
 
 async def _score_insider(candidate: dict) -> float:
-    """Score 0–100 based on insider wallet + GMGN smart money activity.
+    """Score 0–100 based on insider wallet activity, tier quality, recency,
+    cluster coordination, and GMGN smart money.
 
-    Cluster boost: when Agent 2 has grouped wallets into coordinated
-    clusters, multiple cluster members buying the same token is a much
-    stronger signal than uncorrelated insider buys. We multiply the
-    insider sub-score by 1.0 / 1.5 / 2.0 depending on how many wallets
-    from the strongest matching cluster are on this token.
+    Tier weighting: tier-1 buys count 2x because those wallets have a
+    proven track record of early-entry winners.
+
+    Recency bonus: a buy in the last 5 minutes is a much stronger signal
+    than one 25 minutes ago (which may already be priced in).
+
+    Cluster boost: coordinated wallet groups buying the same token.
     """
-    insider_count = candidate.get("insider_count", 0)
+    t1 = candidate.get("insider_tier_1_count", 0) or 0
+    t2 = candidate.get("insider_tier_2_count", 0) or 0
     gmgn_boost = candidate.get("gmgn_wallet_boost", 0)
+    buy_age_s = candidate.get("insider_buy_age_s")
 
-    base = 30.0  # default no signal
-    if insider_count >= 3:
+    # Weighted insider strength: tier-1 wallets count double
+    weighted = t1 * 2 + t2
+    if weighted >= 5:
         base = 100.0
-    elif insider_count == 2:
-        base = 80.0
-    elif insider_count == 1:
-        base = 60.0
+    elif weighted >= 3:
+        base = 85.0
+    elif weighted >= 2:
+        base = 70.0
+    elif weighted >= 1:
+        base = 55.0
     elif candidate.get("source") == "insider_wallet":
         base = 40.0
+    else:
+        base = 30.0
+
+    # Recency bonus — fresher buys are stronger signals
+    if buy_age_s is not None and weighted > 0:
+        if buy_age_s < 300:       # < 5 min
+            base = min(base + 20, 100)
+        elif buy_age_s < 900:     # < 15 min
+            base = min(base + 10, 100)
 
     # Check GMGN top traders for this token
     mint = candidate.get("mint", "")
