@@ -234,11 +234,11 @@ def _mode_label() -> str:
 def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
-    # Row 1: Paper trading toggle
+    # Row 1: Paper sim toggle
     if state.trade_mode == "paper":
-        paper_label = "📋 Paper Trading: ✅ ON"
+        paper_label = "📋 Paper Sim: ✅ ON"
     else:
-        paper_label = "📋 Paper Trading: ❌ OFF"
+        paper_label = "📋 Paper Sim: ❌ OFF"
     builder.row(InlineKeyboardButton(text=paper_label, callback_data="hub:toggle_paper"))
 
     # Row 2: Live trading — locked
@@ -441,8 +441,7 @@ async def _build_hub_text(autotrade: bool) -> str:
                        "open_count": 0, "recent": []}
 
     # ── Header ───────────────────────────────────────────────────────
-    mode_word  = {"live": "LIVE", "paper": "PAPER"}.get(state.trade_mode, "OFF")
-    chaos_word = "ON" if state.trade_mode == "paper" else "OFF"
+    mode_word  = {"live": "LIVE", "paper": "PAPER SIM"}.get(state.trade_mode, "OFF")
 
     real_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
     state.paper_balance = real_balance
@@ -453,7 +452,7 @@ async def _build_hub_text(autotrade: bool) -> str:
     lines = [
         DIVIDER,
         "🔑 REVOLT AGENT HUB",
-        f"Trade Mode: {mode_word}  |  Chaos Mode: {chaos_word}",
+        f"Trade Mode: {mode_word}",
         f"Balance: {real_balance:.2f} / {starting:.2f} SOL  |  P&amp;L: {pnl_val:+.2f} SOL ({pnl_pct:+.1f}%)",
         DIVIDER,
         "",
