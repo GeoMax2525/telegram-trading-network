@@ -262,30 +262,39 @@ async def _score_insider(candidate: dict) -> float:
     return combined
 
 
+CHART_MIN_MC = 500_000  # skip chart patterns below this MC — pure noise
+
 async def _score_chart(candidate: dict) -> tuple[float, str]:
     """
     Calls Agent 7 (Chart Detector) to analyze chart patterns, then layers
     a volume-acceleration bonus on top. Returns (score 0-100, pattern_name).
+
+    For tokens under $500K MC, chart scoring is skipped entirely — there
+    isn't enough price history for patterns to be meaningful. Returns a
+    neutral 50 + volume bonus only.
     """
+    mcap = candidate.get("mcap", 0) or 0
+
+    # Volume acceleration bonus applies at ALL MC levels — it's a
+    # momentum signal, not a chart-structure signal.
+    vol_bonus = 0
+    vol_m5 = float(candidate.get("volume_m5") or 0)
+    vol_h1 = float(candidate.get("volume_h1") or 0)
+    if vol_m5 > 0 and vol_h1 > 0:
+        pace_ratio = (vol_m5 * 12) / vol_h1
+        if pace_ratio >= 3.0:
+            vol_bonus = 15
+        elif pace_ratio >= 2.0:
+            vol_bonus = 8
+
+    if mcap < CHART_MIN_MC:
+        return min(50.0 + vol_bonus, 100.0), "skipped_low_mc"
+
     try:
         result = await analyze_chart(candidate)
         chart_score = result["chart_score"]
         pattern_name = result.get("pattern_name", "none")
-
-        # Volume acceleration bonus: if the current 5-min volume pace
-        # significantly exceeds the 1-hour average, the token has fresh
-        # momentum that chart patterns alone don't capture. This is one
-        # of the strongest early entry signals for pump.fun tokens.
-        vol_m5 = float(candidate.get("volume_m5") or 0)
-        vol_h1 = float(candidate.get("volume_h1") or 0)
-        if vol_m5 > 0 and vol_h1 > 0:
-            pace_ratio = (vol_m5 * 12) / vol_h1
-            if pace_ratio >= 3.0:
-                chart_score = min(chart_score + 15, 100)
-            elif pace_ratio >= 2.0:
-                chart_score = min(chart_score + 8, 100)
-
-        return chart_score, pattern_name
+        return min(chart_score + vol_bonus, 100.0), pattern_name
     except Exception as exc:
         logger.warning("Agent5: chart analysis failed for %s: %s",
                        candidate.get("mint", "?")[:12], exc)
