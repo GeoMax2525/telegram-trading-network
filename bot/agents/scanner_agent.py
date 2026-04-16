@@ -42,6 +42,7 @@ from bot.config import HELIUS_RPC_URL, HELIUS_API_KEY
 from bot.scanner import (
     fetch_token_data, parse_token_metrics, scan_token,
     ALLOWED_DEXES, MIN_LIQUIDITY_BY_DEX,
+    ALLOWED_MINT_SUFFIXES, mint_suffix_ok,
 )
 from bot.agents.confidence_engine import score_candidate
 from database.models import (
@@ -710,12 +711,24 @@ async def _evaluate_candidate(
     AI scoring, and pattern matching. Reads filter params from DB.
     Returns enriched candidate dict or None if filtered out.
     """
+    mint = raw["mint"]
+    raw_name_hint = raw.get("name") or raw.get("symbol") or "?"
+
+    # ── GATE 1 (non-negotiable): mint suffix allowlist ───────────────
+    # Must come BEFORE any network fetches or DB reads so garbage
+    # candidates cost us nothing. Agent 6 cannot override this.
+    if not mint_suffix_ok(mint):
+        logger.info(
+            "SKIP %s (%s) — mint suffix filter failed (allowed: %s)",
+            raw_name_hint, (mint or "")[:12], "/".join(ALLOWED_MINT_SUFFIXES),
+        )
+        return None
+
     # Load dynamic filter params from DB
     p = await get_params(
         "scanner_min_mc", "scanner_max_mc", "scanner_min_liquidity",
         "scanner_min_ai_score", "scanner_rugcheck_max_risk",
     )
-    mint = raw["mint"]
 
     # Fetch full data if not already present
     mcap      = raw.get("mcap")
@@ -765,49 +778,30 @@ async def _evaluate_candidate(
             )
             return None
 
+    # ── GATE 4: missing required data ───────────────────────────────
+    # Name + symbol must be present. Mint is already validated by gate 1.
+    if not name or name in ("?", "Unknown") or not symbol or symbol in ("?", "???"):
+        logger.info(
+            "SKIP %s (%s) — missing required data (name=%r symbol=%r)",
+            raw_name_hint, mint[:12], name, symbol,
+        )
+        return None
+
     # Rugcheck
     rc_data = await _fetch_rugcheck(mint)
 
-    # ── Hard LP safety gate (paper AND live, no exceptions) ────────────
+    # LP lock/burn gate has been removed per operator decision — raw LP
+    # state from rugcheck was too unreliable (missing data on freshly
+    # graduated pools) and the DEX allowlist + holder/dev/top10 tightening
+    # below provides enough trap defense. _classify_lp and the constants
+    # are kept around in case we reintroduce it later with a better data
+    # source, but _evaluate_candidate no longer consults them.
+
     lp_params = await get_params(
-        "require_lp_safe",
         "safety_max_dev_pct",
         "safety_max_top10_pct",
         "safety_min_holders",
     )
-    require_lp_safe = (lp_params.get("require_lp_safe") or 0) >= 0.5
-    if require_lp_safe:
-        lp_info = _classify_lp(rc_data)
-        lp_state = lp_info["state"]
-        lp_expiry = lp_info["expiry"]
-        lp_pct = lp_info["locked_pct"]
-
-        if lp_state == "burned":
-            logger.info("LP: burned %s (%s)", name, mint[:12])
-        elif lp_state == "locked":
-            if lp_expiry is not None:
-                logger.info(
-                    "LP: locked (expires %s) %s (%s)",
-                    lp_expiry.strftime("%Y-%m-%d"), name, mint[:12],
-                )
-            else:
-                pct_str = f"{lp_pct:.1f}%" if lp_pct is not None else "?"
-                logger.info(
-                    "LP: locked (lpLockedPct=%s) %s (%s)",
-                    pct_str, name, mint[:12],
-                )
-        elif lp_state == "unlocked":
-            pct_str = f"{lp_pct:.1f}%" if lp_pct is not None else "?"
-            logger.info(
-                "SKIP %s (%s) — LP unlocked (lpLockedPct=%s)",
-                name, mint[:12], pct_str,
-            )
-            return None
-        else:  # "unknown"
-            logger.info(
-                "SKIP %s (%s) — LP status unknown", name, mint[:12],
-            )
-            return None
 
     # ── Holder / concentration safety tightening ───────────────────────
     # Reads rugcheck safety fields that were previously only surfaced in

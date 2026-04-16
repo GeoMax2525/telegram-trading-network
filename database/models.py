@@ -2778,10 +2778,10 @@ AGENT_PARAM_DEFAULTS = {
     "close_cooldown_hours":  2.0,    # re-entry cooldown after ANY close
 
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
-    # before AI scoring. require_lp_safe is a NON-LEARNING param: the
-    # learning loop must never call set_param("require_lp_safe", ...).
-    # Flip it manually via /setparam only in genuine emergencies.
-    "require_lp_safe":       1.0,   # 1 = LP burned OR locked required
+    # before AI scoring. Non-learning: do not reference from learning_loop.
+    # LP burn/lock gate was removed — rugcheck data proved too unreliable.
+    # The mint-suffix allowlist in bot.scanner.ALLOWED_MINT_SUFFIXES is the
+    # primary ecosystem gate (hard-coded, Agent 6 cannot touch).
     "safety_max_dev_pct":    15.0,  # reject if dev wallet >= this %
     "safety_max_top10_pct":  40.0,  # reject if top 10 holders >= this %
     "safety_min_holders":    50.0,  # reject if holder count < this

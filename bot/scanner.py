@@ -38,6 +38,26 @@ MIN_LIQUIDITY_BY_DEX = {
 }
 
 
+# Ecosystem allowlist — mint address MUST end with one of these suffixes.
+# The on-chain factory appends a fixed suffix per launchpad:
+#   pump.fun  -> *pump
+#   bonk      -> *bonk
+#   bags      -> *bags
+# Any mint without one of these suffixes is rejected at the very first
+# gate in scanner_agent._evaluate_candidate, harvester._save_graduated_token,
+# and gmgn_agent before save. Non-learning hard-coded constant — Agent 6
+# cannot touch this list.
+ALLOWED_MINT_SUFFIXES = ("pump", "bonk", "bags")
+
+
+def mint_suffix_ok(mint: str | None) -> bool:
+    """Return True iff the mint ends with an allowed launchpad suffix."""
+    if not mint:
+        return False
+    lower = mint.lower()
+    return any(lower.endswith(suf) for suf in ALLOWED_MINT_SUFFIXES)
+
+
 def _pair_dex_id(pair: dict) -> str:
     return (pair.get("dexId") or "").lower()
 

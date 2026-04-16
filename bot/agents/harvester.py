@@ -53,8 +53,16 @@ async def _save_graduated_token(mint: str, pair: dict, source: str) -> bool:
     if not mint or await token_exists(mint):
         return False
 
+    # Hard mint-suffix gate (pump.fun / bonk / bags launchpads only).
+    from bot.scanner import ALLOWED_DEXES, mint_suffix_ok, ALLOWED_MINT_SUFFIXES
+    if not mint_suffix_ok(mint):
+        logger.info(
+            "Harvester: skipped %s — mint suffix filter failed (allowed: %s)",
+            mint[:12], "/".join(ALLOWED_MINT_SUFFIXES),
+        )
+        return False
+
     # Hard graduation gate — only real DEX pairs, no bonding curves.
-    from bot.scanner import ALLOWED_DEXES
     dex_id = (pair.get("dexId") or "").lower()
     if dex_id not in ALLOWED_DEXES:
         logger.info(

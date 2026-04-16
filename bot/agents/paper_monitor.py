@@ -27,6 +27,7 @@ from database.models import (
     compute_paper_balance,
     get_params,
 )
+from bot.scanner import mint_suffix_ok
 from bot.agents.trade_profiles import resolve_trade_params
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,31 @@ async def _check_open_trades(bot) -> None:
         logger.debug("Paper monitor balance refresh failed: %s", exc)
     if not trades:
         return
+
+    # ── Hard ecosystem eviction ─────────────────────────────────────
+    # If the mint suffix allowlist rejects any open trade, close it as
+    # "reset" (meta) on this tick. Fires once per stale position.
+    evicted_trades = [pt for pt in trades if not mint_suffix_ok(pt.token_address)]
+    if evicted_trades:
+        for pt in evicted_trades:
+            try:
+                await close_paper_trade(
+                    pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple,
+                )
+                logger.info(
+                    "Paper: EVICTED %s (%s) — mint suffix filter failed",
+                    (pt.token_name or "?")[:18], (pt.token_address or "")[:12],
+                )
+            except Exception as exc:
+                logger.debug("Paper evict close failed for %s: %s",
+                             (pt.token_address or "")[:12], exc)
+        trades = [pt for pt in trades if mint_suffix_ok(pt.token_address)]
+        try:
+            state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+        except Exception:
+            pass
+        if not trades:
+            return
 
     # Time-based + profit-protection params (DB-driven so Agent 6 can learn).
     cfg = await get_params(

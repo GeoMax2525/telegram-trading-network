@@ -202,6 +202,14 @@ async def _poll_gmgn_tokens() -> int:
             mint = t.get("address")
             if not mint:
                 continue
+            # Hard mint-suffix gate — skip non-launchpad tokens entirely.
+            from bot.scanner import mint_suffix_ok as _suf_ok
+            if not _suf_ok(mint):
+                logger.debug(
+                    "GMGN: skipped %s — mint suffix filter failed",
+                    mint[:12],
+                )
+                continue
             if await token_exists(mint):
                 try:
                     async with AsyncSessionLocal() as session:
@@ -414,10 +422,18 @@ async def _track_smart_money_trades() -> int:
         return 0
 
     new_signals = 0
+    from bot.scanner import mint_suffix_ok as _suf_ok
     for trade in trades:
         mint = trade.get("base_address")
         side = trade.get("side")
         if not mint or side != "buy":
+            continue
+        # Hard mint-suffix gate.
+        if not _suf_ok(mint):
+            logger.debug(
+                "GMGN smart: skipped %s — mint suffix filter failed",
+                mint[:12],
+            )
             continue
 
         symbol = (trade.get("base_token") or {}).get("symbol") or "?"
