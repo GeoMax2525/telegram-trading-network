@@ -704,6 +704,102 @@ async def _optimize_trade_params(regime: str) -> int:
     return updated
 
 
+# ── Scanner param auto-tuning ────────────────────────────────────────────────
+
+MIN_SCANNER_TUNE_SAMPLE = 10   # need at least N recent strategy closes
+
+async def _optimize_scanner_params(regime: str) -> list[str]:
+    """
+    Read recent strategy-closed trades and adjust scanner gate params
+    (scanner_min_mc, scanner_max_mc, scanner_min_liquidity) based on
+    where wins vs losses cluster.
+
+    Runs every learning loop tick (same cadence as _optimize_trade_params).
+    Returns list of change description strings for the log.
+    """
+    from database.models import STRATEGY_CLOSE_REASONS
+
+    raw = await _fetch_closed_paper_trades(limit=200)
+    strat = [t for t in raw if (t.close_reason or "") in STRATEGY_CLOSE_REASONS]
+    if len(strat) < MIN_SCANNER_TUNE_SAMPLE:
+        return []
+
+    changes: list[str] = []
+    cur_min_mc  = await get_param("scanner_min_mc")
+    cur_max_mc  = await get_param("scanner_max_mc")
+    cur_min_liq = await get_param("scanner_min_liquidity")
+    n_analyzed  = len(strat)
+
+    # Bucket by entry_mc: low (<50K), mid (50K-500K), high (>500K)
+    low = [t for t in strat if (t.entry_mc or 0) < 50_000]
+    mid = [t for t in strat if 50_000 <= (t.entry_mc or 0) < 500_000]
+    high = [t for t in strat if (t.entry_mc or 0) >= 500_000]
+
+    def wr(bucket):
+        if not bucket:
+            return 0.0
+        wins = sum(1 for t in bucket if (t.paper_pnl_sol or 0) > 0)
+        return wins / len(bucket)
+
+    wr_low  = wr(low)
+    wr_mid  = wr(mid)
+    wr_high = wr(high)
+    wr_all  = wr(strat)
+
+    logger.info(
+        "Agent6 scanner-tune: n=%d low=%d(%.0f%%) mid=%d(%.0f%%) high=%d(%.0f%%) overall=%.0f%%",
+        n_analyzed, len(low), wr_low*100, len(mid), wr_mid*100,
+        len(high), wr_high*100, wr_all*100,
+    )
+
+    # Rule 1: if low-MC bucket has poor WR and enough samples → raise min_mc
+    if len(low) >= 5 and wr_low < 0.15 and wr_low < wr_all * 0.7:
+        new_min = min(cur_min_mc * 1.25, 100_000)
+        if new_min != cur_min_mc:
+            await set_param("scanner_min_mc", round(new_min),
+                            f"Low-MC WR {wr_low:.0%} < overall {wr_all:.0%} — raising floor",
+                            n_analyzed, wr_all)
+            changes.append(f"scanner_min_mc: {cur_min_mc:.0f}→{new_min:.0f}")
+
+    # Rule 2: if low-MC is performing well → lower min_mc to see more
+    if len(low) >= 5 and wr_low > 0.35 and wr_low > wr_all * 1.2:
+        new_min = max(cur_min_mc * 0.80, 5_000)
+        if new_min != cur_min_mc:
+            await set_param("scanner_min_mc", round(new_min),
+                            f"Low-MC WR {wr_low:.0%} outperforming — widening floor",
+                            n_analyzed, wr_all)
+            changes.append(f"scanner_min_mc: {cur_min_mc:.0f}→{new_min:.0f}")
+
+    # Rule 3: if high-MC performing well → raise ceiling to see more
+    if len(high) >= 3 and wr_high > 0.30:
+        new_max = min(cur_max_mc * 1.5, 50_000_000)
+        if new_max != cur_max_mc:
+            await set_param("scanner_max_mc", round(new_max),
+                            f"High-MC WR {wr_high:.0%} — raising ceiling",
+                            n_analyzed, wr_all)
+            changes.append(f"scanner_max_mc: {cur_max_mc:.0f}→{new_max:.0f}")
+
+    # Rule 4: if most losses come from low-liq tokens → raise min_liquidity
+    losses = [t for t in strat if (t.paper_pnl_sol or 0) <= 0]
+    if losses:
+        loss_mcs = [t.entry_mc or 0 for t in losses]
+        avg_loss_mc = sum(loss_mcs) / len(loss_mcs)
+        win_trades = [t for t in strat if (t.paper_pnl_sol or 0) > 0]
+        win_mcs = [t.entry_mc or 0 for t in win_trades] if win_trades else [0]
+        avg_win_mc = sum(win_mcs) / max(len(win_mcs), 1)
+
+        # If losses cluster at much lower MC than wins → raise min
+        if avg_loss_mc > 0 and avg_win_mc > 0 and avg_loss_mc < avg_win_mc * 0.5:
+            new_liq = min(cur_min_liq * 1.20, 25_000)
+            if new_liq != cur_min_liq:
+                await set_param("scanner_min_liquidity", round(new_liq),
+                                f"Loss avg MC ${avg_loss_mc:.0f} << Win avg MC ${avg_win_mc:.0f}",
+                                n_analyzed, wr_all)
+                changes.append(f"scanner_min_liq: {cur_min_liq:.0f}→{new_liq:.0f}")
+
+    return changes
+
+
 # ── Collect scores from batch ────────────────────────────────────────────────
 
 async def _classify_batch(batch) -> tuple[list[dict], list[dict]]:
@@ -1273,6 +1369,14 @@ async def run_once(bot, force: bool = False) -> bool:
             all_changes.append(f"Trade params updated for {params_updated} pattern types")
     except Exception as exc:
         logger.error("_optimize_trade_params error: %s", exc)
+
+    # Scanner gate auto-tuning — adjust min_mc, max_mc, min_liquidity
+    # based on which MC buckets produce wins vs losses
+    try:
+        scanner_changes = await _optimize_scanner_params(regime)
+        all_changes.extend(scanner_changes)
+    except Exception as exc:
+        logger.error("_optimize_scanner_params error: %s", exc)
 
     # Wallet tiers stay batched (expensive Helius calls) — only run at
     # full/major level to avoid hammering the API every 60s.
