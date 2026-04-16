@@ -860,40 +860,34 @@ async def _evaluate_candidate(
     _min_ai = p["scanner_min_ai_score"]
     _max_rug = p["scanner_rugcheck_max_risk"]
 
-    if is_paper:
-        # CHAOS MODE: skip all filters, just log
-        if not mcap:
-            logger.info("Scanner[paper] %s: no MC data, passing anyway", name)
-    else:
-        # LIVE MODE: enforce DB-driven filters
-        if not mcap:
-            logger.info("Scanner REJECTED %s (%s): no market cap data", name, mint[:12])
+    # Quality filters apply in BOTH paper and live modes. The old
+    # "chaos mode" bypass let $8K MC dumps, high-risk tokens, and
+    # garbage through the paper pipeline, poisoning the learning corpus.
+    if not mcap:
+        logger.info("Scanner REJECTED %s (%s): no market cap data", name, mint[:12])
+        return None
+    if not (_min_mc <= mcap <= _max_mc):
+        logger.info("Scanner REJECTED %s: mcap $%.0f outside $%.0f–$%.0f", name, mcap, _min_mc, _max_mc)
+        return None
+    if liquidity < _min_liq:
+        logger.info("Scanner REJECTED %s: liquidity $%.0f < $%.0f", name, liquidity, _min_liq)
+        return None
+    if rc_data:
+        rc_score_val = rc_data.get("score", 0)
+        risks = {r.get("name", "").lower() for r in (rc_data.get("risks") or [])}
+        if rc_score_val > _max_rug:
+            logger.info("Scanner REJECTED %s: rugcheck risk %d > %.0f", name, rc_score_val, _max_rug)
             return None
-        if not (_min_mc <= mcap <= _max_mc):
-            logger.info("Scanner REJECTED %s: mcap $%.0f outside $%.0f–$%.0f", name, mcap, _min_mc, _max_mc)
+        if risks & HIGH_RISK_FLAGS:
+            logger.info("Scanner REJECTED %s: rug flags %s", name, risks & HIGH_RISK_FLAGS)
             return None
-        if liquidity < _min_liq:
-            logger.info("Scanner REJECTED %s: liquidity $%.0f < $%.0f", name, liquidity, _min_liq)
-            return None
-        if rc_data:
-            rc_score_val = rc_data.get("score", 0)
-            risks = {r.get("name", "").lower() for r in (rc_data.get("risks") or [])}
-            if rc_score_val > _max_rug:
-                logger.info("Scanner REJECTED %s: rugcheck risk %d > %.0f", name, rc_score_val, _max_rug)
-                return None
-            if risks & HIGH_RISK_FLAGS:
-                logger.info("Scanner REJECTED %s: rug flags %s", name, risks & HIGH_RISK_FLAGS)
-                return None
 
     # AI score via full scan_token
     scan_data = await scan_token(mint)
     ai_score = 0
     if scan_data is None:
-        if is_paper:
-            logger.info("Scanner[paper] %s: scan_token failed, using ai_score=0", name)
-        else:
-            logger.info("Scanner REJECTED %s: scan_token returned None (API fail)", name)
-            return None
+        logger.info("Scanner REJECTED %s: scan_token returned None (API fail)", name)
+        return None
     else:
         ai_score = scan_data.get("total", 0)
 
