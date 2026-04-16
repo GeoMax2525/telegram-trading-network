@@ -52,6 +52,15 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
+
+def parse_pattern_tags(pattern_type: str | None) -> list[str]:
+    """Split a comma-separated pattern_type string into a cleaned tag list.
+    Canonical version — paper_monitor and learning_loop import this."""
+    if not pattern_type:
+        return []
+    return [t.strip() for t in pattern_type.split(",") if t.strip()]
+
+
 # ── Thresholds ──────────────────────────────────────────────────────────────
 MC_LOW_CUTOFF        = 50_000
 MC_HIGH_CUTOFF       = 500_000

@@ -440,11 +440,7 @@ async def _adjust_wallet_tiers() -> tuple[int, int]:
 
 # ── Trade params optimization (per pattern_type, from PaperTrade) ────────────
 
-def _parse_pattern_tags(pattern_type: str | None) -> list[str]:
-    """pattern_type on a PaperTrade is a comma-separated list of matched tags."""
-    if not pattern_type:
-        return []
-    return [t.strip() for t in pattern_type.split(",") if t.strip()]
+from bot.agents.trade_profiles import parse_pattern_tags as _parse_pattern_tags
 
 
 async def _fetch_closed_paper_trades(limit: int = 500) -> list:

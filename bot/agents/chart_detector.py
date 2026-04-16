@@ -57,6 +57,11 @@ async def _fetch_ohlcv(pair_address: str) -> list[dict]:
     """
     Fetch recent trade data and build synthetic candles from pair info.
     DexScreener provides price/volume snapshots we can work with.
+
+    Future: replace with real OHLCV candles from GeckoTerminal
+    (api.geckoterminal.com, free, no API key). Would enable proper
+    RSI, EMA crossover, and multi-candle pattern detection. Current
+    single-snapshot approach limits pattern accuracy significantly.
     """
     url = OHLCV_URL.format(pair_address=pair_address)
     try:

@@ -1128,7 +1128,14 @@ async def save_token(
     social_links: str | None = None,
     graduated: bool | None = None,
     reply_count: int | None = None,
-) -> "Token":
+) -> "Token | None":
+    if not mint:
+        return None
+    # Warn on NULL market_cap — some callers (gmgn_agent smart-money
+    # import) intentionally pass None, but downstream aggregates that
+    # assume market_cap is populated will break silently.
+    if market_cap is None or market_cap <= 0:
+        logger.debug("save_token: %s has no market_cap (source=%s)", mint[:12], source)
     async with AsyncSessionLocal() as session:
         tok = Token(
             mint=mint,

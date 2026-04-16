@@ -28,7 +28,7 @@ from database.models import (
     get_params,
 )
 from bot.scanner import mint_suffix_ok
-from bot.agents.trade_profiles import resolve_trade_params
+from bot.agents.trade_profiles import resolve_trade_params, parse_pattern_tags
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +46,7 @@ _fetch_fail_counts: dict[int, int] = {}
 
 # ── Open trade monitoring ────────────────────────────────────────────────────
 
-def _parse_pattern_tags(pattern_type: str | None) -> list[str]:
-    """pattern_type stores a comma-separated list at open time."""
-    if not pattern_type:
-        return []
-    return [t.strip() for t in pattern_type.split(",") if t.strip()]
+_parse_pattern_tags = parse_pattern_tags
 
 
 async def _check_open_trades(bot) -> None:

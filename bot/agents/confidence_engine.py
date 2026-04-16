@@ -113,8 +113,7 @@ async def _score_fingerprint(candidate: dict, pattern) -> float:
         w2x = _match_pattern(pattern)
         base = w2x if w2x is not None else 50.0
 
-    # Bonus: winner_5x — if candidate matches the high-conviction
-    # fingerprint well (>70), nudge confidence up to reward strong signals
+    # Bonus: winner_5x — high-conviction fingerprint match
     try:
         pat_5x = await get_pattern_by_type("winner_5x")
         w5x = _match_pattern(pat_5x)
@@ -123,13 +122,35 @@ async def _score_fingerprint(candidate: dict, pattern) -> float:
     except Exception:
         pass
 
-    # Penalty: rug fingerprint — if candidate looks like a past rug
-    # (matches the rug pattern shape well), penalize to avoid repeating
+    # Bonus: winner_10x — moonshot fingerprint (rare but very high signal)
+    try:
+        pat_10x = await get_pattern_by_type("winner_10x")
+        w10x = _match_pattern(pat_10x)
+        if w10x is not None and w10x > 75:
+            base = min(base + 15.0, 100.0)
+    except Exception:
+        pass
+
+    # Penalty: rug fingerprint — avoid repeating past trap shapes
     try:
         pat_rug = await get_pattern_by_type("rug")
         rug_match = _match_pattern(pat_rug)
         if rug_match is not None and rug_match > 70:
             base = max(base - 15.0, 0.0)
+    except Exception:
+        pass
+
+    # Bonus: best_time — if current hour/day matches historically
+    # profitable trading windows from the best_time pattern
+    try:
+        import json as _json2
+        pat_time = await get_pattern_by_type("best_time")
+        if pat_time and pat_time.best_hours:
+            from datetime import datetime as _dt
+            now_hour = _dt.utcnow().hour
+            best_hours = _json2.loads(pat_time.best_hours)
+            if now_hour in best_hours[:3]:
+                base = min(base + 5.0, 100.0)
     except Exception:
         pass
 
@@ -243,12 +264,28 @@ async def _score_insider(candidate: dict) -> float:
 
 async def _score_chart(candidate: dict) -> tuple[float, str]:
     """
-    Calls Agent 7 (Chart Detector) to analyze chart patterns.
-    Returns (score 0-100, pattern_name).
+    Calls Agent 7 (Chart Detector) to analyze chart patterns, then layers
+    a volume-acceleration bonus on top. Returns (score 0-100, pattern_name).
     """
     try:
         result = await analyze_chart(candidate)
-        return result["chart_score"], result.get("pattern_name", "none")
+        chart_score = result["chart_score"]
+        pattern_name = result.get("pattern_name", "none")
+
+        # Volume acceleration bonus: if the current 5-min volume pace
+        # significantly exceeds the 1-hour average, the token has fresh
+        # momentum that chart patterns alone don't capture. This is one
+        # of the strongest early entry signals for pump.fun tokens.
+        vol_m5 = float(candidate.get("volume_m5") or 0)
+        vol_h1 = float(candidate.get("volume_h1") or 0)
+        if vol_m5 > 0 and vol_h1 > 0:
+            pace_ratio = (vol_m5 * 12) / vol_h1
+            if pace_ratio >= 3.0:
+                chart_score = min(chart_score + 15, 100)
+            elif pace_ratio >= 2.0:
+                chart_score = min(chart_score + 8, 100)
+
+        return chart_score, pattern_name
     except Exception as exc:
         logger.warning("Agent5: chart analysis failed for %s: %s",
                        candidate.get("mint", "?")[:12], exc)
