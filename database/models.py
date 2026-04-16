@@ -2737,10 +2737,14 @@ async def compute_paper_balance(starting: float = 20.0) -> float:
 
 # All defaults — inserted on first run if not present
 AGENT_PARAM_DEFAULTS = {
-    # Scanner
+    # Scanner — all DB-driven so Agent 6 can tune the upstream gate.
+    # Source functions load these once per tick instead of using hardcoded
+    # constants. /setparam also works for manual overrides.
     "scanner_min_mc": 10000, "scanner_max_mc": 5000000, "scanner_min_liquidity": 5000,
     "scanner_min_ai_score": 40, "scanner_rugcheck_max_risk": 500,
     "scanner_interval_seconds": 15, "scanner_max_candidates": 10,
+    "scanner_max_age_hours": 4.0,
+    "scanner_min_buyers_m5": 5.0,
     # Wallet tiers — live tunables are the tier{n}_min_{wr,mult,trades,score}
     # block further below. tier1/2/3_min_score kept here for legacy callers.
     "tier1_min_score": 80, "tier2_min_score": 60, "tier3_min_score": 40,

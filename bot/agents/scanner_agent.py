@@ -72,17 +72,25 @@ HELIUS_ENHANCED = "https://api.helius.xyz/v0/transactions"
 
 POLL_INTERVAL   = 15     # seconds (chaos mode: was 30)
 STARTUP_DELAY   = 60     # seconds after bot start
-MAX_CANDIDATES  = 10     # max new candidates queued per tick (was 5)
-
-# Filters
-MIN_MCAP        = 10_000
-MAX_MCAP        = 5_000_000
-MIN_LIQUIDITY   = 5_000
-MAX_RUGCHECK_RISK = 500   # reject tokens with rugcheck risk score above this
-MIN_AI_SCORE    = 40
-MAX_AGE_HOURS   = 4
-MIN_BUYERS_M5   = 5
 INSIDER_WINDOW  = 1_800   # 30 min in seconds
+
+# ── Per-tick params cache ────────────────────────────────────────────────────
+# Loaded once at the top of run_once() from DB agent_params. Source functions
+# and _evaluate_candidate all read from this dict so Agent 6 adjustments
+# propagate everywhere on the next tick. /setparam also works.
+_SP: dict[str, float] = {}
+
+async def _refresh_scanner_params() -> None:
+    global _SP
+    _SP = await get_params(
+        "scanner_min_mc", "scanner_max_mc", "scanner_min_liquidity",
+        "scanner_min_ai_score", "scanner_rugcheck_max_risk",
+        "scanner_max_candidates", "scanner_max_age_hours",
+        "scanner_min_buyers_m5",
+    )
+
+def _sp(name: str, default: float) -> float:
+    return float(_SP.get(name) or default)
 
 HIGH_RISK_FLAGS = {
     "freeze_authority_enabled",
@@ -300,16 +308,16 @@ def _extract_rugcheck_safety(rc: dict | None) -> dict:
 
 def _passes_rug_filter(rc_data: dict | None, mcap: float, liquidity: float) -> bool:
     """Returns True if the token passes all rug/safety filters."""
-    if not (MIN_MCAP <= mcap <= MAX_MCAP):
+    if not (_sp("scanner_min_mc", 10_000) <= mcap <= _sp("scanner_max_mc", 5_000_000)):
         return False
-    if liquidity < MIN_LIQUIDITY:
+    if liquidity < _sp("scanner_min_liquidity", 5_000):
         return False
     if rc_data is None:
         return True   # no data — allow through; AI score will handle it
 
     # Rugcheck score = RISK score (lower = safer, higher = more risky)
     risk_score = rc_data.get("score", 0)
-    if risk_score > MAX_RUGCHECK_RISK:
+    if risk_score > _sp("scanner_rugcheck_max_risk", 500):
         return False
 
     risks = {r.get("name", "").lower() for r in (rc_data.get("risks") or [])}
@@ -393,7 +401,7 @@ async def _source1_new_launches() -> list[dict]:
 
     candidates = []
     now_ms = int(time.time() * 1000)
-    age_cutoff_ms = MAX_AGE_HOURS * 3_600_000
+    age_cutoff_ms = _sp("scanner_max_age_hours", 4.0) * 3_600_000
 
     async def _check_profile(profile: dict) -> dict | None:
         mint = profile.get("tokenAddress") or profile.get("address")
@@ -415,14 +423,14 @@ async def _source1_new_launches() -> list[dict]:
         mcap      = metrics.get("market_cap", 0) or 0
         liquidity = metrics.get("liquidity_usd", 0) or 0
 
-        if not (MIN_MCAP <= mcap <= MAX_MCAP):
+        if not (_sp("scanner_min_mc", 10_000) <= mcap <= _sp("scanner_max_mc", 5_000_000)):
             return None
-        if liquidity < MIN_LIQUIDITY:
+        if liquidity < _sp("scanner_min_liquidity", 5_000):
             return None
 
         # 5-min buyer activity check
         buys_m5 = pair.get("txns", {}).get("m5", {}).get("buys", 0) or 0
-        if buys_m5 < MIN_BUYERS_M5:
+        if buys_m5 < _sp("scanner_min_buyers_m5", 5):
             return None
 
         return {
@@ -623,9 +631,9 @@ async def _source3_volume_spikes() -> list[dict]:
             metrics   = parse_token_metrics(pair)
             mcap      = metrics.get("market_cap",    0) or 0
             liquidity = metrics.get("liquidity_usd", 0) or 0
-            if not (MIN_MCAP <= mcap <= MAX_MCAP):
+            if not (_sp("scanner_min_mc", 10_000) <= mcap <= _sp("scanner_max_mc", 5_000_000)):
                 return None
-            if liquidity < MIN_LIQUIDITY:
+            if liquidity < _sp("scanner_min_liquidity", 5_000):
                 return None
             return {
                 "mint":      mint,
@@ -962,6 +970,7 @@ async def run_once() -> tuple[int, int]:
     Returns (candidates_found, candidates_queued).
     """
     state.scanner_status = "running"
+    await _refresh_scanner_params()
     # Refresh paper_balance at the top of every tick so the in-memory
     # cache stays close to DB reality. Previously this only refreshed
     # inside the trade-opening loop which meant ticks with no new
@@ -1267,7 +1276,7 @@ async def run_once() -> tuple[int, int]:
         state.scanner_candidates_today += 1
         queued += 1
 
-        if queued >= MAX_CANDIDATES:
+        if queued >= int(_sp("scanner_max_candidates", 10)):
             break
 
     state.scanner_last_run = datetime.utcnow()

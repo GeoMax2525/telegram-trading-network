@@ -69,48 +69,69 @@ DEFAULT_WEIGHTS = MC_WEIGHTS["mid"]
 # ── Component scorers ────────────────────────────────────────────────────────
 
 async def _score_fingerprint(candidate: dict, pattern) -> float:
-    """Score 0–100 based on how well metrics match the winner_2x pattern.
-    Includes pump.fun bonuses for social links and bonding curve."""
-    if pattern is None:
-        base = 50.0  # no pattern data — neutral
-    else:
-        score = 0.0
-        checks = 0
+    """Score 0–100 based on how well metrics match learned pattern buckets.
+    Uses winner_2x as the primary signal, winner_5x as a bonus, and the
+    rug fingerprint as a penalty — so the system learns from both wins AND
+    losses. Includes pump.fun bonuses for social links and bonding curve."""
+    mcap = candidate.get("mcap", 0)
+    liquidity = candidate.get("liquidity", 0)
+    ai_score = candidate.get("ai_score", 0)
 
-        mcap = candidate.get("mcap", 0)
-        liquidity = candidate.get("liquidity", 0)
-        ai_score = candidate.get("ai_score", 0)
-
-        # MC range
-        if pattern.mcap_range_low and pattern.mcap_range_high:
-            checks += 1
-            low = pattern.mcap_range_low * 0.5
-            high = pattern.mcap_range_high * 2.0
+    def _match_pattern(pat) -> float | None:
+        if pat is None:
+            return None
+        sc = 0.0
+        n = 0
+        if pat.mcap_range_low and pat.mcap_range_high:
+            n += 1
+            low = pat.mcap_range_low * 0.5
+            high = pat.mcap_range_high * 2.0
             if low <= mcap <= high:
-                score += 100.0
+                sc += 100.0
             elif mcap < low:
-                score += 30.0
+                sc += 30.0
             else:
-                score += 10.0
+                sc += 10.0
+        if pat.avg_liquidity and pat.avg_liquidity > 0:
+            n += 1
+            ratio = min(liquidity / pat.avg_liquidity, 2.0)
+            sc += ratio * 50.0
+        if pat.avg_ai_score and pat.avg_ai_score > 0:
+            n += 1
+            ratio = min(ai_score / pat.avg_ai_score, 1.5)
+            sc += ratio * 66.7
+        if n == 0:
+            return None
+        raw = sc / n
+        conf = (pat.confidence_score or 0) / 100.0
+        return min(raw * conf + raw * (1 - conf * 0.3), 100)
 
-        # Liquidity
-        if pattern.avg_liquidity and pattern.avg_liquidity > 0:
-            checks += 1
-            ratio = min(liquidity / pattern.avg_liquidity, 2.0)
-            score += ratio * 50.0
+    # Primary: winner_2x
+    if pattern is None:
+        base = 50.0
+    else:
+        w2x = _match_pattern(pattern)
+        base = w2x if w2x is not None else 50.0
 
-        # AI score
-        if pattern.avg_ai_score and pattern.avg_ai_score > 0:
-            checks += 1
-            ratio = min(ai_score / pattern.avg_ai_score, 1.5)
-            score += ratio * 66.7
+    # Bonus: winner_5x — if candidate matches the high-conviction
+    # fingerprint well (>70), nudge confidence up to reward strong signals
+    try:
+        pat_5x = await get_pattern_by_type("winner_5x")
+        w5x = _match_pattern(pat_5x)
+        if w5x is not None and w5x > 70:
+            base = min(base + 10.0, 100.0)
+    except Exception:
+        pass
 
-        if checks == 0:
-            base = 50.0
-        else:
-            raw = score / checks
-            conf = pattern.confidence_score / 100.0
-            base = min(raw * conf + raw * (1 - conf * 0.3), 100)
+    # Penalty: rug fingerprint — if candidate looks like a past rug
+    # (matches the rug pattern shape well), penalize to avoid repeating
+    try:
+        pat_rug = await get_pattern_by_type("rug")
+        rug_match = _match_pattern(pat_rug)
+        if rug_match is not None and rug_match > 70:
+            base = max(base - 15.0, 0.0)
+    except Exception:
+        pass
 
     # Pump.fun bonuses — look up token data
     mint = candidate.get("mint", "")
