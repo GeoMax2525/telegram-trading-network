@@ -758,16 +758,15 @@ async def _evaluate_candidate(
 
     is_paper = state.trade_mode == "paper"
 
-    # Always fetch pair so age_minutes + volume_m5/h1 are available for
-    # every candidate regardless of source. pair = None falls back to
-    # raw-dict values below.
+    # Always fetch pair — a valid pair on an ALLOWED DEX is required for
+    # every candidate regardless of source. Without this hard gate,
+    # candidates from GMGN (source 4) that already carry mcap/liquidity
+    # bypass the DEX check entirely, letting pre-bonded pump.fun tokens
+    # through.
     pair = await fetch_token_data(mint)
-    if pair is None and (not mcap or not liquidity):
-        # fetch_token_data returns None for unsupported DEXes (pump.fun
-        # bonding curves, etc.) as well as plain fetch failures. Either
-        # way the candidate is out.
+    if pair is None:
         logger.info(
-            "Scanner REJECTED %s (%s): no pair on allowed DEX (%s) or fetch failed",
+            "Scanner REJECTED %s (%s): no pair on allowed DEX (%s)",
             name, mint[:12], ",".join(sorted(ALLOWED_DEXES)),
         )
         return None
