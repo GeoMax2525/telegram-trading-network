@@ -95,6 +95,107 @@ HIGH_RISK_FLAGS = {
 
 # ── Rug check ─────────────────────────────────────────────────────────────────
 
+# ── LP safety gate ───────────────────────────────────────────────────────────
+#
+# Hard, non-negotiable gate applied to every candidate before AI scoring.
+# A token passes only if the LP is provably burned OR provably locked
+# (by a known locker program, or by rugcheck reporting lpLockedPct >= 99).
+# Any other state — unlocked, or unknown — is an automatic skip.
+#
+# Agent 6 must NOT tune `require_lp_safe`. The param exists so humans can
+# flip it for emergencies, not so the learning loop can turn it off.
+
+LP_BURN_ADDRESSES = frozenset({
+    "1nc1nerator11111111111111111111111111111111",
+    "11111111111111111111111111111111",
+})
+
+# Solana LP locker program IDs / authority addresses. Only entries whose
+# exact on-chain address is confirmed should live here — unverified
+# entries get filtered out by the "unknown holder" path instead.
+LP_LOCKER_PROGRAMS = frozenset({
+    # Streamflow
+    "strmRqUCoQUgGUan5YhzUZa6KqdzwX5L6FpUxfmKg5m",
+    # Squads v3 multisig timelock
+    "SMPLecH534NA9acpos4G6x7uf3LWbCAwZQE9e8ZekMu",
+    # Tokenvesting program
+    "CChTq6PthWU82YZkbveA3WDf7s97BWhBK4Vx9bmsT743",
+    # Magna — address not yet verified, intentionally absent. Rugcheck's
+    # lpLockedPct fallback will still catch Magna-locked pools.
+})
+
+
+def _classify_lp(rc: dict | None) -> dict:
+    """
+    Inspect rugcheck market[] entries and decide whether the LP is safe.
+
+    Returns {'state': str, 'expiry': datetime|None, 'locked_pct': float|None}
+    where state is one of:
+      'burned'    — LP held by a known burn address
+      'locked'    — LP held by a known locker contract OR lpLockedPct >= 99
+      'unlocked'  — lpLockedPct < 99 and holder not in allowlist
+      'unknown'   — no usable LP data available
+    """
+    if not isinstance(rc, dict):
+        return {"state": "unknown", "expiry": None, "locked_pct": None}
+
+    markets = rc.get("markets")
+    if not isinstance(markets, list) or not markets:
+        return {"state": "unknown", "expiry": None, "locked_pct": None}
+
+    best_state = "unknown"
+    best_expiry: datetime | None = None
+    best_pct: float | None = None
+
+    for m in markets:
+        if not isinstance(m, dict):
+            continue
+        lp_obj = m.get("lp") or {}
+
+        pct = lp_obj.get("lpLockedPct")
+        if isinstance(pct, (int, float)):
+            pct_f = float(pct)
+            if best_pct is None or pct_f > best_pct:
+                best_pct = pct_f
+
+        holder = (
+            lp_obj.get("lpLockedOwner")
+            or lp_obj.get("lockedOwner")
+            or lp_obj.get("owner")
+            or ""
+        )
+        if isinstance(holder, str):
+            if holder in LP_BURN_ADDRESSES:
+                best_state = "burned"
+                # burned is the strongest state; keep iterating only to
+                # capture the max lpLockedPct for logging
+            elif holder in LP_LOCKER_PROGRAMS and best_state != "burned":
+                best_state = "locked"
+                exp = (
+                    lp_obj.get("lockExpiry")
+                    or lp_obj.get("unlockDate")
+                    or lp_obj.get("lpLockedUntil")
+                )
+                if isinstance(exp, (int, float)) and exp > 0:
+                    try:
+                        # Accept both seconds and ms epoch
+                        ts = float(exp)
+                        if ts > 1e12:
+                            ts = ts / 1000.0
+                        best_expiry = datetime.utcfromtimestamp(int(ts))
+                    except Exception:
+                        best_expiry = None
+
+    # Fallbacks using lpLockedPct alone
+    if best_state == "unknown" and best_pct is not None:
+        if best_pct >= 99.0:
+            best_state = "locked"
+        else:
+            best_state = "unlocked"
+
+    return {"state": best_state, "expiry": best_expiry, "locked_pct": best_pct}
+
+
 async def _fetch_rugcheck(mint: str) -> dict | None:
     try:
         url = RUGCHECK_URL.format(mint=mint)
@@ -666,6 +767,79 @@ async def _evaluate_candidate(
 
     # Rugcheck
     rc_data = await _fetch_rugcheck(mint)
+
+    # ── Hard LP safety gate (paper AND live, no exceptions) ────────────
+    lp_params = await get_params(
+        "require_lp_safe",
+        "safety_max_dev_pct",
+        "safety_max_top10_pct",
+        "safety_min_holders",
+    )
+    require_lp_safe = (lp_params.get("require_lp_safe") or 0) >= 0.5
+    if require_lp_safe:
+        lp_info = _classify_lp(rc_data)
+        lp_state = lp_info["state"]
+        lp_expiry = lp_info["expiry"]
+        lp_pct = lp_info["locked_pct"]
+
+        if lp_state == "burned":
+            logger.info("LP: burned %s (%s)", name, mint[:12])
+        elif lp_state == "locked":
+            if lp_expiry is not None:
+                logger.info(
+                    "LP: locked (expires %s) %s (%s)",
+                    lp_expiry.strftime("%Y-%m-%d"), name, mint[:12],
+                )
+            else:
+                pct_str = f"{lp_pct:.1f}%" if lp_pct is not None else "?"
+                logger.info(
+                    "LP: locked (lpLockedPct=%s) %s (%s)",
+                    pct_str, name, mint[:12],
+                )
+        elif lp_state == "unlocked":
+            pct_str = f"{lp_pct:.1f}%" if lp_pct is not None else "?"
+            logger.info(
+                "SKIP %s (%s) — LP unlocked (lpLockedPct=%s)",
+                name, mint[:12], pct_str,
+            )
+            return None
+        else:  # "unknown"
+            logger.info(
+                "SKIP %s (%s) — LP status unknown", name, mint[:12],
+            )
+            return None
+
+    # ── Holder / concentration safety tightening ───────────────────────
+    # Reads rugcheck safety fields that were previously only surfaced in
+    # the candidate dict for pattern matching. Hard-rejects obvious trap
+    # shapes before the token ever reaches Agent 5.
+    _safety_preview = _extract_rugcheck_safety(rc_data)
+    _max_dev  = float(lp_params.get("safety_max_dev_pct")  or 15.0)
+    _max_top10 = float(lp_params.get("safety_max_top10_pct") or 40.0)
+    _min_holders = int(lp_params.get("safety_min_holders") or 50)
+
+    _dev = _safety_preview.get("dev_wallet_pct")
+    _top10 = _safety_preview.get("top_10_concentration")
+    _holders = _safety_preview.get("holder_count")
+
+    if _dev is not None and _dev >= _max_dev:
+        logger.info(
+            "SKIP %s (%s) — dev wallet %.1f%% >= %.0f%%",
+            name, mint[:12], _dev, _max_dev,
+        )
+        return None
+    if _top10 is not None and _top10 >= _max_top10:
+        logger.info(
+            "SKIP %s (%s) — top10 %.1f%% >= %.0f%%",
+            name, mint[:12], _top10, _max_top10,
+        )
+        return None
+    if _holders is not None and _holders < _min_holders:
+        logger.info(
+            "SKIP %s (%s) — only %d holders (< %d)",
+            name, mint[:12], _holders, _min_holders,
+        )
+        return None
 
     _min_mc = p["scanner_min_mc"]
     _max_mc = p["scanner_max_mc"]

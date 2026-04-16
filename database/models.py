@@ -2777,6 +2777,15 @@ AGENT_PARAM_DEFAULTS = {
     "max_open_paper_trades": 5.0,    # hard max concurrent open positions
     "close_cooldown_hours":  2.0,    # re-entry cooldown after ANY close
 
+    # Hard safety gates — scanner_agent._evaluate_candidate enforces these
+    # before AI scoring. require_lp_safe is a NON-LEARNING param: the
+    # learning loop must never call set_param("require_lp_safe", ...).
+    # Flip it manually via /setparam only in genuine emergencies.
+    "require_lp_safe":       1.0,   # 1 = LP burned OR locked required
+    "safety_max_dev_pct":    15.0,  # reject if dev wallet >= this %
+    "safety_max_top10_pct":  40.0,  # reject if top 10 holders >= this %
+    "safety_min_holders":    50.0,  # reject if holder count < this
+
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
     "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
     "trail_sl_pct":          0.20, # distance from peak when trailing active
