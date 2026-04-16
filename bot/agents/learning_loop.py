@@ -156,8 +156,8 @@ async def _detect_market_regime() -> str:
                 if resp.status == 200:
                     data = await resp.json(content_type=None)
                     sol_change = data.get("solana", {}).get("usd_24h_change", 0) or 0
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("SOL price fetch failed: %s", exc)
 
     # Check recent trade win rate (last 20)
     recent_wr = await _recent_win_rate(20)

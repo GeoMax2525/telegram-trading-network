@@ -832,8 +832,8 @@ async def run_once() -> tuple[int, int]:
                     )).scalar_one_or_none()
                     if tok and tok.first_seen_at:
                         token_launch_at = tok.first_seen_at
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Wallet analyst: token lookup failed for %s: %s", mint[:12], exc)
             try:
                 await upsert_wallet_token_trade(
                     wallet_address=address,

@@ -276,8 +276,9 @@ async def _score_rug(candidate: dict) -> float:
                     gmgn_bonus -= 20  # high rug risk
                 elif rug_ratio < 0.1:
                     gmgn_bonus += 5   # low rug risk
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Agent5: GMGN security check failed for %s: %s",
+                           mint[:12], exc)
 
     rc_norm = candidate.get("rugcheck_normalised")
     rc_raw = candidate.get("rugcheck")
