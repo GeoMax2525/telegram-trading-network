@@ -111,8 +111,15 @@ async def _check_open_trades(bot) -> None:
                 )
                 continue
 
-            entry_mc = pt.entry_mc or 1
-            current_mult = current_mc / entry_mc if entry_mc > 0 else 1.0
+            entry_mc = pt.entry_mc or 0
+            if entry_mc <= 0:
+                logger.warning(
+                    "Paper id=%s %s: entry_mc=0/None — closing as reset (BUG #1 row)",
+                    pt.id, (pt.token_name or "?")[:18],
+                )
+                await close_paper_trade(pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple)
+                continue
+            current_mult = current_mc / entry_mc
             peak_mc = max(pt.peak_mc or 0, current_mc)
             peak_mult = max(pt.peak_multiple or 1.0, current_mult)
 

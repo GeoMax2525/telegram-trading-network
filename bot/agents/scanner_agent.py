@@ -1167,7 +1167,7 @@ async def run_once() -> tuple[int, int]:
             # at current price, not some cached price from 2 seconds ago.
             eval_mc = float(scored.get("mcap") or 0)
             fresh_mc = eval_mc
-            if mint_addr and eval_mc > 0:
+            if mint_addr:
                 try:
                     fresh_pair = await fetch_token_data(mint_addr)
                     if fresh_pair is not None:
@@ -1175,18 +1175,29 @@ async def run_once() -> tuple[int, int]:
                         new_mc = float(fresh_metrics.get("market_cap") or 0)
                         if new_mc > 0:
                             fresh_mc = new_mc
-                            drop_ratio = (eval_mc - new_mc) / eval_mc
-                            if drop_ratio > 0.10:
-                                logger.info(
-                                    "Scanner: skip paper trade %s — stale price, "
-                                    "eval_mc=%.0f → now=%.0f (%.0f%% drop since eval)",
-                                    (token_name or "?")[:20],
-                                    eval_mc, new_mc, drop_ratio * 100,
-                                )
-                                continue
+                            if eval_mc > 0:
+                                drop_ratio = (eval_mc - new_mc) / eval_mc
+                                if drop_ratio > 0.10:
+                                    logger.info(
+                                        "Scanner: skip paper trade %s — stale price, "
+                                        "eval_mc=%.0f → now=%.0f (%.0f%% drop since eval)",
+                                        (token_name or "?")[:20],
+                                        eval_mc, new_mc, drop_ratio * 100,
+                                    )
+                                    continue
                 except Exception as exc:
                     logger.debug("Scanner: fresh MC re-fetch failed for %s: %s",
                                  mint_addr[:12], exc)
+
+            # Hard reject: never open a trade with entry_mc=0 or None.
+            # BUG #1 from audit_report_v2: a zero entry_mc makes all
+            # multiplier math nonsense and poisons the learning corpus.
+            if not fresh_mc or fresh_mc <= 0:
+                logger.info(
+                    "Scanner: SKIP paper trade %s — entry_mc is 0/None after "
+                    "both eval and fresh fetch failed", (token_name or "?")[:20],
+                )
+                continue
 
             # Compute true balance from DB
             state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
@@ -1237,8 +1248,8 @@ async def run_once() -> tuple[int, int]:
                 pt = await open_paper_trade(
                     token_address=scored.get("mint", ""),
                     token_name=scored.get("name"),
-                    entry_mc=fresh_mc if fresh_mc > 0 else scored.get("mcap"),
-                    entry_price=fresh_mc if fresh_mc > 0 else scored.get("mcap"),
+                    entry_mc=fresh_mc,
+                    entry_price=fresh_mc,
                     paper_sol=paper_sol,
                     confidence=scored.get("confidence_score", 0),
                     pattern_type=scored.get("profile_tag") or scored.get("source"),
