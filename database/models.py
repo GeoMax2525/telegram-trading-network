@@ -55,6 +55,7 @@ META_CLOSE_REASONS = frozenset({
     "reset",
     "stale",      # open >2h and <1.05x
     "expired",    # open >4h and <1.20x  (also used by scans 7-day close)
+    "dead_api",   # 5 consecutive fetch_live_data failures — pair delisted or API down
 })
 
 

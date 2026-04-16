@@ -38,6 +38,10 @@ POLL_INTERVAL      = 60    # 1 minute — open trade checks (was 5 min,
                            #   ticks so SL never fired at check time)
 POST_CLOSE_INTERVAL = 600  # 10 minutes — post-close tracking
 STARTUP_DELAY      = 60
+MAX_FETCH_FAILS    = 5     # consecutive failures before auto-close
+
+# Per-trade consecutive fetch failure counter (in-memory, resets on bot restart)
+_fetch_fail_counts: dict[int, int] = {}
 
 
 # ── Open trade monitoring ────────────────────────────────────────────────────
@@ -96,20 +100,29 @@ async def _check_open_trades(bot) -> None:
     for pt in trades:
         try:
             live = await fetch_live_data(pt.token_address)
-            if not live:
+            if not live or (live.get("market_cap") or 0) <= 0:
+                _fetch_fail_counts[pt.id] = _fetch_fail_counts.get(pt.id, 0) + 1
+                fails = _fetch_fail_counts[pt.id]
                 logger.info(
-                    "Paper check id=%s %s: fetch_live_data returned None — skipping tick",
-                    pt.id, (pt.token_name or "?")[:18],
+                    "Paper check id=%s %s: no live data — fail %d/%d",
+                    pt.id, (pt.token_name or "?")[:18], fails, MAX_FETCH_FAILS,
                 )
+                if fails >= MAX_FETCH_FAILS:
+                    pnl = round(-pt.paper_sol_spent * 0.5, 4)
+                    await close_paper_trade(pt.id, "dead_api", pnl, pt.peak_mc, pt.peak_multiple)
+                    bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+                    state.paper_balance = bal
+                    logger.warning(
+                        "Paper: DEAD API %s — %d consecutive fetch failures, closing. pnl=%+.4f bal=%.4f",
+                        (pt.token_name or "?")[:18], fails, pnl, bal,
+                    )
+                    _fetch_fail_counts.pop(pt.id, None)
                 continue
 
+            # Reset failure counter on successful fetch
+            _fetch_fail_counts.pop(pt.id, None)
+
             current_mc = live.get("market_cap") or 0
-            if current_mc <= 0:
-                logger.info(
-                    "Paper check id=%s %s: current_mc=0 — skipping tick",
-                    pt.id, (pt.token_name or "?")[:18],
-                )
-                continue
 
             entry_mc = pt.entry_mc or 0
             if entry_mc <= 0:
