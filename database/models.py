@@ -2829,7 +2829,7 @@ AGENT_PARAM_DEFAULTS = {
     # The mint-suffix allowlist in bot.scanner.ALLOWED_MINT_SUFFIXES is the
     # primary ecosystem gate (hard-coded, Agent 6 cannot touch).
     "safety_max_dev_pct":    15.0,  # reject if dev wallet >= this %
-    "safety_max_top10_pct":  40.0,  # reject if top 10 holders >= this %
+    "safety_max_top10_pct":  80.0,  # reject if top 10 holders >= this % (40 was too tight for memecoins)
     "safety_min_holders":    50.0,  # reject if holder count < this
 
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
@@ -3329,6 +3329,21 @@ async def init_agent_params() -> int:
             _fv5.error("Force reset v5: STEP 5 verify FAILED — %s", exc)
 
         added += 1
+
+    # One-shot: raise top10 threshold from 40 to 80 (was blocking all memecoins)
+    try:
+        async with AsyncSessionLocal() as session:
+            top10_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "safety_max_top10_pct")
+            )).scalar_one_or_none()
+            if top10_row and top10_row.param_value < 80.0:
+                logger.info("Raising safety_max_top10_pct from %.0f to 80", top10_row.param_value)
+                top10_row.param_value = 80.0
+                top10_row.updated_at = datetime.utcnow()
+                await session.commit()
+                added += 1
+    except Exception as exc:
+        logger.warning("top10 threshold migration failed: %s", exc)
 
     return added
 
