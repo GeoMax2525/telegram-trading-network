@@ -114,6 +114,20 @@ async def main() -> None:
 
     db_type = "PostgreSQL" if DATABASE_URL.startswith("postgresql") else "SQLite"
     logger.info("Using %s (%s)", db_type, DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else DATABASE_URL)
+
+    # Log Helius config so we know immediately if the API key is missing
+    from bot.config import HELIUS_API_KEY, HELIUS_RPC_URL
+    key_preview = HELIUS_API_KEY[:8] + "..." if len(HELIUS_API_KEY) > 8 else HELIUS_API_KEY
+    is_demo = HELIUS_API_KEY == "demo"
+    logger.info(
+        "Helius: key=%s rpc=%s %s",
+        key_preview,
+        HELIUS_RPC_URL[:40] + "..." if len(HELIUS_RPC_URL) > 40 else HELIUS_RPC_URL,
+        "WARNING: DEMO KEY -- wallet data will fail!" if is_demo else "OK Developer plan",
+    )
+    if is_demo:
+        logger.warning("HELIUS_API_KEY is 'demo' — set HELIUS_API_KEY env var for wallet/transaction data")
+
     await init_db()
     added = await init_agent_params()
     if added:
@@ -163,6 +177,9 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
+        # Clean up shared Helius session
+        from bot.helius import close_session as _close_helius
+        await _close_helius()
         logger.info("Bot stopped.")
 
 

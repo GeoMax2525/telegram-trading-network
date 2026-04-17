@@ -27,7 +27,14 @@ from datetime import datetime
 
 import aiohttp
 
-from bot.config import HELIUS_RPC_URL, HELIUS_API_KEY
+from bot.config import HELIUS_API_KEY
+from bot.helius import (
+    get_address_transactions,
+    get_address_transactions_all,
+    get_signatures_for_address,
+    parse_transactions,
+    get_multiple_address_transactions,
+)
 from bot.scanner import fetch_token_data, parse_token_metrics
 from database.models import (
     get_last_agent_run, log_agent_run,
@@ -39,81 +46,37 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
-HELIUS_ENHANCED_URL = "https://api.helius.xyz/v0/transactions"
-POLL_INTERVAL       = 1800   # 30 minutes (chaos mode: was 1 hour)
+POLL_INTERVAL       = 1800   # 30 minutes
 STARTUP_DELAY       = 90     # seconds after bot start
-MAX_WALLETS_PER_RUN = 30     # cap to avoid rate limits
+MAX_WALLETS_PER_RUN = 50     # raised from 30 — Developer plan supports 50 req/s
 EARLY_MC_THRESHOLD  = 200_000  # $200K MC = early entry
 
 
 # ── Helius helpers ────────────────────────────────────────────────────────────
+# All Helius calls now go through bot.helius shared client with:
+#   - Connection pooling (persistent session)
+#   - Exponential backoff retry on 429/5xx
+#   - Rate-limit aware semaphore (40 concurrent, under 50 req/s cap)
+#   - Proper error logging (no more silent failures)
 
 async def _get_signatures(address: str, limit: int = 200) -> list[dict]:
-    """
-    getSignaturesForAddress via Helius RPC.
-    Works for both token mints (to find early buyers) and wallet addresses
-    (to build trade history).
-    """
-    payload = {
-        "jsonrpc": "2.0", "id": 1,
-        "method": "getSignaturesForAddress",
-        "params": [address, {"limit": limit, "commitment": "confirmed"}],
-    }
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as session:
-            async with session.post(
-                HELIUS_RPC_URL, json=payload,
-                headers={"Content-Type": "application/json"},
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                return data.get("result") or []
-    except Exception as exc:
-        logger.debug("getSignaturesForAddress failed for %s: %s", address[:12], exc)
-        return []
+    """getSignaturesForAddress via shared Helius client."""
+    return await get_signatures_for_address(address, limit=limit, label=f"wa_sigs:{address[:8]}")
 
 
 async def _parse_transactions(signatures: list[str]) -> list[dict]:
-    """
-    Helius Enhanced Transactions API — batch parse up to 100 signatures.
-    Returns enriched transaction objects with tokenTransfers, type, etc.
-    """
-    if not signatures:
-        return []
-    url = f"{HELIUS_ENHANCED_URL}?api-key={HELIUS_API_KEY}"
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=20)
-        ) as session:
-            async with session.post(
-                url,
-                json={"transactions": signatures[:100]},
-                headers={"Content-Type": "application/json"},
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json(content_type=None)
-                return data if isinstance(data, list) else []
-    except Exception as exc:
-        logger.debug("parse_transactions failed: %s", exc)
-        return []
+    """Batch parse signatures via shared Helius client."""
+    return await parse_transactions(signatures, label="wa_parse_tx")
 
 
 # ── Early buyer detection ────────────────────────────────────────────────────
 
 async def _fetch_sigs_with_retry(address: str, limit: int = 200, retries: int = 3) -> list[dict]:
-    """Fetch signatures with retry logic. Tries up to retries times with 2s delay."""
-    for attempt in range(retries):
-        sigs = await _get_signatures(address, limit=limit)
-        if sigs:
-            return sigs
-        if attempt < retries - 1:
-            logger.info("Early buyers: 0 sigs for %s, retry %d/%d...", address[:12], attempt + 2, retries)
-            await asyncio.sleep(2)
-    return []
+    """Fetch signatures — retry is handled by shared Helius client."""
+    sigs = await _get_signatures(address, limit=limit)
+    if not sigs:
+        logger.info("Early buyers: 0 sigs for %s after retries", address[:12])
+    return sigs
 
 
 async def _get_pair_address(mint: str) -> str | None:
@@ -174,54 +137,94 @@ async def _get_early_buyers(
     Returns deduplicated wallet addresses that bought this token
     within the first window_minutes after launch.
 
-    Strategy:
-    1. Try getSignaturesForAddress on token mint (with retries)
-    2. If 0 results, try on the pair/pool address
-    3. If still 0, fallback to DexScreener trades endpoint
+    Strategy (Enhanced API first, then fallbacks):
+    1. Try Enhanced Transactions API on token mint (richest data)
+    2. If 0 results, try getSignaturesForAddress + parse (wider net)
+    3. If 0 results, try on the pair/pool address
+    4. If still 0, fallback to DexScreener trades endpoint
     """
     buyers: set[str] = set()
 
-    # ── Attempt 1: signatures on token mint ──────────────────────────
-    all_sigs = await _fetch_sigs_with_retry(mint, limit=500, retries=3)
+    # Determine launch time for the window filter
+    launch_time: int | None = None
+    if created_at_ms:
+        launch_time = created_at_ms // 1000
 
-    # ── Attempt 2: signatures on pair address ────────────────────────
-    if not all_sigs:
-        pair_addr = await _get_pair_address(mint)
-        if pair_addr:
-            logger.info("Early buyers: trying pair address %s", pair_addr[:12])
-            all_sigs = await _fetch_sigs_with_retry(pair_addr, limit=500, retries=2)
+    # ── Attempt 1: Enhanced Transactions API on token mint ───────────
+    # This returns pre-parsed enriched data — much better than raw sigs
+    enhanced_txns = await get_address_transactions(
+        mint, limit=100, label=f"eb_enhanced:{mint[:8]}",
+    )
+    if enhanced_txns:
+        if launch_time is None:
+            timestamps = [t.get("timestamp", 0) for t in enhanced_txns if t.get("timestamp")]
+            if timestamps:
+                launch_time = min(timestamps)
 
-    # ── Process Helius signatures ────────────────────────────────────
-    if all_sigs:
-        valid = [s for s in all_sigs if s.get("blockTime") and not s.get("err")]
-
-        if valid:
-            if created_at_ms:
-                launch_time = created_at_ms // 1000
-            else:
-                launch_time = min(s["blockTime"] for s in valid)
-
+        if launch_time:
             cutoff = launch_time + window_minutes * 60
-            early_sigs = [s["signature"] for s in valid if s["blockTime"] <= cutoff]
-
-            logger.info(
-                "Early buyers %s: %d total sigs, launch=%d, early=%d",
-                mint[:12], len(valid), launch_time, len(early_sigs),
-            )
-
-            if early_sigs:
-                parsed = await _parse_transactions(early_sigs[:100])
-                for tx in parsed:
+            for tx in enhanced_txns:
+                tx_ts = tx.get("timestamp", 0)
+                if tx_ts and tx_ts <= cutoff:
                     fp = tx.get("feePayer")
                     if fp:
                         buyers.add(fp)
-                    # Also check tokenTransfers for receiver wallets
                     for transfer in (tx.get("tokenTransfers") or []):
                         to_addr = transfer.get("toUserAccount")
                         if to_addr and transfer.get("mint") == mint:
                             buyers.add(to_addr)
+            logger.info(
+                "Early buyers %s: Enhanced API → %d txns, launch=%d, found %d wallets",
+                mint[:12], len(enhanced_txns), launch_time, len(buyers),
+            )
 
-    # ── Attempt 3: DexScreener trades fallback ───────────────────────
+    # ── Attempt 2: getSignaturesForAddress + parse ───────────────────
+    if not buyers:
+        all_sigs = await _fetch_sigs_with_retry(mint, limit=500)
+        if all_sigs:
+            valid = [s for s in all_sigs if s.get("blockTime") and not s.get("err")]
+            if valid:
+                if launch_time is None:
+                    launch_time = min(s["blockTime"] for s in valid)
+                cutoff = launch_time + window_minutes * 60
+                early_sigs = [s["signature"] for s in valid if s["blockTime"] <= cutoff]
+                logger.info(
+                    "Early buyers %s: %d total sigs, launch=%d, early=%d",
+                    mint[:12], len(valid), launch_time, len(early_sigs),
+                )
+                if early_sigs:
+                    parsed = await _parse_transactions(early_sigs[:100])
+                    for tx in parsed:
+                        fp = tx.get("feePayer")
+                        if fp:
+                            buyers.add(fp)
+                        for transfer in (tx.get("tokenTransfers") or []):
+                            to_addr = transfer.get("toUserAccount")
+                            if to_addr and transfer.get("mint") == mint:
+                                buyers.add(to_addr)
+
+    # ── Attempt 3: try pair/pool address ─────────────────────────────
+    if not buyers:
+        pair_addr = await _get_pair_address(mint)
+        if pair_addr:
+            logger.info("Early buyers: trying pair address %s", pair_addr[:12])
+            pair_txns = await get_address_transactions(
+                pair_addr, limit=100, label=f"eb_pair:{pair_addr[:8]}",
+            )
+            if pair_txns and launch_time:
+                cutoff = launch_time + window_minutes * 60
+                for tx in pair_txns:
+                    tx_ts = tx.get("timestamp", 0)
+                    if tx_ts and tx_ts <= cutoff:
+                        fp = tx.get("feePayer")
+                        if fp:
+                            buyers.add(fp)
+                        for transfer in (tx.get("tokenTransfers") or []):
+                            to_addr = transfer.get("toUserAccount")
+                            if to_addr and transfer.get("mint") == mint:
+                                buyers.add(to_addr)
+
+    # ── Attempt 4: DexScreener trades fallback ───────────────────────
     if not buyers:
         pair_addr = await _get_pair_address(mint)
         if pair_addr:
@@ -265,23 +268,15 @@ async def _analyze_wallet_trades(wallet_address: str) -> dict:
              "multiples": [], "entry_mcs": [], "early_entries": 0,
              "per_token": []}
 
-    sigs_data = await _get_signatures(wallet_address, limit=200)
-    if not sigs_data:
+    # Use Enhanced Transactions API — returns pre-parsed enriched data
+    # with tokenTransfers, nativeTransfers, timestamp already structured.
+    # Paginate up to 300 txns (3 pages of 100) for deeper history.
+    all_parsed = await get_address_transactions_all(
+        wallet_address, max_txns=300, label=f"wa_trades:{wallet_address[:8]}",
+    )
+    if not all_parsed:
+        logger.info("Wallet trades %s: 0 transactions from Enhanced API", wallet_address[:12])
         return empty
-
-    valid_sigs = [
-        s["signature"] for s in sigs_data
-        if s.get("blockTime") and not s.get("err")
-    ]
-    if not valid_sigs:
-        return empty
-
-    # Parse transactions in batches of 100
-    all_parsed = []
-    for i in range(0, min(len(valid_sigs), 200), 100):
-        batch = valid_sigs[i:i + 100]
-        parsed = await _parse_transactions(batch)
-        all_parsed.extend(parsed)
 
     # Track token flows: mint -> {bought_sol, sold_sol, first_buy_ts, last_sell_ts}
     token_flows: dict[str, dict] = defaultdict(
@@ -773,15 +768,26 @@ async def run_once() -> tuple[int, int]:
         f" since {since.strftime('%Y-%m-%d %H:%M')}" if since else "",
     )
 
-    # Step 1: Collect unique wallet addresses from early buyers
+    # Step 1: Collect unique wallet addresses from early buyers (concurrent)
     all_wallets: set[str] = set()
-    for scan in winning_scans:
+
+    async def _scan_buyers(scan):
         buyers = await _get_early_buyers(scan.contract_address)
-        all_wallets.update(buyers)
         logger.info(
             "Wallet Analyst: %s → %d early buyers (peak %.1fx)",
             scan.token_name, len(buyers), scan.peak_multiplier or 0,
         )
+        return buyers
+
+    buyer_results = await asyncio.gather(
+        *[_scan_buyers(s) for s in winning_scans],
+        return_exceptions=True,
+    )
+    for res in buyer_results:
+        if isinstance(res, list):
+            all_wallets.update(res)
+        elif isinstance(res, Exception):
+            logger.warning("Wallet Analyst: early buyer scan failed: %s", res)
 
     if not all_wallets:
         await log_agent_run(
@@ -795,93 +801,103 @@ async def run_once() -> tuple[int, int]:
     logger.info("Wallet Analyst: analyzing %d wallets (capped at %d)",
                 len(wallet_list), MAX_WALLETS_PER_RUN)
 
-    # Step 2: Analyze each wallet's real trade history
+    # Step 2: Analyze each wallet's real trade history (concurrent batches)
     wallets_saved = 0
-    for address in wallet_list:
-        try:
-            stats = await _analyze_wallet_trades(address)
-        except Exception as exc:
-            logger.warning("Wallet Analyst: failed to analyze %s: %s", address[:12], exc)
-            continue
+    analyze_semaphore = asyncio.Semaphore(10)  # 10 concurrent wallet analyses
 
-        total = stats["total_trades"]
-        if total < 1:
-            continue  # no completed trades found
-
-        wins = stats["wins"]
-        losses = stats["losses"]
-        multiples = stats["multiples"]
-        entry_mcs = stats["entry_mcs"]
-        early_entries = stats["early_entries"]
-
-        avg_mult = sum(multiples) / len(multiples) if multiples else 1.0
-        avg_entry = sum(entry_mcs) / len(entry_mcs) if entry_mcs else None
-        win_rate = wins / total if total > 0 else 0.0
-        early_rate = early_entries / total if total > 0 else 0.0
-
-        # Persist per-token records so classifiers + cluster detection
-        # can read timestamps later. Token.first_seen_at is the best-effort
-        # launch-time proxy — we look up each token once.
-        for rec in stats.get("per_token", []):
-            mint = rec["mint"]
-            token_launch_at = None
+    async def _analyze_and_save(address: str) -> bool:
+        """Analyze a single wallet and save if it passes scoring. Returns True if saved."""
+        async with analyze_semaphore:
             try:
-                async with AsyncSessionLocal() as s:
-                    tok = (await s.execute(
-                        select(Token).where(Token.mint == mint)
-                    )).scalar_one_or_none()
-                    if tok and tok.first_seen_at:
-                        token_launch_at = tok.first_seen_at
+                stats = await _analyze_wallet_trades(address)
             except Exception as exc:
-                logger.warning("Wallet analyst: token lookup failed for %s: %s", mint[:12], exc)
-            try:
-                await upsert_wallet_token_trade(
-                    wallet_address=address,
-                    token_address=mint,
-                    first_buy_at=rec["first_buy_at"],
-                    last_sell_at=rec["last_sell_at"],
-                    total_bought_sol=rec["bought_sol"],
-                    total_sold_sol=rec["sold_sol"],
-                    multiple=rec["multiple"],
-                    entry_mcap=rec["entry_mcap"],
-                    token_launch_at=token_launch_at,
-                )
-            except Exception as exc:
-                logger.debug("persist wallet_token_trade %s/%s failed: %s",
-                             address[:12], mint[:12], exc)
+                logger.warning("Wallet Analyst: failed to analyze %s: %s", address[:12], exc)
+                return False
 
-        # Classify now that per-token rows are fresh
-        wallet_type, score_bonus = await _classify_wallet(address)
+            total = stats["total_trades"]
+            if total < 1:
+                return False
 
-        score, tier = await _score_wallet(
-            wins, losses, total, avg_mult, early_rate,
-            score_bonus=score_bonus,
-        )
-        # wallet_min_score_to_save gate — was hardcoded tier>0, now a DB param
-        min_save = (await get_params("wallet_min_score_to_save"))["wallet_min_score_to_save"]
-        if score < min_save:
-            continue
+            wins = stats["wins"]
+            losses = stats["losses"]
+            multiples = stats["multiples"]
+            entry_mcs = stats["entry_mcs"]
+            early_entries = stats["early_entries"]
 
-        await upsert_wallet(
-            address=address,
-            score=score,
-            tier=tier,
-            win_rate=round(win_rate, 4),
-            avg_multiple=round(avg_mult, 2),
-            wins=wins,
-            losses=losses,
-            total_trades=total,
-            avg_entry_mcap=avg_entry,
-            wallet_type=wallet_type,
-        )
-        wallets_saved += 1
+            avg_mult = sum(multiples) / len(multiples) if multiples else 1.0
+            avg_entry = sum(entry_mcs) / len(entry_mcs) if entry_mcs else None
+            win_rate = wins / total if total > 0 else 0.0
+            early_rate = early_entries / total if total > 0 else 0.0
 
-        logger.info(
-            "Wallet Analyst: %s..%s score=%.0f tier=%d wr=%.0f%% avg=%.1fx "
-            "trades=%d early=%.0f%%",
-            address[:4], address[-4:], score, tier,
-            win_rate * 100, avg_mult, total, early_rate * 100,
-        )
+            # Persist per-token records
+            for rec in stats.get("per_token", []):
+                mint = rec["mint"]
+                token_launch_at = None
+                try:
+                    async with AsyncSessionLocal() as s:
+                        tok = (await s.execute(
+                            select(Token).where(Token.mint == mint)
+                        )).scalar_one_or_none()
+                        if tok and tok.first_seen_at:
+                            token_launch_at = tok.first_seen_at
+                except Exception as exc:
+                    logger.warning("Wallet analyst: token lookup failed for %s: %s", mint[:12], exc)
+                try:
+                    await upsert_wallet_token_trade(
+                        wallet_address=address,
+                        token_address=mint,
+                        first_buy_at=rec["first_buy_at"],
+                        last_sell_at=rec["last_sell_at"],
+                        total_bought_sol=rec["bought_sol"],
+                        total_sold_sol=rec["sold_sol"],
+                        multiple=rec["multiple"],
+                        entry_mcap=rec["entry_mcap"],
+                        token_launch_at=token_launch_at,
+                    )
+                except Exception as exc:
+                    logger.debug("persist wallet_token_trade %s/%s failed: %s",
+                                 address[:12], mint[:12], exc)
+
+            wallet_type, score_bonus = await _classify_wallet(address)
+
+            score, tier = await _score_wallet(
+                wins, losses, total, avg_mult, early_rate,
+                score_bonus=score_bonus,
+            )
+            min_save = (await get_params("wallet_min_score_to_save"))["wallet_min_score_to_save"]
+            if score < min_save:
+                return False
+
+            await upsert_wallet(
+                address=address,
+                score=score,
+                tier=tier,
+                win_rate=round(win_rate, 4),
+                avg_multiple=round(avg_mult, 2),
+                wins=wins,
+                losses=losses,
+                total_trades=total,
+                avg_entry_mcap=avg_entry,
+                wallet_type=wallet_type,
+            )
+
+            logger.info(
+                "Wallet Analyst: %s..%s score=%.0f tier=%d wr=%.0f%% avg=%.1fx "
+                "trades=%d early=%.0f%%",
+                address[:4], address[-4:], score, tier,
+                win_rate * 100, avg_mult, total, early_rate * 100,
+            )
+            return True
+
+    results = await asyncio.gather(
+        *[_analyze_and_save(addr) for addr in wallet_list],
+        return_exceptions=True,
+    )
+    for res in results:
+        if res is True:
+            wallets_saved += 1
+        elif isinstance(res, Exception):
+            logger.warning("Wallet Analyst: wallet analysis exception: %s", res)
 
     # Step 3: Cluster detection — cross-wallet co-timing. Runs over
     # every wallet in the Wallet table (not just this batch) so we

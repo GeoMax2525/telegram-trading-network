@@ -18,7 +18,7 @@ import logging
 
 import aiohttp
 
-from bot.config import HELIUS_RPC_URL
+from bot.helius import rpc_call
 
 logger = logging.getLogger(__name__)
 
@@ -30,20 +30,6 @@ _TIMEOUT      = aiohttp.ClientTimeout(total=30)
 _JSON_HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
 
 
-# ── RPC helper ────────────────────────────────────────────────────────────────
-
-async def _rpc_post(payload: dict) -> dict:
-    """POST *payload* to the Helius RPC endpoint."""
-    async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-        async with session.post(
-            HELIUS_RPC_URL,
-            json=payload,
-            headers=_JSON_HEADERS,
-        ) as resp:
-            resp.raise_for_status()
-            return await resp.json()
-
-
 # ── Token balance ─────────────────────────────────────────────────────────────
 
 async def get_token_balance(wallet_address: str, token_mint: str) -> int:
@@ -51,18 +37,14 @@ async def get_token_balance(wallet_address: str, token_mint: str) -> int:
     Returns the raw (integer) SPL token balance held by *wallet_address*
     for the given *token_mint*.  Returns 0 if no account exists or on error.
     """
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getTokenAccountsByOwner",
-        "params": [
-            wallet_address,
-            {"mint": token_mint},
-            {"encoding": "jsonParsed"},
-        ],
-    }
     try:
-        data     = await _rpc_post(payload)
+        data     = await rpc_call(
+            "getTokenAccountsByOwner",
+            [wallet_address, {"mint": token_mint}, {"encoding": "jsonParsed"}],
+            label="trading_balance",
+        )
+        if data is None:
+            return 0
         accounts = data.get("result", {}).get("value", [])
         if not accounts:
             return 0

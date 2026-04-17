@@ -38,7 +38,13 @@ from datetime import datetime, timedelta
 import aiohttp
 
 from bot import state
-from bot.config import HELIUS_RPC_URL, HELIUS_API_KEY
+from bot.config import HELIUS_API_KEY
+from bot.helius import (
+    get_address_transactions,
+    get_signatures_for_address,
+    parse_transactions,
+    rpc_call,
+)
 from bot.scanner import (
     fetch_token_data, parse_token_metrics, scan_token,
     ALLOWED_DEXES, MIN_LIQUIDITY_BY_DEX,
@@ -68,9 +74,8 @@ logger = logging.getLogger(__name__)
 
 PROFILES_URL    = "https://api.dexscreener.com/token-profiles/latest/v1"
 RUGCHECK_URL    = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
-HELIUS_ENHANCED = "https://api.helius.xyz/v0/transactions"
 
-POLL_INTERVAL   = 15     # seconds (chaos mode: was 30)
+POLL_INTERVAL   = 15     # seconds
 STARTUP_DELAY   = 60     # seconds after bot start
 INSIDER_WINDOW  = 1_800   # 30 min in seconds
 
@@ -336,7 +341,7 @@ def _fingerprint_match(
     ai_score: float,
 ) -> float:
     """
-    Returns a match score 0–100 against the winner_2x pattern fingerprint.
+    Returns a match score 0–100 against a pattern fingerprint.
     100 = perfect match on every dimension.
     """
     if pattern is None:
@@ -345,7 +350,7 @@ def _fingerprint_match(
     score = 0.0
     checks = 0
 
-    # MC range check
+    # MC range check — award partial credit for appreciated tokens too
     if pattern.mcap_range_low and pattern.mcap_range_high:
         checks += 1
         low  = pattern.mcap_range_low  * 0.5
@@ -354,6 +359,8 @@ def _fingerprint_match(
             score += 30.0
         elif mcap < low:
             score += 10.0   # smaller = riskier but not impossible
+        else:
+            score += 10.0   # above range = appreciated past pattern (not a penalty)
 
     # Liquidity check
     if pattern.avg_liquidity and pattern.avg_liquidity > 0:
@@ -371,6 +378,22 @@ def _fingerprint_match(
     confidence_weight = pattern.confidence_score / 100.0
     base_score = score / max(checks, 1)
     return round(min(base_score * confidence_weight + base_score * (1 - confidence_weight * 0.3), 100), 1)
+
+
+def _best_pattern_match(
+    patterns: list,
+    mcap: float,
+    liquidity: float,
+    ai_score: float,
+) -> float:
+    """
+    Score against ALL available patterns and return the best match.
+    This ensures mega_runner, winner_5x, winner_10x patterns are all used.
+    """
+    if not patterns:
+        return 50.0
+    scores = [_fingerprint_match(p, mcap, liquidity, ai_score) for p in patterns if p is not None]
+    return max(scores) if scores else 50.0
 
 
 # ── Source 1: New Launches ────────────────────────────────────────────────────
@@ -443,8 +466,8 @@ async def _source1_new_launches() -> list[dict]:
             "source":    "new_launch",
         }
 
-    # Run up to 10 profile checks concurrently
-    tasks = [_check_profile(p) for p in sol_profiles[:15]]
+    # Run profile checks concurrently (raised from 15 — Developer plan supports 50 req/s)
+    tasks = [_check_profile(p) for p in sol_profiles[:25]]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for r in results:
@@ -457,55 +480,20 @@ async def _source1_new_launches() -> list[dict]:
 # ── Source 2: Insider Wallet Activity ────────────────────────────────────────
 
 async def _get_wallet_sigs(wallet: str, since_ts: int) -> list[dict]:
-    """Returns recent signatures for a wallet since since_ts (Unix seconds).
-    Each entry is {"signature": str, "blockTime": int}."""
-    payload = {
-        "jsonrpc": "2.0", "id": 1,
-        "method": "getSignaturesForAddress",
-        "params": [wallet, {"limit": 20, "commitment": "confirmed"}],
-    }
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as session:
-            async with session.post(
-                HELIUS_RPC_URL, json=payload,
-                headers={"Content-Type": "application/json"},
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                sigs = data.get("result") or []
-                return [
-                    {"signature": s["signature"], "blockTime": s["blockTime"]}
-                    for s in sigs
-                    if s.get("blockTime") and s["blockTime"] >= since_ts
-                    and not s.get("err")
-                ]
-    except Exception as exc:
-        logger.debug("Scanner wallet sigs failed for %s: %s", wallet[:12], exc)
-        return []
+    """Returns recent signatures for a wallet since since_ts (Unix seconds)."""
+    sigs = await get_signatures_for_address(wallet, limit=20, label=f"scan_sigs:{wallet[:8]}")
+    return [
+        {"signature": s["signature"], "blockTime": s["blockTime"]}
+        for s in sigs
+        if s.get("blockTime") and s["blockTime"] >= since_ts
+        and not s.get("err")
+    ]
 
 
 async def _parse_transactions(sigs: list[str]) -> list[dict]:
     if not sigs:
         return []
-    url = f"{HELIUS_ENHANCED}?api-key={HELIUS_API_KEY}"
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=20)
-        ) as session:
-            async with session.post(
-                url, json={"transactions": sigs[:50]},
-                headers={"Content-Type": "application/json"},
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json(content_type=None)
-                return data if isinstance(data, list) else []
-    except Exception as exc:
-        logger.debug("Scanner parse_transactions failed: %s", exc)
-        return []
+    return await parse_transactions(sigs[:50], label="scan_parse_tx")
 
 
 async def _source2_insider_wallets() -> list[dict]:
@@ -517,7 +505,7 @@ async def _source2_insider_wallets() -> list[dict]:
     if not wallets:
         logger.info("Scanner source2: no tiered wallets in DB — source will return empty until Agent 2 or GMGN imports some")
         return []
-    logger.info("Scanner source2: checking %d tier1/2 wallets for recent buys", len(wallets[:15]))
+    logger.info("Scanner source2: checking %d tier1/2/3 wallets for recent buys", len(wallets[:30]))
 
     since_ts = int(time.time()) - INSIDER_WINDOW
     # mint -> {1: count, 2: count, 3: count}
@@ -543,7 +531,7 @@ async def _source2_insider_wallets() -> list[dict]:
 
     tasks = [
         _check_wallet(w.address, int(w.tier or 2), getattr(w, "cluster_id", None))
-        for w in wallets[:15]
+        for w in wallets[:30]   # doubled from 15 — Developer plan supports 50 req/s
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -659,7 +647,7 @@ async def _source3_volume_spikes() -> list[dict]:
             }
         return None
 
-    tasks = [_check_volume(p) for p in sol_profiles[:12]]
+    tasks = [_check_volume(p) for p in sol_profiles[:20]]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for r in results:
         if isinstance(r, dict):
@@ -725,6 +713,7 @@ async def _source4_gmgn_flagged() -> list[dict]:
 async def _evaluate_candidate(
     raw: dict,
     pattern,
+    all_patterns: list | None = None,
 ) -> dict | None:
     """
     Fetches fresh data (if not already in raw), runs rug filter,
@@ -895,8 +884,11 @@ async def _evaluate_candidate(
         logger.info("Scanner REJECTED %s: AI score %.0f < %.0f", name, ai_score, _min_ai)
         return None
 
-    # Pattern match
-    match_score = _fingerprint_match(pattern, mcap, liquidity, ai_score)
+    # Pattern match — score against ALL loaded patterns, use the best
+    if all_patterns:
+        match_score = _best_pattern_match(all_patterns, mcap, liquidity, ai_score)
+    else:
+        match_score = _fingerprint_match(pattern, mcap, liquidity, ai_score)
 
     rc_score = (rc_data or {}).get("score")
     rc_norm = (rc_data or {}).get("score_normalised")
@@ -997,7 +989,14 @@ async def run_once() -> tuple[int, int]:
     # which are correct and respect the actual trade state.
     state.pending_candidates.clear()
 
-    pattern = await get_pattern_by_type("winner_2x")
+    # Load ALL pattern types — scanner was previously only using winner_2x,
+    # completely ignoring mega_runner, winner_5x, winner_10x patterns.
+    pattern_2x   = await get_pattern_by_type("winner_2x")
+    pattern_5x   = await get_pattern_by_type("winner_5x")
+    pattern_10x  = await get_pattern_by_type("winner_10x")
+    pattern_mega = await get_pattern_by_type("mega_runner")
+    all_patterns = [p for p in [pattern_2x, pattern_5x, pattern_10x, pattern_mega] if p is not None]
+    logger.info("Scanner: loaded %d pattern types for matching", len(all_patterns))
 
     # Gather raw candidates from all 4 sources concurrently. Source 1 and
     # Source 3 both hit DexScreener PROFILES_URL (historically); Source 2
@@ -1063,11 +1062,11 @@ async def run_once() -> tuple[int, int]:
     candidates_found = len(deduped)
 
     # Evaluate (rug filter + AI score + pattern match) with concurrency cap
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(8)  # raised from 3 — Developer plan supports 50 req/s
 
     async def _bounded_eval(raw):
         async with semaphore:
-            return await _evaluate_candidate(raw, pattern)
+            return await _evaluate_candidate(raw, pattern_2x, all_patterns=all_patterns)
 
     evaluated = await asyncio.gather(
         *[_bounded_eval(c) for c in deduped[:20]],

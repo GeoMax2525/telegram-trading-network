@@ -11,9 +11,7 @@ import logging
 import os
 from typing import Optional
 
-import aiohttp
-
-from bot.config import HELIUS_RPC_URL
+from bot.helius import rpc_call, rpc_batch
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +74,7 @@ async def get_holder_info(wallet_address: str, mint: str) -> Optional[dict]:
       rank is 1-20 if wallet is a top-20 holder, None otherwise (shown as ">20").
     Returns None on failure or if the wallet holds 0 tokens.
     """
-    payload = [
+    payloads = [
         {
             "jsonrpc": "2.0", "id": 1,
             "method": "getTokenAccountsByOwner",
@@ -94,16 +92,9 @@ async def get_holder_info(wallet_address: str, mint: str) -> Optional[dict]:
         },
     ]
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
-            async with session.post(
-                HELIUS_RPC_URL,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning("Helius holder info returned HTTP %d", resp.status)
-                    return None
-                results = await resp.json()
+        results = await rpc_batch(payloads, label="holder_info")
+        if not results:
+            return None
 
         by_id = {r["id"]: r for r in results}
 
@@ -153,7 +144,7 @@ async def get_token_holding(wallet_address: str, mint: str) -> Optional[dict]:
       {"balance": float, "pct_supply": float}
     Returns None on failure or if the wallet holds 0 tokens.
     """
-    payload = [
+    payloads = [
         {
             "jsonrpc": "2.0", "id": 1,
             "method": "getTokenAccountsByOwner",
@@ -166,15 +157,9 @@ async def get_token_holding(wallet_address: str, mint: str) -> Optional[dict]:
         },
     ]
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
-            async with session.post(
-                HELIUS_RPC_URL,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                results = await resp.json()
+        results = await rpc_batch(payloads, label="token_holding")
+        if not results:
+            return None
 
         by_id = {r["id"]: r for r in results}
 
@@ -205,23 +190,12 @@ async def get_sol_balance(address: str) -> Optional[float]:
     Fetches the SOL balance for *address* via Solana mainnet RPC.
     Returns balance in SOL (not lamports), or None on error.
     """
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getBalance",
-        "params": [address],
-    }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                HELIUS_RPC_URL,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                data = await resp.json()
-                lamports = data["result"]["value"]
-                return round(lamports / 1_000_000_000, 4)
+        data = await rpc_call("getBalance", [address], label="sol_balance")
+        if data is None:
+            return None
+        lamports = data["result"]["value"]
+        return round(lamports / 1_000_000_000, 4)
     except Exception as exc:
         logger.error("Failed to fetch SOL balance for %s: %s", address, exc)
         return None

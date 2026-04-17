@@ -2300,8 +2300,8 @@ async def cmd_deepanalyze(message: Message):
         early_wallets: set[str] = set(early_wallet_list)
 
         # Also get sig count + volume via direct Helius call for stats
-        from bot.config import HELIUS_RPC_URL
-        all_sigs = await _get_signatures(address, limit=200)
+        from bot.helius import get_signatures_for_address as _get_sigs_helius
+        all_sigs = await _get_sigs_helius(address, limit=200, label="deep_analyze")
         valid_sigs = [s for s in all_sigs if s.get("blockTime") and not s.get("err")]
 
         launch_ts = (created_at_ms // 1000) if created_at_ms else (
