@@ -28,13 +28,15 @@ logger = logging.getLogger(__name__)
 #
 # Per-DEX minimum liquidity floors are enforced downstream in
 # bot/agents/scanner_agent.py::_evaluate_candidate.
-ALLOWED_DEXES = {"raydium", "pumpswap", "orca"}
+ALLOWED_DEXES = {"raydium", "pumpswap", "orca", "meteora", "meteoradbc"}
 
 # Per-DEX min liquidity floors (USD) used by scanner_agent._evaluate_candidate.
 MIN_LIQUIDITY_BY_DEX = {
-    "raydium":  10_000,
-    "pumpswap": 5_000,
-    "orca":     10_000,
+    "raydium":    10_000,
+    "pumpswap":    5_000,
+    "orca":       10_000,
+    "meteora":    10_000,
+    "meteoradbc": 10_000,
 }
 
 
