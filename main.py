@@ -30,6 +30,7 @@ from bot.agents.learning_loop import learning_loop
 from bot.agents.paper_monitor import paper_monitor_loop
 from bot.agents.mc_repair import mc_repair_loop
 from bot.agents.gmgn_agent import gmgn_agent_loop
+from bot.agents.tg_scraper import tg_scraper_loop
 from database.models import init_db, init_agent_params, get_param, compute_paper_balance, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses, seed_ai_trade_params
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -170,6 +171,14 @@ async def main() -> None:
     asyncio.create_task(paper_monitor_loop(bot))
     asyncio.create_task(gmgn_agent_loop())
     asyncio.create_task(mc_repair_loop())
+
+    # TG scraper — only starts if TG_SESSION_STRING is set
+    import os as _os
+    if _os.getenv("TG_SESSION_STRING"):
+        asyncio.create_task(tg_scraper_loop())
+        logger.info("TG scraper: queued for startup (session string found)")
+    else:
+        logger.info("TG scraper: skipped (TG_SESSION_STRING not set)")
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     try:

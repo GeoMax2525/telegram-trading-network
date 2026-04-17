@@ -477,15 +477,43 @@ async def score_candidate(candidate: dict) -> dict:
         confidence = max(0, confidence - 10)
         logger.info("Agent5: name penalty -10 on %s (hits=%d)", token_name[:20], spam_hits)
 
+    # TG signal boost — if a signal channel flagged this token, boost confidence
+    tg_boost = 0.0
+    mint = candidate.get("mint", "")
+    if mint:
+        try:
+            from database.models import get_recent_tg_signal
+            tg_sig = await get_recent_tg_signal(mint, within_minutes=30)
+            if tg_sig:
+                tg_params = await get_params(
+                    "tg_signal_confidence_boost",
+                    "tg_signal_volume_boost",
+                    "tg_signal_clean_dev_boost",
+                )
+                tg_boost += tg_params.get("tg_signal_confidence_boost", 10.0)
+                # Volume boost: high volume from signal
+                if tg_sig.volume and tg_sig.volume > 50_000:
+                    tg_boost += tg_params.get("tg_signal_volume_boost", 5.0)
+                # Clean dev boost: 0% dev
+                if tg_sig.dev_pct is not None and tg_sig.dev_pct == 0:
+                    tg_boost += tg_params.get("tg_signal_clean_dev_boost", 5.0)
+                confidence = min(100, confidence + tg_boost)
+                logger.info(
+                    "Agent5: TG signal boost +%.0f on %s (channel=%s)",
+                    tg_boost, candidate.get("name", "?")[:20], tg_sig.channel,
+                )
+        except Exception as exc:
+            logger.debug("Agent5: TG signal check failed: %s", exc)
+
     # Hard gates for LIVE execution (both rug + chart must pass)
     rug_gate_pass = rug >= 50
     chart_gate_pass = chart >= 50
     live_gates_pass = rug_gate_pass and chart_gate_pass
 
     logger.info(
-        "Agent5: %s mode=%s weights=%s conf=%.1f rug=%.0f(%s) chart=%.0f(%s)",
+        "Agent5: %s mode=%s weights=%s conf=%.1f rug=%.0f(%s) chart=%.0f(%s) tg=%+.0f",
         candidate.get("name", "?")[:20], state.trade_mode, weight_set,
-        confidence, rug, rug_gate_pass, chart, chart_gate_pass,
+        confidence, rug, rug_gate_pass, chart, chart_gate_pass, tg_boost,
     )
 
     # Decision thresholds from DB (Agent 6 adjustable)

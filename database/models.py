@@ -172,6 +172,40 @@ class WalletCluster(Base):
     created_at        = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
 
+# ── TG Signals table (Telegram channel scraper) ─────────────────────────────
+
+class TgSignal(Base):
+    __tablename__ = "tg_signals"
+
+    id            = Column(Integer,     primary_key=True, autoincrement=True)
+    mint          = Column(String(64),  nullable=False, index=True)
+    channel       = Column(String(64),  nullable=False)
+    mcap          = Column(Float,       nullable=True)
+    age_minutes   = Column(Float,       nullable=True)
+    dev_pct       = Column(Float,       nullable=True)
+    holders       = Column(Integer,     nullable=True)
+    top10_pct     = Column(Float,       nullable=True)
+    volume        = Column(Float,       nullable=True)
+    liquidity     = Column(Float,       nullable=True)
+    platform      = Column(String(32),  nullable=True)
+    buy_count_m5  = Column(Integer,     nullable=True)
+    sell_count_m5 = Column(Integer,     nullable=True)
+    signal_time   = Column(DateTime,    default=datetime.utcnow, nullable=False)
+
+
+class TgChannelStats(Base):
+    __tablename__ = "tg_channel_stats"
+
+    channel       = Column(String(64),  primary_key=True)
+    signals_total = Column(Integer,     nullable=False, default=0)
+    wins          = Column(Integer,     nullable=False, default=0)
+    losses        = Column(Integer,     nullable=False, default=0)
+    win_rate      = Column(Float,       nullable=False, default=0.0)
+    avg_multiple  = Column(Float,       nullable=False, default=1.0)
+    reliability   = Column(Float,       nullable=False, default=50.0)  # 0-100
+    updated_at    = Column(DateTime,    default=datetime.utcnow, nullable=False)
+
+
 # ── Patterns table (Agent 3 — Pattern Engine) ────────────────────────────────
 
 class Pattern(Base):
@@ -2848,6 +2882,12 @@ AGENT_PARAM_DEFAULTS = {
 
     # One-shot migration flag for re-scoring existing wallets under new thresholds
     "wallet_rescore_v2_done": 0.0,
+
+    # TG scraper — confidence boost when a token has a TG signal.
+    # Channel list is in env var TG_SCRAPER_CHANNELS (comma-separated).
+    "tg_signal_confidence_boost": 10.0,
+    "tg_signal_volume_boost":     5.0,
+    "tg_signal_clean_dev_boost":  5.0,
 }
 
 
@@ -3437,3 +3477,87 @@ async def get_post_close_stats() -> dict:
         "early_pct": round(too_early / total * 100) if total > 0 else 0,
         "late_pct": round(too_late / total * 100) if total > 0 else 0,
     }
+
+
+# ── TG Signal helpers ───────────────────────────────────────────────────────
+
+async def save_tg_signal(
+    mint: str,
+    channel: str,
+    mcap: float | None = None,
+    age_minutes: float | None = None,
+    dev_pct: float | None = None,
+    holders: int | None = None,
+    top10_pct: float | None = None,
+    volume: float | None = None,
+    liquidity: float | None = None,
+    platform: str | None = None,
+    buy_count_m5: int | None = None,
+    sell_count_m5: int | None = None,
+) -> "TgSignal":
+    async with AsyncSessionLocal() as session:
+        sig = TgSignal(
+            mint=mint, channel=channel, mcap=mcap,
+            age_minutes=age_minutes, dev_pct=dev_pct,
+            holders=holders, top10_pct=top10_pct,
+            volume=volume, liquidity=liquidity,
+            platform=platform, buy_count_m5=buy_count_m5,
+            sell_count_m5=sell_count_m5,
+        )
+        session.add(sig)
+        await session.commit()
+        return sig
+
+
+async def get_recent_tg_signal(mint: str, within_minutes: float = 30) -> "TgSignal | None":
+    """Returns the most recent TG signal for this mint within the window, or None."""
+    cutoff = datetime.utcnow() - timedelta(minutes=within_minutes)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(TgSignal)
+            .where(TgSignal.mint == mint, TgSignal.signal_time >= cutoff)
+            .order_by(TgSignal.signal_time.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
+async def upsert_tg_channel_stats(
+    channel: str,
+    wins: int = 0,
+    losses: int = 0,
+    avg_multiple: float = 1.0,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(
+            select(TgChannelStats).where(TgChannelStats.channel == channel)
+        )).scalar_one_or_none()
+        if row is None:
+            row = TgChannelStats(
+                channel=channel,
+                signals_total=wins + losses,
+                wins=wins, losses=losses,
+                win_rate=wins / (wins + losses) if (wins + losses) > 0 else 0.0,
+                avg_multiple=avg_multiple,
+                reliability=50.0,
+            )
+            session.add(row)
+        else:
+            row.wins += wins
+            row.losses += losses
+            row.signals_total = row.wins + row.losses
+            total = row.wins + row.losses
+            row.win_rate = row.wins / total if total > 0 else 0.0
+            # Reliability = weighted win rate (0-100)
+            row.reliability = min(100.0, row.win_rate * 100 * min(total / 10, 1.0))
+            row.updated_at = datetime.utcnow()
+        await session.commit()
+
+
+async def get_tg_channel_reliability(channel: str) -> float:
+    """Returns 0-100 reliability score for a channel. Default 50 if unknown."""
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(
+            select(TgChannelStats).where(TgChannelStats.channel == channel)
+        )).scalar_one_or_none()
+        return row.reliability if row else 50.0
