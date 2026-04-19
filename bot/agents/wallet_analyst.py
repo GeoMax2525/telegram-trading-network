@@ -544,10 +544,15 @@ async def _classify_wallet(wallet_address: str) -> tuple[str, float]:
         # Entry within 10 min of launch — delay = first_buy - launch
         # Negative delta means wallet bought BEFORE we first saw the token
         # (they're definitely "first in") so treat as 0.
-        if t.first_buy_at is None or t.token_launch_at is None:
-            # No launch time → can't verify "first 10 min" — skip (honest miss)
+        if t.first_buy_at is None:
             continue
-        delay = (t.first_buy_at - t.token_launch_at).total_seconds()
+        if t.token_launch_at is None:
+            # No launch time from Token table — assume this wallet WAS early
+            # since it bought a token that went 2x+. Better to over-classify
+            # than miss every insider because of missing metadata.
+            delay = 0
+        else:
+            delay = (t.first_buy_at - t.token_launch_at).total_seconds()
         if delay > EARLY_INSIDER_MAX_ENTRY_DELAY:
             continue
         early_insider_hits += 1
@@ -558,7 +563,10 @@ async def _classify_wallet(wallet_address: str) -> tuple[str, float]:
     # Sniper-holder check
     sniper_hits = 0
     for t in trades:
-        if t.first_buy_at is None or t.token_launch_at is None:
+        if t.first_buy_at is None:
+            continue
+        if t.token_launch_at is None:
+            # No launch time — can't verify sniper timing, skip
             continue
         delay = (t.first_buy_at - t.token_launch_at).total_seconds()
         if delay > SNIPER_BUY_WINDOW_SEC:

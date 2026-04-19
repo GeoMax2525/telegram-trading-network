@@ -2833,7 +2833,7 @@ AGENT_PARAM_DEFAULTS = {
     "safety_min_holders":    50.0,  # reject if holder count < this
 
     # Global trailing-stop config (per-type triggers live in ai_trade_params)
-    "trail_sl_enabled":      0.0,  # 0 = off kill switch, 1 = on
+    "trail_sl_enabled":      1.0,  # 0 = off kill switch, 1 = on
     "trail_sl_pct":          0.20, # distance from peak when trailing active
 
     # Time-based exits (meta, not counted as win/loss)
@@ -2885,7 +2885,7 @@ AGENT_PARAM_DEFAULTS = {
 
     # TG scraper — confidence boost when a token has a TG signal.
     # Channel list is in env var TG_SCRAPER_CHANNELS (comma-separated).
-    "tg_signal_confidence_boost": 10.0,
+    "tg_signal_confidence_boost": 20.0,
     "tg_signal_volume_boost":     5.0,
     "tg_signal_clean_dev_boost":  5.0,
 }
@@ -3344,6 +3344,51 @@ async def init_agent_params() -> int:
                 added += 1
     except Exception as exc:
         logger.warning("top10 threshold migration failed: %s", exc)
+
+    # One-shot: enable global trailing stop
+    try:
+        async with AsyncSessionLocal() as session:
+            trail_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "trail_sl_enabled")
+            )).scalar_one_or_none()
+            if trail_row and trail_row.param_value < 1.0:
+                logger.info("Enabling global trailing stop (was %.0f)", trail_row.param_value)
+                trail_row.param_value = 1.0
+                trail_row.updated_at = datetime.utcnow()
+                await session.commit()
+                added += 1
+    except Exception as exc:
+        logger.warning("trail_sl_enabled migration failed: %s", exc)
+
+    # One-shot: raise TP defaults and enable trailing stop on all ai_trade_params
+    # rows that still have the old 1.8x-3.0x TP and trail disabled.
+    try:
+        from bot.agents.trade_profiles import DEFAULT_AI_TRADE_PARAMS
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(select(AITradeParams))).scalars().all()
+            migrated = 0
+            for row in rows:
+                defaults = DEFAULT_AI_TRADE_PARAMS.get(row.pattern_type)
+                if not defaults:
+                    continue
+                new_tp = float(defaults["tp_x"])
+                new_sl = float(defaults["sl_pct"])
+                new_trail_on = int(defaults["trail_on"])
+                new_trail_trig = float(defaults["trail_trigger"])
+                # Only migrate rows still on old defaults (sample_size 0 or low TP)
+                if row.optimal_tp_x < 4.0 or not row.trail_sl_enabled:
+                    row.optimal_tp_x = new_tp
+                    row.optimal_sl_pct = new_sl
+                    row.trail_sl_enabled = new_trail_on
+                    row.trail_sl_trigger_pct = new_trail_trig
+                    row.updated_at = datetime.utcnow()
+                    migrated += 1
+            if migrated:
+                await session.commit()
+                logger.info("Migrated %d ai_trade_params rows: TP raised, trailing stop enabled", migrated)
+                added += migrated
+    except Exception as exc:
+        logger.warning("ai_trade_params TP/trail migration failed: %s", exc)
 
     return added
 

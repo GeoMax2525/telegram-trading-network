@@ -130,22 +130,23 @@ ALL_PATTERN_TYPES = [
     "dead_token",
 ]
 
-# Default rows seeded on first boot. Baseline tp=3.0 / sl=30.0 / trail off
-# for all new types — Agent 6 learns per-type from outcomes over time.
-# The earlier 8 retain their user-tuned baselines.
-def _default(tp=3.0, sl=30.0, trig=0.50, on=0):
+# Default rows seeded on first boot. Baseline tp=5.0 / sl=25.0 / trail ON
+# at 2x trigger. Trailing stop is the primary exit mechanism — TP is set
+# high so runners can run, and the trail captures profit on the way down.
+# Agent 6 learns per-type from outcomes over time.
+def _default(tp=5.0, sl=25.0, trig=2.0, on=1):
     return {"tp_x": tp, "sl_pct": sl, "trail_trigger": trig, "trail_on": on}
 
 DEFAULT_AI_TRADE_PARAMS = {
-    # Originals (baseline values from user's first spec)
-    "new_launch":     _default(3.0, 30.0),
-    "insider_wallet": _default(4.0, 25.0),
-    "volume_spike":   _default(3.0, 30.0),
-    "low_mc":         _default(3.0, 30.0),
-    "mid_mc":         _default(3.0, 30.0),
-    "high_mc":        _default(3.0, 25.0),
-    "high_chart":     _default(3.5, 30.0),
-    "high_caller":    _default(3.5, 25.0),
+    # Baseline — trailing stop as primary exit, high TP to let runners run
+    "new_launch":     _default(5.0, 25.0),
+    "insider_wallet": _default(8.0, 20.0),
+    "volume_spike":   _default(5.0, 25.0),
+    "low_mc":         _default(5.0, 25.0),
+    "mid_mc":         _default(5.0, 25.0),
+    "high_mc":        _default(4.0, 20.0),
+    "high_chart":     _default(5.0, 25.0),
+    "high_caller":    _default(5.0, 20.0),
     # New rows — uniform baselines, learned from outcomes
     "early_entry":            _default(),
     "late_entry":             _default(),

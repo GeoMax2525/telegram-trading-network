@@ -122,8 +122,8 @@ SCORE_FIELDS = {
 # trade_profiles so there's exactly one place to edit when adding more.
 PATTERN_TYPES = _ALL_PATTERN_TYPES
 MIN_SAMPLE_FOR_LEARNING = 5   # was 10 — lowered for faster warm-up
-DEFAULT_TP_X = 3.0
-DEFAULT_SL_PCT = 30.0
+DEFAULT_TP_X = 5.0
+DEFAULT_SL_PCT = 25.0
 DEFAULT_POSITION_PCT = 10.0
 
 # Hard bounds for Agent 6 learning adjustments. SL_FLOOR was 10.0
@@ -131,10 +131,10 @@ DEFAULT_POSITION_PCT = 10.0
 # normal price action, so 10% SL guaranteed insta-stopout on every
 # trade. Raised to 20.0 so trades get meaningful room to breathe
 # while still capping downside at a sane loss.
-SL_FLOOR = 20.0
+SL_FLOOR = 15.0
 SL_CEILING = 50.0
-TP_FLOOR = 1.5
-TP_CEILING = 10.0
+TP_FLOOR = 2.0
+TP_CEILING = 20.0
 
 SOL_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd&include_24hr_change=true"
 
@@ -562,49 +562,45 @@ async def _optimize_trade_params(regime: str) -> int:
             peak_exceeds_tp * 100, avg_runup, cur_tp, cur_sl,
         )
 
-        # Apply adjustment rules
+        # Apply adjustment rules — thresholds loosened so learning actually
+        # fires with real trade data instead of requiring extreme distributions
         new_tp = cur_tp
         new_sl = cur_sl
         reasons: list[str] = []
 
-        # FLIPPED from previous implementation: widening SL when we're
-        # getting stopped out is the wrong direction. User wants losses
-        # to be smaller — tighten SL so we exit faster on bad trades.
-        if sl_hit_rate > 0.50:
+        # SL getting hit too often — tighten so we exit faster
+        if sl_hit_rate > 0.35:
             new_sl = max(SL_FLOOR, cur_sl - 5.0)
-            reasons.append(f"sl_hit_rate={sl_hit_rate:.0%}>50% → tighten SL")
+            reasons.append(f"sl_hit_rate={sl_hit_rate:.0%}>35% → tighten SL")
 
-        # Dead hits: same failure family (losing trade that didn't rebound).
-        # Also tighten, smaller step than sl_hit since it's a different mode.
-        if dead_hit_rate > 0.40:
+        # Dead hits: token data feed died (rug/delist)
+        if dead_hit_rate > 0.25:
             new_sl = max(SL_FLOOR, new_sl - 3.0)
-            reasons.append(f"dead_hit_rate={dead_hit_rate:.0%}>40% → tighten SL")
+            reasons.append(f"dead_hit_rate={dead_hit_rate:.0%}>25% → tighten SL")
 
-        if peak_exceeds_tp > 0.60:
+        # Peaks exceeding TP — raise TP to capture more upside
+        if peak_exceeds_tp > 0.30:
+            step = 1.0 if peak_exceeds_tp > 0.50 else 0.5
+            new_tp = min(TP_CEILING, new_tp + step)
+            reasons.append(f"peak>tp in {peak_exceeds_tp:.0%} → raise TP +{step}")
+
+        # Average peak well below TP — lower TP to actually hit it
+        if avg_peak < cur_tp * 0.60:
+            new_tp = max(TP_FLOOR, new_tp - 0.5)
+            reasons.append(f"avg_peak={avg_peak:.2f}x<tp*0.6 → lower TP")
+
+        # Sold too early — price kept running after we exited
+        if avg_runup > 1.15 and runup_samples:
             new_tp = min(TP_CEILING, new_tp + 0.5)
-            reasons.append(f"peak>tp in {peak_exceeds_tp:.0%}")
-
-        if avg_peak < cur_tp * 0.80:
-            new_tp = max(TP_FLOOR, new_tp - 0.3)
-            reasons.append(f"avg_peak={avg_peak:.2f}x<tp*0.8")
-
-        if avg_runup > 1.20 and runup_samples:
-            new_tp = min(TP_CEILING, new_tp + 0.3)
             reasons.append(f"1h_runup={avg_runup:.2f}x (sold early)")
 
-        # Clamp just in case
+        # Clamp
         new_tp = round(max(TP_FLOOR, min(TP_CEILING, new_tp)), 2)
         new_sl = round(max(SL_FLOOR, min(SL_CEILING, new_sl)), 1)
 
         changed = (abs(new_tp - cur_tp) >= 0.01) or (abs(new_sl - cur_sl) >= 0.1)
-        if not changed:
-            logger.info(
-                "Agent6 tune %s: no change (tp=%.2f sl=%.0f) — rules didn't fire",
-                ptype, cur_tp, cur_sl,
-            )
-            continue
 
-        # Position sizing follows win_rate + regime (legacy behavior)
+        # Position sizing follows win_rate + regime
         if win_rate >= 0.70:
             optimal_pos = 15.0
         elif win_rate >= 0.55:
@@ -626,6 +622,9 @@ async def _optimize_trade_params(regime: str) -> int:
         avg_multiple = sum(mults) / len(mults) if mults else 1.0
         confidence = min(100.0, n * 2.0)
 
+        # ALWAYS write back — even when rules don't fire. This updates
+        # sample_size so the resolver treats the row as "trained" and
+        # position sizing / win_rate stay current.
         await upsert_trade_params(
             pattern_type=ptype,
             optimal_tp_x=new_tp,
@@ -635,26 +634,31 @@ async def _optimize_trade_params(regime: str) -> int:
             win_rate=round(win_rate, 4),
             avg_multiple=round(avg_multiple, 2),
             confidence=round(confidence, 1),
-            # trail config preserved (None = keep existing)
         )
 
-        # Also route through set_param so /params audit log surfaces the change
-        reason_str = "; ".join(reasons) or "batch refresh"
-        if abs(new_tp - cur_tp) >= 0.01:
-            await set_param(
-                f"ai_trade_params.{ptype}.optimal_tp_x", new_tp,
-                reason=f"[{ptype}] {reason_str}", trades=n, win_rate=win_rate,
+        reason_str = "; ".join(reasons) or "no rule fired — stats refreshed"
+        if changed:
+            # Log param changes for audit trail
+            if abs(new_tp - cur_tp) >= 0.01:
+                await set_param(
+                    f"ai_trade_params.{ptype}.optimal_tp_x", new_tp,
+                    reason=f"[{ptype}] {reason_str}", trades=n, win_rate=win_rate,
+                )
+            if abs(new_sl - cur_sl) >= 0.1:
+                await set_param(
+                    f"ai_trade_params.{ptype}.optimal_sl_pct", new_sl,
+                    reason=f"[{ptype}] {reason_str}", trades=n, win_rate=win_rate,
+                )
+            logger.info(
+                "Agent6 tune %s: tp %.2f->%.2f sl %.1f->%.1f n=%d wr=%.0f%% avg_peak=%.2f [%s]",
+                ptype, cur_tp, new_tp, cur_sl, new_sl, n, win_rate * 100, avg_peak, reason_str,
             )
-        if abs(new_sl - cur_sl) >= 0.1:
-            await set_param(
-                f"ai_trade_params.{ptype}.optimal_sl_pct", new_sl,
-                reason=f"[{ptype}] {reason_str}", trades=n, win_rate=win_rate,
+        else:
+            logger.info(
+                "Agent6 tune %s: stats refreshed (tp=%.2f sl=%.0f n=%d wr=%.0f%% avg_peak=%.2f)",
+                ptype, cur_tp, cur_sl, n, win_rate * 100, avg_peak,
             )
 
-        logger.info(
-            "Agent6 tune %s: tp %.2f→%.2f sl %.1f→%.1f n=%d wr=%.0f%% avg_peak=%.2f [%s]",
-            ptype, cur_tp, new_tp, cur_sl, new_sl, n, win_rate * 100, avg_peak, reason_str,
-        )
         updated += 1
 
     # Summary of pattern groups that don't have enough samples yet — useful
