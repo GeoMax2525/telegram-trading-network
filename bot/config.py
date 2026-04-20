@@ -38,12 +38,14 @@ SCORE_WEIGHTS = {
     "market_strength":      10,   # MC range + volume-momentum alignment
 }
 
-# ── Verdict thresholds (AI score out of 100) ──────────────────────────────────
+# ── Verdict thresholds (quality score — timing is applied separately) ─────────
+# Final verdict uses both quality + timing in calculate_ai_score()
 VERDICT_THRESHOLDS = {
-    "STRONG BUY":  80,   # score >= 80
-    "PROMISING":   55,   # score >= 55
-    "RISKY":       35,   # score >= 35
-    "AVOID":        0,   # score < 35
+    "STRONG BUY":  80,   # quality >= 80 (timing check in calculate_ai_score)
+    "GOOD ENTRY":  70,   # quality >= 70
+    "PROMISING":   55,   # quality >= 55
+    "RISKY":       35,   # quality >= 35
+    "AVOID":        0,   # quality < 35
 }
 
 # ── DexScreener ───────────────────────────────────────────────────────────────

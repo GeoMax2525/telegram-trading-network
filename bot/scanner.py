@@ -132,6 +132,23 @@ def parse_token_metrics(pair: dict) -> dict:
     sells = txns.get("sells", 0)
     estimated_holders = max(buys, sells, 1)
 
+    # Age from pairCreatedAt (ms epoch)
+    import time as _time
+    created_ms = pair.get("pairCreatedAt")
+    age_hours = None
+    if isinstance(created_ms, (int, float)) and created_ms > 0:
+        age_hours = round((_time.time() * 1000 - created_ms) / 3_600_000, 1)
+
+    # Multi-timeframe price changes for consolidation detection
+    pc_h1 = float(price_change.get("h1") or 0)
+    pc_h6 = float(price_change.get("h6") or 0)
+    pc_h24 = float(price_change.get("h24") or 0)
+
+    # 5-min transaction counts
+    txns_m5 = pair.get("txns", {}).get("m5", {})
+    buys_m5 = txns_m5.get("buys", 0) or 0
+    sells_m5 = txns_m5.get("sells", 0) or 0
+
     return {
         "address":        base.get("address", ""),
         "name":           base.get("name", "Unknown"),
@@ -140,8 +157,13 @@ def parse_token_metrics(pair: dict) -> dict:
         "market_cap":     float(pair.get("marketCap") or pair.get("fdv") or 0),
         "liquidity_usd":  float(liquidity.get("usd") or 0),
         "volume_24h":     float(volume.get("h24") or 0),
-        "price_change_24h": float(price_change.get("h24") or 0),
+        "price_change_24h": pc_h24,
+        "price_change_h1":  pc_h1,
+        "price_change_h6":  pc_h6,
         "estimated_holders": estimated_holders,
+        "age_hours":      age_hours,
+        "buys_m5":        buys_m5,
+        "sells_m5":       sells_m5,
         "dex_url":        pair.get("url", ""),
         "chain":          pair.get("chainId", "unknown"),
         "dex_id":         _pair_dex_id(pair),
@@ -355,71 +377,171 @@ def _score_market_strength(metrics: dict) -> float:
     return round(min(10.0, score), 1)
 
 
-def _score_opportunity(metrics: dict) -> tuple[int, str]:
+def _score_entry_timing(metrics: dict) -> dict:
     """
-    Opportunity score (0-100) — how much upside is likely left.
-    Separate from health score. A token can be perfectly healthy (89/100)
-    but have zero opportunity left because it already did 60x.
+    Entry timing score (0-100) — how good is NOW to enter this token.
+    Completely separate from token quality.
 
-    Returns (score, label).
+    Factors:
+      - Age: how long since launch (younger = better)
+      - Run size: how much has it already pumped (less = better)
+      - Consolidation: is it pulling back or still extended
+      - Volume momentum: is buying accelerating right now
+
+    Returns dict with score, label, and breakdown details.
     """
     mc = metrics["market_cap"] or 0
-    pct = metrics["price_change_24h"]
+    pct_24h = metrics["price_change_24h"]
+    pct_h1 = metrics.get("price_change_h1", 0)
+    pct_h6 = metrics.get("price_change_h6", 0)
     vol = metrics["volume_24h"]
-    liq = metrics["liquidity_usd"]
+    age_hours = metrics.get("age_hours")
+    buys_m5 = metrics.get("buys_m5", 0)
+    sells_m5 = metrics.get("sells_m5", 0)
 
-    score = 50  # neutral start
+    score = 50
+    details = {}
 
-    # MC size — lower MC = more room to run
-    if mc < 50_000:
-        score += 25       # micro cap, massive upside potential
-    elif mc < 200_000:
-        score += 20       # small cap, strong upside
-    elif mc < 500_000:
-        score += 15       # mid entry
-    elif mc < 1_000_000:
-        score += 10       # getting larger
-    elif mc < 5_000_000:
-        score += 5        # established, moderate upside
+    # ── Age factor (0-25 pts) ──
+    if age_hours is not None:
+        if age_hours < 1:
+            age_pts = 25      # just launched
+            details["age"] = f"{age_hours * 60:.0f}min old — very early"
+        elif age_hours < 4:
+            age_pts = 20
+            details["age"] = f"{age_hours:.1f}h old — early stage"
+        elif age_hours < 12:
+            age_pts = 12
+            details["age"] = f"{age_hours:.0f}h old — established"
+        elif age_hours < 48:
+            age_pts = 5
+            details["age"] = f"{age_hours:.0f}h old — mature"
+        else:
+            age_pts = 0
+            details["age"] = f"{age_hours / 24:.0f}d old — old token"
+        score += age_pts - 12  # center around neutral
     else:
-        score -= 5        # large cap for a memecoin, limited upside
+        details["age"] = "Age unknown"
 
-    # Already pumped — the bigger the move, the less opportunity remains
-    if pct > 1000:
-        score -= 30       # 10x+ already happened
-    elif pct > 500:
-        score -= 20       # 5x already happened
-    elif pct > 200:
-        score -= 12       # 2-5x already happened
-    elif pct > 100:
-        score -= 5        # doubled, some move priced in
-    elif 10 <= pct <= 100:
-        score += 5        # sweet spot — momentum started, room left
-    elif 0 <= pct < 10:
-        score += 10       # early — hasn't moved much yet
+    # ── Run size factor (-30 to +10 pts) ──
+    if pct_24h > 1000:
+        score -= 30
+        details["run"] = f"Up {pct_24h:+.0f}% — massive run already happened"
+    elif pct_24h > 500:
+        score -= 20
+        details["run"] = f"Up {pct_24h:+.0f}% — big move already priced in"
+    elif pct_24h > 200:
+        score -= 10
+        details["run"] = f"Up {pct_24h:+.0f}% — significant move done"
+    elif pct_24h > 50:
+        score += 0
+        details["run"] = f"Up {pct_24h:+.0f}% — moved but room may remain"
+    elif pct_24h > 10:
+        score += 8
+        details["run"] = f"Up {pct_24h:+.0f}% — early momentum, good entry window"
+    elif pct_24h > -10:
+        score += 10
+        details["run"] = f"{pct_24h:+.1f}% — hasn't run yet, ground floor"
+    else:
+        score += 3
+        details["run"] = f"{pct_24h:+.1f}% — pulling back, could be a dip entry"
 
-    # Volume relative to MC — high vol/MC = price hasn't caught up yet
-    if mc > 0:
-        vol_mc = vol / mc
-        if vol_mc > 2.0:
-            score += 10   # volume way ahead of MC — price lag
-        elif vol_mc > 1.0:
+    # ── Consolidation detection (-10 to +15 pts) ──
+    # Compare h1 vs h24 — if h24 is big but h1 is small/negative, it's pulling back
+    if pct_24h > 100:
+        if pct_h1 < -5:
+            score += 15
+            details["pattern"] = "Pulling back after pump — potential re-entry"
+        elif pct_h1 < 5:
+            score += 8
+            details["pattern"] = "Consolidating after move — watching for next leg"
+        else:
+            score -= 10
+            details["pattern"] = "Still pumping — chasing, not entering"
+    elif pct_24h > 20:
+        if -10 < pct_h1 < 5:
+            score += 10
+            details["pattern"] = "Building base after initial move"
+        else:
+            details["pattern"] = "Active price movement"
+    else:
+        details["pattern"] = "No significant prior move"
+
+    # ── Volume momentum (-5 to +10 pts) ──
+    if buys_m5 > 0 and sells_m5 > 0:
+        buy_sell_ratio = buys_m5 / max(sells_m5, 1)
+        if buy_sell_ratio > 3:
+            score += 10
+            details["flow"] = f"Heavy buying pressure ({buys_m5}B/{sells_m5}S in 5m)"
+        elif buy_sell_ratio > 1.5:
             score += 5
-        elif vol_mc < 0.1:
-            score -= 5    # no volume interest
+            details["flow"] = f"Buyers leading ({buys_m5}B/{sells_m5}S in 5m)"
+        elif buy_sell_ratio < 0.5:
+            score -= 5
+            details["flow"] = f"Sellers dominant ({buys_m5}B/{sells_m5}S in 5m)"
+        else:
+            details["flow"] = f"Balanced flow ({buys_m5}B/{sells_m5}S in 5m)"
+    elif buys_m5 > 0:
+        details["flow"] = f"{buys_m5} buys in 5m, no sells"
+    else:
+        details["flow"] = "No recent activity"
+
+    # ── MC headroom (-5 to +10 pts) ──
+    if mc < 100_000:
+        score += 10
+        details["mc_room"] = f"MC {_fmt_mc_short(mc)} — massive room to grow"
+    elif mc < 500_000:
+        score += 5
+        details["mc_room"] = f"MC {_fmt_mc_short(mc)} — good upside potential"
+    elif mc < 2_000_000:
+        score += 0
+        details["mc_room"] = f"MC {_fmt_mc_short(mc)} — moderate upside"
+    elif mc < 10_000_000:
+        score -= 3
+        details["mc_room"] = f"MC {_fmt_mc_short(mc)} — limited upside for a memecoin"
+    else:
+        score -= 5
+        details["mc_room"] = f"MC {_fmt_mc_short(mc)} — large cap, minimal upside"
 
     score = max(0, min(100, score))
 
     if score >= 75:
-        label = "High Opportunity"
-    elif score >= 50:
-        label = "Moderate Opportunity"
+        label = "IDEAL"
+    elif score >= 60:
+        label = "GOOD"
+    elif score >= 45:
+        label = "FAIR"
     elif score >= 30:
-        label = "Low Opportunity"
+        label = "LATE"
     else:
-        label = "Late Entry"
+        label = "VERY LATE"
 
-    return score, label
+    # Risk/reward estimate
+    if score >= 60:
+        rr_up = "3-10x"
+        rr_down = "30-50%"
+    elif score >= 40:
+        rr_up = "1.5-3x"
+        rr_down = "40-60%"
+    else:
+        rr_up = "1.2-1.5x"
+        rr_down = "50-80%"
+    details["risk_reward"] = f"{rr_up} upside vs {rr_down} downside"
+
+    return {
+        "score": score,
+        "label": label,
+        "details": details,
+        "risk_reward": details["risk_reward"],
+    }
+
+
+def _fmt_mc_short(mc: float) -> str:
+    if mc >= 1_000_000:
+        return f"${mc / 1_000_000:.1f}M"
+    if mc >= 1_000:
+        return f"${mc / 1_000:.0f}K"
+    return f"${mc:.0f}"
 
 
 def calculate_ai_score(metrics: dict) -> dict:
@@ -453,14 +575,34 @@ def calculate_ai_score(metrics: dict) -> dict:
             verdict = label
             break
 
-    opp_score, opp_label = _score_opportunity(metrics)
+    timing = _score_entry_timing(metrics)
+
+    # Final verdict uses BOTH quality and timing
+    quality = total
+    timing_score = timing["score"]
+
+    if quality >= 75 and timing_score >= 65:
+        final_verdict = "STRONG BUY"
+    elif quality >= 75 and timing_score >= 45:
+        final_verdict = "GOOD ENTRY"
+    elif quality >= 60 and timing_score < 45:
+        final_verdict = "WATCH"
+    elif quality >= 60 and timing_score >= 45:
+        final_verdict = "PROMISING"
+    elif quality >= 35:
+        final_verdict = "RISKY"
+    else:
+        final_verdict = "AVOID"
 
     return {
         "components":       components,
         "total":            total,
-        "verdict":          verdict,
-        "opportunity":      opp_score,
-        "opportunity_label": opp_label,
+        "quality_score":    quality,
+        "timing_score":     timing_score,
+        "timing_label":     timing["label"],
+        "timing_details":   timing["details"],
+        "risk_reward":      timing["risk_reward"],
+        "verdict":          final_verdict,
     }
 
 

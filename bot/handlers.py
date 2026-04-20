@@ -55,7 +55,9 @@ _analyze_waiting: set[int] = set()
 def _verdict_emoji(verdict: str) -> str:
     return {
         "STRONG BUY": "🟢",
+        "GOOD ENTRY": "🟢",
         "PROMISING":  "🟡",
+        "WATCH":      "🟡",
         "RISKY":      "🟠",
         "AVOID":      "🔴",
     }.get(verdict, "⚪")
@@ -79,142 +81,104 @@ def _format_price(price: float) -> str:
 
 
 def _build_verdict_reasoning(data: dict) -> str:
-    """Generate a line-by-line breakdown explaining each score component."""
+    """Generate a full breakdown: quality analysis, timing analysis, and suggested action."""
     c = data["components"]
     mc = data.get("market_cap", 0)
     liq = data.get("liquidity_usd", 0)
     vol = data.get("volume_24h", 0)
     pct = data.get("price_change_24h", 0)
     holders = data.get("estimated_holders", 0)
+    timing_details = data.get("timing_details", {})
+    timing_score = data.get("timing_score", 50)
+    quality = data.get("quality_score", data.get("total", 0))
+    verdict = data.get("verdict", "")
+    rr = data.get("risk_reward", "")
 
     lines = []
 
-    # Liquidity — explain the ratio
+    # ── Token Quality Breakdown ──
+    lines.append("*Token Quality*")
+
     liq_score = c["liquidity"]
     ratio_pct = (liq / mc * 100) if mc > 0 else 0
     if liq_score >= 16:
-        lines.append(f"💧 Liquidity is {ratio_pct:.1f}% of MC — deep pool, clean exits")
+        lines.append(f"💧 Liquidity {ratio_pct:.1f}% of MC — deep pool, clean exits")
     elif liq_score >= 10:
-        lines.append(f"💧 Liquidity is {ratio_pct:.1f}% of MC — adequate depth")
+        lines.append(f"💧 Liquidity {ratio_pct:.1f}% of MC — adequate")
     elif liq_score >= 5:
-        lines.append(f"💧 Liquidity is only {ratio_pct:.1f}% of MC — thin, expect slippage")
+        lines.append(f"💧 Liquidity only {ratio_pct:.1f}% of MC — thin, slippage risk")
     else:
-        lines.append(f"💧 Liquidity dangerously low at {_format_usd(liq)} — hard to exit")
+        lines.append(f"💧 Dangerously low liquidity — hard to exit")
 
-    # Volume — explain turnover
     vol_score = c["volume"]
     turnover = (vol / liq) if liq > 0 else 0
     if vol_score >= 16:
-        lines.append(f"📊 Volume turning over {turnover:.1f}x the pool — heavy interest")
+        lines.append(f"📊 {turnover:.1f}x pool turnover — heavy buying interest")
     elif vol_score >= 10:
-        lines.append(f"📊 Moderate volume at {_format_usd(vol)} — some activity")
-    elif vol_score >= 5:
-        lines.append(f"📊 Low volume at {_format_usd(vol)} — not much attention yet")
+        lines.append(f"📊 {_format_usd(vol)} volume — moderate activity")
     else:
-        lines.append(f"📊 Minimal volume — no significant trading happening")
+        lines.append(f"📊 Low volume — minimal attention")
 
-    # Momentum — explain the move
-    mom_score = c["momentum"]
-    if pct >= 200:
-        lines.append(f"🚀 Up {pct:+.0f}% — strong runner in play")
-    elif pct >= 50:
-        lines.append(f"📈 Up {pct:+.0f}% — solid momentum building")
-    elif pct >= 10:
-        lines.append(f"📈 Up {pct:+.0f}% — early movement, room to run")
-    elif pct >= 0:
-        lines.append(f"➡️ Flat at {pct:+.1f}% — consolidating, watching for breakout")
-    elif pct >= -15:
-        lines.append(f"📉 Down {pct:+.1f}% — pulling back, could be a dip buy or a fade")
-    else:
-        lines.append(f"🔻 Down {pct:+.1f}% — selling pressure, caution")
-
-    # Holders — explain activity
     hold_score = c["holder_distribution"]
     if hold_score >= 12:
-        lines.append(f"👥 {holders}+ active traders with balanced buying and selling")
+        lines.append(f"👥 {holders:,} active traders — organic market")
     elif hold_score >= 8:
-        lines.append(f"👥 {holders} traders active — decent distribution")
-    elif hold_score >= 4:
-        lines.append(f"👥 Only {holders} traders — early stage, concentrated risk")
+        lines.append(f"👥 {holders} traders — decent distribution")
     else:
-        lines.append(f"👥 Very few traders — extremely early or low interest")
+        lines.append(f"👥 {holders} traders — concentrated, early stage")
 
-    # Safety — explain what was found
     safety_score = c["contract_safety"]
     if safety_score >= 13:
-        lines.append(f"🛡️ No safety flags — healthy liq/MC ratio, no wash signals")
+        lines.append(f"🛡️ Clean — no honeypot or wash trading signals")
     elif safety_score >= 8:
-        lines.append(f"🛡️ Minor flags — some imbalance in liquidity or volume ratios")
+        lines.append(f"🛡️ Minor flags — watch liq/volume ratio")
     else:
-        lines.append(f"⚠️ Safety concerns — possible honeypot or wash trading signals")
+        lines.append(f"⚠️ Safety concerns detected")
 
-    # Market strength — explain positioning
-    mkt_score = c.get("market_strength", c.get("deployer_reputation", 5))
-    if mkt_score >= 8:
-        lines.append(f"💎 MC at {_format_usd(mc)} with volume confirming — well positioned")
-    elif mkt_score >= 5:
-        lines.append(f"📍 MC at {_format_usd(mc)} — fair positioning, watching for catalyst")
-    else:
-        lines.append(f"📍 Weak setup — MC and volume not aligned")
-
-    # Opportunity context
-    opp = data.get("opportunity", 50)
-    if opp >= 75:
-        lines.append(f"🎯 Early entry — low MC with room for significant upside")
-    elif opp >= 50:
-        lines.append(f"🎯 Moderate entry — some move has happened but upside remains")
-    elif opp >= 30:
-        lines.append(f"🎯 Late entry — most of the move may already be priced in")
-    else:
-        lines.append(f"🎯 Very late — this has already run hard, high risk of buying the top")
-
-    # Written verdict — overall trade assessment
+    # ── Entry Timing Breakdown ──
     lines.append("")
-    verdict = data.get("verdict", "")
-    total = data.get("total", 0)
+    lines.append("*Entry Timing*")
+    for key in ("age", "run", "pattern", "flow", "mc_room"):
+        if key in timing_details:
+            icon = {"age": "⏰", "run": "📈", "pattern": "📐", "flow": "💰", "mc_room": "🎯"}.get(key, "•")
+            lines.append(f"{icon} {timing_details[key]}")
 
-    if verdict == "STRONG BUY" and opp >= 60:
+    if rr:
+        lines.append(f"⚖️ R/R: {rr}")
+
+    # ── Suggested Action ──
+    lines.append("")
+    if verdict == "STRONG BUY":
         lines.append(
-            "📝 Strong setup across all metrics with real upside remaining. "
-            "Token health is solid, volume confirms interest, and entry is "
-            "still reasonable. Consider a position with a trailing stop to "
-            "protect gains if momentum continues."
+            "📝 Quality and timing both strong. Enter with a "
+            "trailing stop at 20% below peak. Let it run."
         )
-    elif verdict == "STRONG BUY" and opp < 60:
+    elif verdict == "GOOD ENTRY":
         lines.append(
-            "📝 Token fundamentals are strong but the big move has already "
-            "happened. Healthy token with real volume, but entering here "
-            "means you are buying after significant appreciation. If you "
-            "enter, use tight stops — the risk/reward is not in your favor "
-            "at this level."
+            "📝 Good token, decent timing. Consider a position "
+            "but size conservatively. Trail stop to protect gains."
         )
-    elif verdict == "PROMISING" and opp >= 50:
+    elif verdict == "WATCH":
         lines.append(
-            "📝 Decent setup with some positive signals. Not a slam dunk "
-            "but the token shows enough activity and health to be worth "
-            "watching. Consider a smaller position size and monitor for "
-            "a clear breakout or volume surge before adding."
+            f"📝 Strong token but timing is off. Already up "
+            f"{pct:+.0f}%. Wait for a pullback to "
+            f"{_format_usd(mc * 0.6)} MC before entering. "
+            f"If already in, trail stop at 20% below peak."
         )
-    elif verdict == "PROMISING" and opp < 50:
+    elif verdict == "PROMISING":
         lines.append(
-            "📝 Mixed signals. Some metrics look good but the opportunity "
-            "window may be closing. The move is partially priced in and "
-            "remaining upside may not justify the risk. Watch but don't "
-            "chase."
+            "📝 Some positive signals but not a clear setup. "
+            "Watch for volume surge or breakout confirmation "
+            "before committing. Small position only."
         )
     elif verdict == "RISKY":
         lines.append(
-            "📝 Multiple warning signs. Low scores across key metrics "
-            "suggest this token carries above-average risk. Could still "
-            "move but the probability is against you. Only consider with "
-            "money you can afford to lose entirely."
+            "📝 Multiple warning signs. Only with money you "
+            "can afford to lose. Tight stops mandatory."
         )
-    else:  # AVOID
+    else:
         lines.append(
-            "📝 Too many red flags. Low liquidity, weak activity, or "
-            "contract safety concerns make this a high-probability loss. "
-            "Stay away unless you have specific information that "
-            "contradicts the data."
+            "📝 Too many red flags. Stay away."
         )
 
     return "\n".join(lines)
@@ -228,6 +192,16 @@ def build_trade_card(data: dict) -> str:
     score_bar = "█" * filled + "░" * (10 - filled)
 
     reasoning = _build_verdict_reasoning(data)
+
+    quality = data.get("quality_score", data["total"])
+    timing_score = data.get("timing_score", 50)
+    timing_label = data.get("timing_label", "?")
+    rr = data.get("risk_reward", "")
+
+    q_filled = int(quality / 10)
+    q_bar = "█" * q_filled + "░" * (10 - q_filled)
+    t_filled = int(timing_score / 10)
+    t_bar = "█" * t_filled + "░" * (10 - t_filled)
 
     lines = [
         f"{'─' * 34}",
@@ -244,9 +218,7 @@ def build_trade_card(data: dict) -> str:
         f"🕯 Change 24h:  {change_sign}{data['price_change_24h']:.1f}%",
         f"",
         f"{'─' * 34}",
-        f"🧠 *AI SCORE*",
-        f"",
-        f"[{score_bar}] *{data['total']}/100*",
+        f"🧠 *Token Quality:* [{q_bar}] *{quality:.0f}/100*",
         f"",
         f"  • Liquidity Health:     {data['components']['liquidity']:.1f}/20",
         f"  • Volume Velocity:      {data['components']['volume']:.1f}/20",
@@ -255,16 +227,27 @@ def build_trade_card(data: dict) -> str:
         f"  • Contract Safety:      {data['components']['contract_safety']:.1f}/15",
         f"  • Market Strength:      {data['components'].get('market_strength', data['components'].get('deployer_reputation', 0)):.1f}/10",
         f"",
-        f"🎯 *Opportunity: {data.get('opportunity', '?')}/100 — {data.get('opportunity_label', '?')}*",
+        f"⏱ *Entry Timing:* [{t_bar}] *{timing_score}/100 — {timing_label}*",
+        f"⚖️ *R/R:* {rr}" if rr else "",
         f"",
         f"{'─' * 34}",
         f"📋 Verdict: {emoji} *{data['verdict']}*",
         f"{'─' * 34}",
         f"",
         reasoning,
-        f"",
-        f"_Scanned at {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC_",
     ]
+
+    # Intel section (similar tokens + insider activity)
+    intel = data.get("intel_section")
+    if intel:
+        lines.append(f"")
+        lines.append(f"{'─' * 34}")
+        lines.append(f"🔍 *Intelligence*")
+        lines.append(intel)
+
+    lines.append(f"")
+    lines.append(f"_Scanned at {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC_")
+
     return "\n".join(lines)
 
 
@@ -309,6 +292,60 @@ async def _build_card_text(address: str) -> tuple[str | None, dict | None]:
     data = await scan_token(address, allow_any_dex=True)
     if data is None:
         return None, None
+
+    # Enrich with similar token outcomes + insider activity from DB
+    try:
+        from database.models import AsyncSessionLocal, select, PaperTrade, Wallet, WalletTokenTrade
+
+        mc = data.get("market_cap", 0) or 0
+        intel_lines = []
+
+        # Similar token outcomes — find closed paper trades at similar MC
+        if mc > 0:
+            mc_low = mc * 0.5
+            mc_high = mc * 2.0
+            async with AsyncSessionLocal() as session:
+                similar = (await session.execute(
+                    select(PaperTrade)
+                    .where(
+                        PaperTrade.entry_mc.between(mc_low, mc_high),
+                        PaperTrade.close_reason.isnot(None),
+                        PaperTrade.peak_multiple.isnot(None),
+                    )
+                    .limit(50)
+                )).scalars().all()
+            if similar:
+                peaks = [float(t.peak_multiple or 1.0) for t in similar]
+                avg_peak = sum(peaks) / len(peaks)
+                wins = sum(1 for p in peaks if p >= 1.5)
+                intel_lines.append(
+                    f"📊 Similar setups: avg peak {avg_peak:.1f}x from entry "
+                    f"({wins}/{len(similar)} hit 1.5x) based on {len(similar)} matches"
+                )
+
+        # Insider activity — check if tracked wallets hold this token
+        async with AsyncSessionLocal() as session:
+            insider_trades = (await session.execute(
+                select(WalletTokenTrade)
+                .where(WalletTokenTrade.token_address == address)
+                .limit(20)
+            )).scalars().all()
+        if insider_trades:
+            still_holding = sum(1 for t in insider_trades if t.last_sell_at is None)
+            exited = len(insider_trades) - still_holding
+            if still_holding > 0:
+                intel_lines.append(
+                    f"👛 Insider status: {still_holding} tracked wallet(s) still holding"
+                )
+            elif exited > 0:
+                intel_lines.append(
+                    f"👛 Insider status: all {exited} tracked wallet(s) have exited ⚠️"
+                )
+
+        if intel_lines:
+            data["intel_section"] = "\n".join(intel_lines)
+    except Exception as exc:
+        logger.debug("Scan card intel enrichment failed: %s", exc)
 
     card_text = build_trade_card(data)
 
