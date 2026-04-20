@@ -3576,28 +3576,81 @@ _TC_SINCE = {
 }
 
 
+def _cyber_bar(multiple: float) -> str:
+    """Neon progress bar: 20 blocks, scaled 1x-5x."""
+    filled = max(0, min(20, round((multiple - 1) / 4 * 20)))
+    return "▓" * filled + "░" * (20 - filled)
+
+
+def _cyber_tag(multiple: float) -> str:
+    if multiple >= 3.0:
+        return "🔥"
+    if multiple >= 2.0:
+        return "⚡"
+    if multiple >= 1.5:
+        return "📈"
+    return "💀"
+
+
+def _cyber_color(rank: int) -> str:
+    if rank == 1:
+        return "🔴"
+    return "🟣" if rank % 2 == 0 else "🔵"
+
+
 async def _build_top_calls(timeframe: str = "ALL") -> tuple[str, object]:
     since = _TC_SINCE.get(timeframe, lambda: None)()
     rows  = await get_top_calls(limit=10, since=since)
     stats = await get_top_calls_stats(since=since)
 
     lines = [
-        "📈 *Top Calls*",
-        f"_{stats['total']} calls tracked | {stats['avg_x']}x avg_",
+        "🟣 ░▒▓ LOWKEY ALPHA NETWORK ▓▒░ 🟣",
+        "⟦ CALLER LEADERBOARD :: LIVE FEED ⟧",
+        f"// {stats['total']} signals logged :: avg\\_return={stats['avg_x']}x",
         "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
     if not rows:
-        lines.append("_No calls recorded yet._")
+        lines.append("// NO SIGNALS LOGGED YET")
     else:
-        _RUG = {"rug_mc", "rug_liquidity"}
         for i, row in enumerate(rows, 1):
-            peak_x   = row["peak_multiplier"] or 0
-            is_rug   = row["close_reason"] in _RUG
-            suffix   = " 💀" if is_rug else (" 🔥" if peak_x >= 5 else "")
-            caller   = row["scanned_by"].replace("_", "\\_")
-            name     = row["token_name"].replace("_", "\\_")
-            lines.append(f"{i}. {name} » @{caller} {peak_x:.2f}x{suffix}")
+            peak_x = row["peak_multiplier"] or 0
+            caller = row["scanned_by"].replace("_", "\\_")
+            name   = (row["token_name"] or "?").replace("_", "\\_")
+            color  = _cyber_color(i)
+            bar    = _cyber_bar(peak_x)
+            tag    = _cyber_tag(peak_x)
+
+            lines.append(f"")
+            lines.append(f"{color} ▲{i:02d} :: {name}")
+            lines.append(f"⟦ OP ⟧ @{caller}")
+            lines.append(f"⟦ RTN ⟧ {peak_x:.2f}x")
+            lines.append(f"⟦ PWR ⟧ {bar} {tag}")
+
+    # Operator stats section
+    leaders = await get_signal_leaders(limit=10)
+    if leaders:
+        lines.append("")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("⟦ TOP OPERATORS :: NETWORK STATS ⟧")
+        for j, op in enumerate(leaders):
+            color = _cyber_color(j + 1)
+            username = op["username"].replace("_", "\\_")
+            calls = op["scans"]
+            wins = op["wins"]
+            losses = op["losses"]
+            total_pts = op["total_points"]
+            win_pct = op["win_pct"]
+            avg_x = round(total_pts / calls, 2) if calls > 0 else 0
+            lines.append(
+                f"{color} @{username} // calls={calls} :: "
+                f"avg={avg_x}x :: WR={win_pct}%"
+            )
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🔵 ░▒▓ LOWKEY ALPHA // LIVE ▓▒░ 🔵")
 
     return "\n".join(lines), top_calls_keyboard(active=timeframe)
 
