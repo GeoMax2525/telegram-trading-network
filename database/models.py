@@ -2797,7 +2797,7 @@ AGENT_PARAM_DEFAULTS = {
     # Pattern engine
     "pattern_min_samples": 3, "pattern_interval_hours": 6,
     # Confidence thresholds
-    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 45,
+    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 55,
     # MC weights — low
     "low_mc_insider": 0.35, "low_mc_fingerprint": 0.28, "low_mc_chart": 0.05,
     "low_mc_rug": 0.20, "low_mc_caller": 0.08, "low_mc_market": 0.04,
@@ -2822,7 +2822,7 @@ AGENT_PARAM_DEFAULTS = {
     "force_reset_v5_done":  0.0,   # v5: wrapped in defensive try/except
 
     # Paper trading risk caps
-    "max_open_paper_trades": 5.0,    # hard max concurrent open positions
+    "max_open_paper_trades": 3.0,    # hard max concurrent open positions
     "close_cooldown_hours":  2.0,    # re-entry cooldown after ANY close
 
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
@@ -3391,6 +3391,27 @@ async def init_agent_params() -> int:
                 added += migrated
     except Exception as exc:
         logger.warning("ai_trade_params TP/trail migration failed: %s", exc)
+
+    # Tighten paper trading: raise confidence threshold, reduce max open trades.
+    # 56 trades/day at 19% WR = churning. Need to be much more selective.
+    _tighten = {
+        "conf_paper_threshold": 55.0,    # was ~20-45, way too loose
+        "max_open_paper_trades": 3.0,    # was 5, fewer concurrent = more selective
+    }
+    try:
+        async with AsyncSessionLocal() as session:
+            for pname, target in _tighten.items():
+                row = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == pname)
+                )).scalar_one_or_none()
+                if row and row.param_value < target:
+                    logger.info("Tightening %s: %.0f -> %.0f", pname, row.param_value, target)
+                    row.param_value = target
+                    row.updated_at = datetime.utcnow()
+                    added += 1
+            await session.commit()
+    except Exception as exc:
+        logger.warning("Paper tightening migration failed: %s", exc)
 
     return added
 
