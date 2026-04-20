@@ -78,12 +78,87 @@ def _format_price(price: float) -> str:
     return f"${price:.10f}".rstrip("0")
 
 
+def _build_verdict_reasoning(data: dict) -> str:
+    """Generate plain-English reasoning based on individual component scores."""
+    c = data["components"]
+    total = data["total"]
+    mc = data.get("market_cap", 0)
+    liq = data.get("liquidity_usd", 0)
+    vol = data.get("volume_24h", 0)
+    pct = data.get("price_change_24h", 0)
+
+    strengths = []
+    concerns = []
+
+    # Liquidity
+    liq_score = c["liquidity"]
+    if liq_score >= 16:
+        strengths.append("deep liquidity relative to market cap")
+    elif liq_score <= 6:
+        concerns.append("thin liquidity pool — exit slippage risk")
+
+    # Volume
+    vol_score = c["volume"]
+    if vol_score >= 16:
+        strengths.append("strong volume turnover — active buying interest")
+    elif vol_score <= 6:
+        concerns.append("low trading activity")
+
+    # Momentum
+    mom_score = c["momentum"]
+    if mom_score >= 18:
+        strengths.append("healthy upward momentum with room to run")
+    elif mom_score <= 5:
+        if pct > 100:
+            concerns.append("already pumped hard — late entry risk")
+        else:
+            concerns.append("price in decline")
+
+    # Holders
+    hold_score = c["holder_distribution"]
+    if hold_score >= 12:
+        strengths.append("strong holder activity with organic buy/sell flow")
+    elif hold_score <= 4:
+        concerns.append("low holder count — early stage or concentrated")
+
+    # Safety
+    safety_score = c["contract_safety"]
+    if safety_score >= 13:
+        strengths.append("clean contract — no wash trading or honeypot signals")
+    elif safety_score <= 7:
+        concerns.append("contract safety flags detected")
+
+    # Market strength
+    mkt_score = c.get("market_strength", c.get("deployer_reputation", 5))
+    if mkt_score >= 8:
+        strengths.append("market cap and volume aligned for potential move")
+    elif mkt_score <= 3:
+        concerns.append("weak market positioning")
+
+    # Build the reasoning text
+    parts = []
+    if strengths:
+        parts.append("Strengths: " + ", ".join(strengths) + ".")
+    if concerns:
+        parts.append("Concerns: " + ", ".join(concerns) + ".")
+
+    if not parts:
+        if total >= 55:
+            parts.append("Balanced metrics across all categories.")
+        else:
+            parts.append("No standout signals in either direction.")
+
+    return " ".join(parts)
+
+
 def build_trade_card(data: dict) -> str:
     emoji = _verdict_emoji(data["verdict"])
     change_sign = "+" if data["price_change_24h"] >= 0 else ""
 
     filled = int(data["total"] / 10)
     score_bar = "█" * filled + "░" * (10 - filled)
+
+    reasoning = _build_verdict_reasoning(data)
 
     lines = [
         f"{'─' * 34}",
@@ -113,6 +188,7 @@ def build_trade_card(data: dict) -> str:
         f"",
         f"{'─' * 34}",
         f"📋 Verdict: {emoji} *{data['verdict']}*",
+        f"_{reasoning}_",
         f"{'─' * 34}",
         f"",
         f"_Scanned at {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC_",
