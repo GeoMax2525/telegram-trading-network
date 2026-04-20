@@ -157,6 +157,18 @@ def _build_verdict_reasoning(data: dict) -> str:
     else:
         lines.append(f"📍 Weak setup — MC and volume not aligned")
 
+    # Opportunity context
+    opp = data.get("opportunity", 50)
+    opp_label = data.get("opportunity_label", "")
+    if opp >= 75:
+        lines.append(f"🎯 Early entry — low MC with room for significant upside")
+    elif opp >= 50:
+        lines.append(f"🎯 Moderate entry — some move has happened but upside remains")
+    elif opp >= 30:
+        lines.append(f"🎯 Late entry — most of the move may already be priced in")
+    else:
+        lines.append(f"🎯 Very late — this has already run hard, high risk of buying the top")
+
     return "\n".join(lines)
 
 
@@ -194,6 +206,8 @@ def build_trade_card(data: dict) -> str:
         f"  • Holder Activity:      {data['components']['holder_distribution']:.1f}/15",
         f"  • Contract Safety:      {data['components']['contract_safety']:.1f}/15",
         f"  • Market Strength:      {data['components'].get('market_strength', data['components'].get('deployer_reputation', 0)):.1f}/10",
+        f"",
+        f"🎯 *Opportunity: {data.get('opportunity', '?')}/100 — {data.get('opportunity_label', '?')}*",
         f"",
         f"{'─' * 34}",
         f"📋 Verdict: {emoji} *{data['verdict']}*",

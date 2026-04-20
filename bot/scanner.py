@@ -355,10 +355,77 @@ def _score_market_strength(metrics: dict) -> float:
     return round(min(10.0, score), 1)
 
 
+def _score_opportunity(metrics: dict) -> tuple[int, str]:
+    """
+    Opportunity score (0-100) — how much upside is likely left.
+    Separate from health score. A token can be perfectly healthy (89/100)
+    but have zero opportunity left because it already did 60x.
+
+    Returns (score, label).
+    """
+    mc = metrics["market_cap"] or 0
+    pct = metrics["price_change_24h"]
+    vol = metrics["volume_24h"]
+    liq = metrics["liquidity_usd"]
+
+    score = 50  # neutral start
+
+    # MC size — lower MC = more room to run
+    if mc < 50_000:
+        score += 25       # micro cap, massive upside potential
+    elif mc < 200_000:
+        score += 20       # small cap, strong upside
+    elif mc < 500_000:
+        score += 15       # mid entry
+    elif mc < 1_000_000:
+        score += 10       # getting larger
+    elif mc < 5_000_000:
+        score += 5        # established, moderate upside
+    else:
+        score -= 5        # large cap for a memecoin, limited upside
+
+    # Already pumped — the bigger the move, the less opportunity remains
+    if pct > 1000:
+        score -= 30       # 10x+ already happened
+    elif pct > 500:
+        score -= 20       # 5x already happened
+    elif pct > 200:
+        score -= 12       # 2-5x already happened
+    elif pct > 100:
+        score -= 5        # doubled, some move priced in
+    elif 10 <= pct <= 100:
+        score += 5        # sweet spot — momentum started, room left
+    elif 0 <= pct < 10:
+        score += 10       # early — hasn't moved much yet
+
+    # Volume relative to MC — high vol/MC = price hasn't caught up yet
+    if mc > 0:
+        vol_mc = vol / mc
+        if vol_mc > 2.0:
+            score += 10   # volume way ahead of MC — price lag
+        elif vol_mc > 1.0:
+            score += 5
+        elif vol_mc < 0.1:
+            score -= 5    # no volume interest
+
+    score = max(0, min(100, score))
+
+    if score >= 75:
+        label = "High Opportunity"
+    elif score >= 50:
+        label = "Moderate Opportunity"
+    elif score >= 30:
+        label = "Low Opportunity"
+    else:
+        label = "Late Entry"
+
+    return score, label
+
+
 def calculate_ai_score(metrics: dict) -> dict:
     """
     Runs all scoring functions, sums them, and assigns a human verdict.
-    Returns a dict with individual component scores and the total.
+    Also calculates a separate opportunity score (how much upside is left).
 
     Components (total 100 pts):
       Liquidity Health      0-20  (liq/MC ratio, not raw USD)
@@ -386,10 +453,14 @@ def calculate_ai_score(metrics: dict) -> dict:
             verdict = label
             break
 
+    opp_score, opp_label = _score_opportunity(metrics)
+
     return {
-        "components": components,
-        "total":      total,
-        "verdict":    verdict,
+        "components":       components,
+        "total":            total,
+        "verdict":          verdict,
+        "opportunity":      opp_score,
+        "opportunity_label": opp_label,
     }
 
 
