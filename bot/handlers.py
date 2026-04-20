@@ -3592,27 +3592,25 @@ async def _build_top_calls(timeframe: str = "ALL") -> tuple[str, object]:
     stats = await get_top_calls_stats(since=since)
 
     lines = [
-        "*REVOLT CAPITAL*",
+        "<b>REVOLT CAPITAL</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "*SIGNAL PERFORMANCE REPORT*",
+        "<b>SIGNAL PERFORMANCE REPORT</b>",
         f"{stats['total']} Signals Tracked  |  {stats['avg_x']}x Avg Return",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    lines.append("```")
-
     if not rows:
-        lines.append("_No signals recorded yet._")
+        lines.append("<i>No signals recorded yet.</i>")
     else:
         for i, row in enumerate(rows, 1):
             peak_x = row["peak_multiplier"] or 0
-            caller = "@" + row["scanned_by"].replace("_", "\\_")
-            name   = (row["token_name"] or "?").replace("_", "\\_")
+            caller = "@" + html.escape(row["scanned_by"])
+            name   = html.escape(row["token_name"] or "?")
             arrow  = _rtn_arrow(peak_x)
             win    = "W" if peak_x >= 2.0 else "L"
 
             lines.append("")
-            lines.append(f"*{i:02d}  {name}*")
+            lines.append(f"<b>{i:02d}  {name}</b>")
             lines.append(f"      {caller}  |  {peak_x:.2f}x {arrow}  |  {win}")
 
     lines.append("")
@@ -3621,10 +3619,10 @@ async def _build_top_calls(timeframe: str = "ALL") -> tuple[str, object]:
     leaders = await get_signal_leaders(limit=10)
     if leaders:
         lines.append("")
-        lines.append("*OPERATOR SUMMARY*")
+        lines.append("<b>OPERATOR SUMMARY</b>")
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         for op in leaders:
-            username = "@" + op["username"].replace("_", "\\_")
+            username = "@" + html.escape(op["username"])
             calls = op["scans"]
             wins = op["wins"]
             losses = op["losses"]
@@ -3638,7 +3636,7 @@ async def _build_top_calls(timeframe: str = "ALL") -> tuple[str, object]:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     lines.append("")
-    lines.append(f"_Revolt Capital  |  {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC_")
+    lines.append(f"<i>Revolt Capital  |  {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC</i>")
 
     return "\n".join(lines), top_calls_keyboard(active=timeframe)
 
@@ -3646,13 +3644,13 @@ async def _build_top_calls(timeframe: str = "ALL") -> tuple[str, object]:
 @router.message(Command("leaderboard"))
 async def cmd_leaderboard(message: Message):
     text, keyboard = await _build_top_calls("ALL")
-    await message.reply(text, parse_mode="Markdown", reply_markup=keyboard)
+    await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 @router.message(Command("lb"))
 async def cmd_lb(message: Message):
     text, keyboard = await _build_top_calls("ALL")
-    await message.reply(text, parse_mode="Markdown", reply_markup=keyboard)
+    await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 # ── Callback: Top Calls timeframe ────────────────────────────────────────────
@@ -3665,7 +3663,7 @@ async def cb_top_calls_timeframe(callback: CallbackQuery):
         return
     await callback.answer()
     text, keyboard = await _build_top_calls(timeframe)
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 # ── Callback: Share Signal ────────────────────────────────────────────────────
