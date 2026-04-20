@@ -487,6 +487,7 @@ _NEW_KEYBOT_COLS = [
     ("daily_loss_today_sol", "REAL DEFAULT 0"),
     ("cooldown_minutes",     "INTEGER DEFAULT 0"),
     ("last_trade_at",        "TIMESTAMP"),
+    ("trail_stop_pct",       "REAL DEFAULT 20"),
 ]
 
 _NEW_CANDIDATE_COLS = [
