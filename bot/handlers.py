@@ -3741,7 +3741,11 @@ async def cb_flag_risky(callback: CallbackQuery):
 @router.callback_query(lambda c: c.data and c.data.startswith("refresh:"))
 async def cb_refresh_trade_card(callback: CallbackQuery):
     address = callback.data.split(":", 1)[1]
-    await callback.answer("🔄 Refreshing…")
+    await callback.answer("Refreshing...")
+
+    # Clear cache so refresh gets live data
+    from bot.scanner import _token_cache
+    _token_cache.pop(address, None)
 
     card_text, data = await _build_card_text(address)
     if data is None:

@@ -32,7 +32,7 @@ from bot.agents.trade_profiles import resolve_trade_params, parse_pattern_tags
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL      = 60    # 1 minute — open trade checks (was 5 min,
+POLL_INTERVAL      = 30    # 30 seconds — faster SL/TP checks (was 60s,
                            #   too long for pump.fun volatility; trades
                            #   could drop below SL and recover between
                            #   ticks so SL never fired at check time)
