@@ -234,7 +234,7 @@ async def _build_card_text(address: str) -> tuple[str | None, dict | None]:
     Returns (card_text, data) where card_text includes the position block if held,
     or (None, None) if the token could not be fetched.
     """
-    data = await scan_token(address)
+    data = await scan_token(address, allow_any_dex=True)
     if data is None:
         return None, None
 

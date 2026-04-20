@@ -461,12 +461,15 @@ async def fetch_sol_price_usd() -> float:
         return 0.0
 
 
-async def scan_token(address: str) -> Optional[dict]:
+async def scan_token(address: str, allow_any_dex: bool = False) -> Optional[dict]:
     """
     High-level function called by handlers.
     Returns a combined dict with metrics + AI score, or None on failure.
+    allow_any_dex=True for manual scans (paste CA) so users can scan
+    any token regardless of DEX. The auto-trading pipeline uses the default
+    (False) to enforce the allowlist.
     """
-    pair = await fetch_token_data(address)
+    pair = await fetch_token_data(address, allow_any_dex=allow_any_dex)
     if pair is None:
         return None
 
