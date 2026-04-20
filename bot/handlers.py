@@ -3592,49 +3592,53 @@ async def _build_top_calls(timeframe: str = "ALL") -> tuple[str, object]:
     stats = await get_top_calls_stats(since=since)
 
     lines = [
-        "```",
-        "REVOLT CAPITAL",
-        "─────────────────────────────────",
-        "SIGNAL PERFORMANCE REPORT",
+        "*REVOLT CAPITAL*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "*SIGNAL PERFORMANCE REPORT*",
         f"{stats['total']} Signals Tracked  |  {stats['avg_x']}x Avg Return",
-        "─────────────────────────────────",
-        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
+    lines.append("```")
+
     if not rows:
-        lines.append("No signals recorded yet.")
+        lines.append("_No signals recorded yet._")
     else:
-        lines.append("RK  SIGNAL              OPERATOR          RTN")
-        lines.append("──────────────────────────────────────────────")
         for i, row in enumerate(rows, 1):
             peak_x = row["peak_multiplier"] or 0
-            caller = ("@" + row["scanned_by"])[:18]
-            name   = (row["token_name"] or "?")[:18]
+            caller = "@" + row["scanned_by"].replace("_", "\\_")
+            name   = (row["token_name"] or "?").replace("_", "\\_")
             arrow  = _rtn_arrow(peak_x)
-            lines.append(
-                f"{i:02d}  {name:<18s}  {caller:<18s}  {peak_x:.2f}x {arrow}"
-            )
-        lines.append("──────────────────────────────────────────────")
+            win    = "W" if peak_x >= 2.0 else "L"
+
+            lines.append("")
+            lines.append(f"*{i:02d}  {name}*")
+            lines.append(f"      {caller}  |  {peak_x:.2f}x {arrow}  |  {win}")
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     leaders = await get_signal_leaders(limit=10)
     if leaders:
         lines.append("")
-        lines.append("OPERATOR SUMMARY")
-        lines.append("─────────────────────────────────")
+        lines.append("*OPERATOR SUMMARY*")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         for op in leaders:
-            username = ("@" + op["username"])[:20]
+            username = "@" + op["username"].replace("_", "\\_")
             calls = op["scans"]
+            wins = op["wins"]
+            losses = op["losses"]
             total_pts = op["total_points"]
             win_pct = op["win_pct"]
             avg_x = round(total_pts / calls, 2) if calls > 0 else 0
             lines.append(
-                f"{username:<20s}  {calls:>3d} signals  {avg_x:.2f}x avg  {win_pct}% WR"
+                f"{username}\n"
+                f"      {calls} signals  |  {wins}W-{losses}L  |  {avg_x:.2f}x avg  |  {win_pct}% WR"
             )
-        lines.append("─────────────────────────────────")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     lines.append("")
-    lines.append(f"Revolt Capital  |  {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
-    lines.append("```")
+    lines.append(f"_Revolt Capital  |  {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC_")
 
     return "\n".join(lines), top_calls_keyboard(active=timeframe)
 
