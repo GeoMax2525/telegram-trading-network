@@ -3523,18 +3523,21 @@ async def cb_top_calls_timeframe(callback: CallbackQuery):
 @router.callback_query(lambda c: c.data and c.data.startswith("share:"))
 async def cb_share_signal(callback: CallbackQuery, bot: Bot):
     address = callback.data.split(":", 1)[1]
+    logger.info("Share signal clicked for %s by user %s", address[:12], callback.from_user.id)
 
     if MAIN_GROUP_ID == 0:
+        logger.warning("Share: MAIN_GROUP_ID is 0 — not configured")
         await callback.answer(
-            "MAIN_GROUP_ID is not configured yet. Set it in .env", show_alert=True
+            "MAIN_GROUP_ID is not configured. Set it in Railway env vars.", show_alert=True
         )
         return
 
-    # Use allow_any_dex=True so tokens on any DEX can be shared
-    # (the original scan may have passed but a refetch with DEX filter fails)
+    logger.info("Share: targeting group %s", MAIN_GROUP_ID)
+
     from bot.scanner import fetch_token_data, parse_token_metrics, calculate_ai_score
     pair = await fetch_token_data(address, allow_any_dex=True)
     if pair is None:
+        logger.warning("Share: fetch_token_data returned None for %s", address[:12])
         await callback.answer("Failed to re-fetch token data.", show_alert=True)
         return
 
@@ -3546,17 +3549,31 @@ async def cb_share_signal(callback: CallbackQuery, bot: Bot):
     keyboard = trade_card_keyboard(dex_url=data.get("dex_url", ""), contract_address=address)
 
     shared_by = callback.from_user.username or str(callback.from_user.id)
+    msg_text = f"📢 *Signal shared by @{shared_by}*\n\n{card_text}"
+
     try:
         await bot.send_message(
             chat_id=MAIN_GROUP_ID,
-            text=f"📢 *Signal shared by @{shared_by}*\n\n{card_text}",
+            text=msg_text,
             parse_mode="Markdown",
             reply_markup=keyboard,
         )
-        await callback.answer("Signal shared to main group!")
+        logger.info("Share: posted to group %s successfully", MAIN_GROUP_ID)
+        await callback.answer("Signal shared to LowKey Alpha!")
     except Exception as exc:
-        logger.error("Share signal failed: %s", exc)
-        await callback.answer(f"Failed to share: {exc}", show_alert=True)
+        logger.error("Share signal failed (Markdown): %s", exc)
+        # Retry without parse_mode in case Markdown chars in token name break it
+        try:
+            await bot.send_message(
+                chat_id=MAIN_GROUP_ID,
+                text=msg_text.replace("*", "").replace("_", ""),
+                reply_markup=keyboard,
+            )
+            logger.info("Share: posted to group %s (plain text fallback)", MAIN_GROUP_ID)
+            await callback.answer("Signal shared to LowKey Alpha!")
+        except Exception as exc2:
+            logger.error("Share signal failed (plain text): %s", exc2)
+            await callback.answer(f"Failed: {exc2}", show_alert=True)
 
 
 # ── Callback: Flag as Risky ───────────────────────────────────────────────────
