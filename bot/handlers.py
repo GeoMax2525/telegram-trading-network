@@ -3592,22 +3592,48 @@ async def _build_top_calls(timeframe: str = "ALL") -> tuple[str, object]:
     stats = await get_top_calls_stats(since=since)
 
     lines = [
-        "📈 <b>Top Calls</b>",
-        f"<i>{stats['total']} calls tracked | {stats['avg_x']}x avg</i>",
+        "<b>REVOLT CAPITAL</b>",
+        "─────────────────────────────────────",
+        "<b>SIGNAL PERFORMANCE REPORT</b>",
+        f"{stats['total']} Signals Tracked  |  {stats['avg_x']}x Avg Return",
+        "─────────────────────────────────────",
         "",
     ]
 
     if not rows:
-        lines.append("<i>No calls recorded yet.</i>")
+        lines.append("<i>No signals recorded yet.</i>")
     else:
-        _RUG = {"rug_mc", "rug_liquidity"}
         for i, row in enumerate(rows, 1):
-            peak_x   = row["peak_multiplier"] or 0
-            is_rug   = row["close_reason"] in _RUG
-            suffix   = " 💀" if is_rug else (" 🔥" if peak_x >= 5 else "")
-            caller   = html.escape(row["scanned_by"])
-            name     = html.escape(row["token_name"] or "?")
-            lines.append(f"{i}. {name} » <b>@{caller}</b> {peak_x:.2f}x{suffix}")
+            peak_x = row["peak_multiplier"] or 0
+            caller = html.escape(row["scanned_by"])
+            name   = html.escape(row["token_name"] or "?")
+            arrow  = _rtn_arrow(peak_x)
+            win    = "W" if peak_x >= 2.0 else "L"
+            lines.append(f" {i:02d}   {name}")
+            lines.append(f"        <b>@{caller}</b>   {peak_x:.2f}x {arrow}   {win}")
+
+    lines.append("")
+    lines.append("─────────────────────────────────────")
+
+    leaders = await get_signal_leaders(limit=10)
+    if leaders:
+        lines.append("")
+        lines.append("<b>OPERATOR SUMMARY</b>")
+        lines.append("─────────────────────────────────────")
+        for op in leaders:
+            username = html.escape(op["username"])
+            calls = op["scans"]
+            wins = op["wins"]
+            losses = op["losses"]
+            total_pts = op["total_points"]
+            win_pct = op["win_pct"]
+            avg_x = round(total_pts / calls, 2) if calls > 0 else 0
+            lines.append(f"<b>@{username}</b>")
+            lines.append(f"        {calls} signals   {wins}W-{losses}L   {avg_x:.2f}x avg   {win_pct}% WR")
+        lines.append("─────────────────────────────────────")
+
+    lines.append("")
+    lines.append(f"<i>Revolt Capital  |  {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC</i>")
 
     return "\n".join(lines), top_calls_keyboard(active=timeframe)
 
