@@ -3604,7 +3604,7 @@ async def _build_top_calls(timeframe: str = "ALL") -> tuple[str, object]:
     stats = await get_top_calls_stats(since=since)
 
     lines = [
-        "🟣 ░▒▓ LOWKEY ALPHA NETWORK ▓▒░ 🟣",
+        "🟣 ░▒▓ REVOLT NETWORK ▓▒░ 🟣",
         "⟦ CALLER LEADERBOARD :: LIVE FEED ⟧",
         f"// {stats['total']} signals logged :: avg\\_return={stats['avg_x']}x",
         "",
@@ -3650,7 +3650,7 @@ async def _build_top_calls(timeframe: str = "ALL") -> tuple[str, object]:
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🔵 ░▒▓ LOWKEY ALPHA // LIVE ▓▒░ 🔵")
+    lines.append("🔵 ░▒▓ REVOLT // LIVE ▓▒░ 🔵")
 
     return "\n".join(lines), top_calls_keyboard(active=timeframe)
 
@@ -3721,7 +3721,7 @@ async def cb_share_signal(callback: CallbackQuery, bot: Bot):
             reply_markup=keyboard,
         )
         logger.info("Share: posted to group %s successfully", MAIN_GROUP_ID)
-        await callback.answer("Signal shared to LowKey Alpha!")
+        await callback.answer("Signal shared to Revolt!")
     except Exception as exc:
         logger.error("Share signal failed (Markdown): %s", exc)
         # Retry without parse_mode in case Markdown chars in token name break it
@@ -3732,7 +3732,7 @@ async def cb_share_signal(callback: CallbackQuery, bot: Bot):
                 reply_markup=keyboard,
             )
             logger.info("Share: posted to group %s (plain text fallback)", MAIN_GROUP_ID)
-            await callback.answer("Signal shared to LowKey Alpha!")
+            await callback.answer("Signal shared to Revolt!")
         except Exception as exc2:
             logger.error("Share signal failed (plain text): %s", exc2)
             await callback.answer(f"Failed: {exc2}", show_alert=True)
