@@ -79,76 +79,85 @@ def _format_price(price: float) -> str:
 
 
 def _build_verdict_reasoning(data: dict) -> str:
-    """Generate plain-English reasoning based on individual component scores."""
+    """Generate a line-by-line breakdown explaining each score component."""
     c = data["components"]
-    total = data["total"]
     mc = data.get("market_cap", 0)
     liq = data.get("liquidity_usd", 0)
     vol = data.get("volume_24h", 0)
     pct = data.get("price_change_24h", 0)
+    holders = data.get("estimated_holders", 0)
 
-    strengths = []
-    concerns = []
+    lines = []
 
-    # Liquidity
+    # Liquidity — explain the ratio
     liq_score = c["liquidity"]
+    ratio_pct = (liq / mc * 100) if mc > 0 else 0
     if liq_score >= 16:
-        strengths.append("deep liquidity relative to market cap")
-    elif liq_score <= 6:
-        concerns.append("thin liquidity pool — exit slippage risk")
+        lines.append(f"💧 Liquidity is {ratio_pct:.1f}% of MC — deep pool, clean exits")
+    elif liq_score >= 10:
+        lines.append(f"💧 Liquidity is {ratio_pct:.1f}% of MC — adequate depth")
+    elif liq_score >= 5:
+        lines.append(f"💧 Liquidity is only {ratio_pct:.1f}% of MC — thin, expect slippage")
+    else:
+        lines.append(f"💧 Liquidity dangerously low at {_format_usd(liq)} — hard to exit")
 
-    # Volume
+    # Volume — explain turnover
     vol_score = c["volume"]
+    turnover = (vol / liq) if liq > 0 else 0
     if vol_score >= 16:
-        strengths.append("strong volume turnover — active buying interest")
-    elif vol_score <= 6:
-        concerns.append("low trading activity")
+        lines.append(f"📊 Volume turning over {turnover:.1f}x the pool — heavy interest")
+    elif vol_score >= 10:
+        lines.append(f"📊 Moderate volume at {_format_usd(vol)} — some activity")
+    elif vol_score >= 5:
+        lines.append(f"📊 Low volume at {_format_usd(vol)} — not much attention yet")
+    else:
+        lines.append(f"📊 Minimal volume — no significant trading happening")
 
-    # Momentum
+    # Momentum — explain the move
     mom_score = c["momentum"]
-    if mom_score >= 18:
-        strengths.append("healthy upward momentum with room to run")
-    elif mom_score <= 5:
-        if pct > 100:
-            concerns.append("already pumped hard — late entry risk")
-        else:
-            concerns.append("price in decline")
+    if pct >= 200:
+        lines.append(f"🚀 Up {pct:+.0f}% — strong runner in play")
+    elif pct >= 50:
+        lines.append(f"📈 Up {pct:+.0f}% — solid momentum building")
+    elif pct >= 10:
+        lines.append(f"📈 Up {pct:+.0f}% — early movement, room to run")
+    elif pct >= 0:
+        lines.append(f"➡️ Flat at {pct:+.1f}% — consolidating, watching for breakout")
+    elif pct >= -15:
+        lines.append(f"📉 Down {pct:+.1f}% — pulling back, could be a dip buy or a fade")
+    else:
+        lines.append(f"🔻 Down {pct:+.1f}% — selling pressure, caution")
 
-    # Holders
+    # Holders — explain activity
     hold_score = c["holder_distribution"]
     if hold_score >= 12:
-        strengths.append("strong holder activity with organic buy/sell flow")
-    elif hold_score <= 4:
-        concerns.append("low holder count — early stage or concentrated")
+        lines.append(f"👥 {holders}+ active traders with balanced buying and selling")
+    elif hold_score >= 8:
+        lines.append(f"👥 {holders} traders active — decent distribution")
+    elif hold_score >= 4:
+        lines.append(f"👥 Only {holders} traders — early stage, concentrated risk")
+    else:
+        lines.append(f"👥 Very few traders — extremely early or low interest")
 
-    # Safety
+    # Safety — explain what was found
     safety_score = c["contract_safety"]
     if safety_score >= 13:
-        strengths.append("clean contract — no wash trading or honeypot signals")
-    elif safety_score <= 7:
-        concerns.append("contract safety flags detected")
+        lines.append(f"🛡️ No safety flags — healthy liq/MC ratio, no wash signals")
+    elif safety_score >= 8:
+        lines.append(f"🛡️ Minor flags — some imbalance in liquidity or volume ratios")
+    else:
+        lines.append(f"⚠️ Safety concerns — possible honeypot or wash trading signals")
 
-    # Market strength
+    # Market strength — explain positioning
     mkt_score = c.get("market_strength", c.get("deployer_reputation", 5))
     if mkt_score >= 8:
-        strengths.append("market cap and volume aligned for potential move")
-    elif mkt_score <= 3:
-        concerns.append("weak market positioning")
+        lines.append(f"💎 MC at {_format_usd(mc)} with volume confirming — well positioned")
+    elif mkt_score >= 5:
+        lines.append(f"📍 MC at {_format_usd(mc)} — fair positioning, watching for catalyst")
+    else:
+        lines.append(f"📍 Weak setup — MC and volume not aligned")
 
-    # Build the reasoning text
-    parts = []
-    if strengths:
-        parts.append("Strengths: " + ", ".join(strengths) + ".")
-    if concerns:
-        parts.append("Concerns: " + ", ".join(concerns) + ".")
-
-    if not parts:
-        if total >= 55:
-            parts.append("Balanced metrics across all categories.")
-        else:
-            parts.append("No standout signals in either direction.")
-
-    return " ".join(parts)
+    return "\n".join(lines)
 
 
 def build_trade_card(data: dict) -> str:
@@ -166,7 +175,7 @@ def build_trade_card(data: dict) -> str:
         f"{'─' * 34}",
         f"",
         f"🪙 *{data['name']}* (${data['symbol']})",
-        f"🔗 {data['address']}",
+        f"🔗 `{data['address']}`",
         f"",
         f"💵 Price:       {_format_price(data['price_usd'])}",
         f"📊 Market Cap:  {_format_usd(data['market_cap'])}",
@@ -188,8 +197,9 @@ def build_trade_card(data: dict) -> str:
         f"",
         f"{'─' * 34}",
         f"📋 Verdict: {emoji} *{data['verdict']}*",
-        f"_{reasoning}_",
         f"{'─' * 34}",
+        f"",
+        reasoning,
         f"",
         f"_Scanned at {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC_",
     ]
