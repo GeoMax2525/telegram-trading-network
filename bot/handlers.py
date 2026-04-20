@@ -159,7 +159,6 @@ def _build_verdict_reasoning(data: dict) -> str:
 
     # Opportunity context
     opp = data.get("opportunity", 50)
-    opp_label = data.get("opportunity_label", "")
     if opp >= 75:
         lines.append(f"🎯 Early entry — low MC with room for significant upside")
     elif opp >= 50:
@@ -168,6 +167,55 @@ def _build_verdict_reasoning(data: dict) -> str:
         lines.append(f"🎯 Late entry — most of the move may already be priced in")
     else:
         lines.append(f"🎯 Very late — this has already run hard, high risk of buying the top")
+
+    # Written verdict — overall trade assessment
+    lines.append("")
+    verdict = data.get("verdict", "")
+    total = data.get("total", 0)
+
+    if verdict == "STRONG BUY" and opp >= 60:
+        lines.append(
+            "📝 Strong setup across all metrics with real upside remaining. "
+            "Token health is solid, volume confirms interest, and entry is "
+            "still reasonable. Consider a position with a trailing stop to "
+            "protect gains if momentum continues."
+        )
+    elif verdict == "STRONG BUY" and opp < 60:
+        lines.append(
+            "📝 Token fundamentals are strong but the big move has already "
+            "happened. Healthy token with real volume, but entering here "
+            "means you are buying after significant appreciation. If you "
+            "enter, use tight stops — the risk/reward is not in your favor "
+            "at this level."
+        )
+    elif verdict == "PROMISING" and opp >= 50:
+        lines.append(
+            "📝 Decent setup with some positive signals. Not a slam dunk "
+            "but the token shows enough activity and health to be worth "
+            "watching. Consider a smaller position size and monitor for "
+            "a clear breakout or volume surge before adding."
+        )
+    elif verdict == "PROMISING" and opp < 50:
+        lines.append(
+            "📝 Mixed signals. Some metrics look good but the opportunity "
+            "window may be closing. The move is partially priced in and "
+            "remaining upside may not justify the risk. Watch but don't "
+            "chase."
+        )
+    elif verdict == "RISKY":
+        lines.append(
+            "📝 Multiple warning signs. Low scores across key metrics "
+            "suggest this token carries above-average risk. Could still "
+            "move but the probability is against you. Only consider with "
+            "money you can afford to lose entirely."
+        )
+    else:  # AVOID
+        lines.append(
+            "📝 Too many red flags. Low liquidity, weak activity, or "
+            "contract safety concerns make this a high-probability loss. "
+            "Stay away unless you have specific information that "
+            "contradicts the data."
+        )
 
     return "\n".join(lines)
 
