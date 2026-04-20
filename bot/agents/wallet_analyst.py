@@ -46,7 +46,7 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL       = 1800   # 30 minutes
+POLL_INTERVAL       = 14400  # 4 hours (was 30 min — reduced Helius usage)
 STARTUP_DELAY       = 90     # seconds after bot start
 MAX_WALLETS_PER_RUN = 50     # raised from 30 — Developer plan supports 50 req/s
 EARLY_MC_THRESHOLD  = 200_000  # $200K MC = early entry
@@ -268,14 +268,26 @@ async def _analyze_wallet_trades(wallet_address: str) -> dict:
              "multiples": [], "entry_mcs": [], "early_entries": 0,
              "per_token": []}
 
-    # Use Enhanced Transactions API — returns pre-parsed enriched data
-    # with tokenTransfers, nativeTransfers, timestamp already structured.
-    # Paginate up to 300 txns (3 pages of 100) for deeper history.
-    all_parsed = await get_address_transactions_all(
-        wallet_address, max_txns=300, label=f"wa_trades:{wallet_address[:8]}",
-    )
+    # Use Enhanced Transactions API for tier 1/2 wallets (richer data),
+    # basic RPC + parse for tier 3+ (saves Helius credits).
+    # The tier is passed via the _wallet_tier thread-local set by the caller.
+    use_enhanced = getattr(_analyze_wallet_trades, "_use_enhanced", True)
+    if use_enhanced:
+        all_parsed = await get_address_transactions_all(
+            wallet_address, max_txns=300, label=f"wa_trades:{wallet_address[:8]}",
+        )
+    else:
+        # Basic RPC: get signatures then batch parse (cheaper)
+        sigs = await _get_signatures(wallet_address, limit=200)
+        valid_sigs = [s["signature"] for s in sigs if s.get("blockTime") and not s.get("err")]
+        all_parsed = []
+        for i in range(0, min(len(valid_sigs), 200), 100):
+            batch = valid_sigs[i:i + 100]
+            parsed = await _parse_transactions(batch)
+            all_parsed.extend(parsed)
+
     if not all_parsed:
-        logger.info("Wallet trades %s: 0 transactions from Enhanced API", wallet_address[:12])
+        logger.info("Wallet trades %s: 0 transactions", wallet_address[:12])
         return empty
 
     # Track token flows: mint -> {bought_sol, sold_sol, first_buy_ts, last_sell_ts}
@@ -816,6 +828,17 @@ async def run_once() -> tuple[int, int]:
     async def _analyze_and_save(address: str) -> bool:
         """Analyze a single wallet and save if it passes scoring. Returns True if saved."""
         async with analyze_semaphore:
+            # Use Enhanced API only for existing tier 1/2 wallets (saves credits)
+            try:
+                async with AsyncSessionLocal() as session:
+                    existing = (await session.execute(
+                        select(Wallet).where(Wallet.address == address)
+                    )).scalar_one_or_none()
+                use_enhanced = existing is None or (existing.tier or 0) <= 2
+                _analyze_wallet_trades._use_enhanced = use_enhanced
+            except Exception:
+                _analyze_wallet_trades._use_enhanced = False  # default to cheap
+
             try:
                 stats = await _analyze_wallet_trades(address)
             except Exception as exc:

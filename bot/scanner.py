@@ -64,6 +64,31 @@ def _pair_dex_id(pair: dict) -> str:
     return (pair.get("dexId") or "").lower()
 
 
+# ── Token data cache (5 min TTL) ─────────────────────────────────────────────
+# Prevents re-fetching the same token from DexScreener within 5 minutes.
+# Scanner ticks every 15s and often re-evaluates the same tokens.
+import time as _time_mod
+_token_cache: dict[str, tuple[float, dict]] = {}  # address -> (expire_ts, pair_data)
+_CACHE_TTL = 300  # 5 minutes
+
+
+def _cache_get(address: str) -> Optional[dict]:
+    entry = _token_cache.get(address)
+    if entry and entry[0] > _time_mod.time():
+        return entry[1]
+    return None
+
+
+def _cache_set(address: str, pair: dict) -> None:
+    _token_cache[address] = (_time_mod.time() + _CACHE_TTL, pair)
+    # Evict old entries periodically
+    if len(_token_cache) > 500:
+        now = _time_mod.time()
+        expired = [k for k, (exp, _) in _token_cache.items() if exp <= now]
+        for k in expired:
+            del _token_cache[k]
+
+
 # ── Data Fetching ─────────────────────────────────────────────────────────────
 
 async def fetch_token_data(
@@ -83,6 +108,15 @@ async def fetch_token_data(
     be tracked to exit — filtering them there would orphan the
     position with current_mc=0 forever.
     """
+    # Check cache first (5 min TTL)
+    cached = _cache_get(address)
+    if cached is not None:
+        if allow_any_dex:
+            return cached
+        # Cached pair might be on a non-allowed DEX — still need to filter
+        if _pair_dex_id(cached) in ALLOWED_DEXES:
+            return cached
+
     url = DEXSCREENER_URL.format(address=address)
 
     async with aiohttp.ClientSession() as session:
@@ -100,6 +134,7 @@ async def fetch_token_data(
 
     if allow_any_dex:
         pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
+        _cache_set(address, pairs[0])
         return pairs[0]
 
     # DEX allowlist — drop unsupported pairs before picking best
@@ -114,6 +149,7 @@ async def fetch_token_data(
 
     # Pick the pair with the highest liquidity (most reliable data)
     allowed.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
+    _cache_set(address, allowed[0])
     return allowed[0]
 
 
