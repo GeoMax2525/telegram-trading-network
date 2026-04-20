@@ -419,6 +419,7 @@ class KeyBotSettings(Base):
     daily_loss_limit_pct  = Column(Float,    nullable=False, default=0.0)
     daily_loss_today_sol  = Column(Float,    nullable=False, default=0.0)
     cooldown_minutes      = Column(Integer,  nullable=False, default=0)
+    trail_stop_pct        = Column(Float,    nullable=False, default=20.0)   # trailing stop distance %
     last_trade_at         = Column(DateTime, nullable=True)
     wallet_address = Column(String(64), nullable=True)
     created_at     = Column(DateTime,   default=datetime.utcnow, nullable=False)

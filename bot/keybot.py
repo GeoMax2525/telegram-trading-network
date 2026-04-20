@@ -100,6 +100,9 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
     cd      = getattr(s, "cooldown_minutes", 0) or 0
     cd_label = f"⏱️ Cooldown: {cd} min" if cd > 0 else "⏱️ Cooldown: Off"
 
+    ts      = getattr(s, "trail_stop_pct", 20.0) or 20.0
+    ts_label = f"📐 Trail Stop: {ts:.0f}%"
+
     builder = InlineKeyboardBuilder()
     # Row 1
     builder.row(
@@ -109,12 +112,16 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
     # Row 2
     builder.row(
         InlineKeyboardButton(text=f"🛑 Stop Loss: {sl}%",      callback_data="kb:stop_loss"),
-        InlineKeyboardButton(text=f"📊 Max Positions: {mp}",   callback_data="kb:max_positions"),
+        InlineKeyboardButton(text=ts_label,                     callback_data="kb:trail_stop"),
     )
     # Row 3
     builder.row(
+        InlineKeyboardButton(text=f"📊 Max Positions: {mp}",   callback_data="kb:max_positions"),
+        InlineKeyboardButton(text=cd_label,                     callback_data="kb:cooldown"),
+    )
+    # Row 4
+    builder.row(
         InlineKeyboardButton(text=dl_label,  callback_data="kb:daily_loss"),
-        InlineKeyboardButton(text=cd_label,  callback_data="kb:cooldown"),
     )
     # Row 4
     builder.row(
@@ -167,6 +174,15 @@ def _max_positions_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(4)
     builder.row(InlineKeyboardButton(text="✏️ Custom", callback_data="kb:custom_mp"))
     builder.row(InlineKeyboardButton(text="⬅️ Back",   callback_data="kb:menu"))
+    return builder.as_markup()
+
+
+def _trail_stop_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for pct in (10, 15, 20, 25, 30):
+        builder.button(text=f"{pct}%", callback_data=f"kb:set_ts:{pct}")
+    builder.adjust(5)
+    builder.row(InlineKeyboardButton(text="⬅️ Back", callback_data="kb:menu"))
     return builder.as_markup()
 
 
@@ -441,6 +457,13 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         )
         await callback.answer()
 
+    elif action == "trail_stop":
+        await callback.message.edit_text(
+            "📐 *Trailing Stop*\nOnce in profit, auto-sell if price drops this % from peak:",
+            parse_mode="Markdown", reply_markup=_trail_stop_keyboard(),
+        )
+        await callback.answer()
+
     elif action == "wallet":
         s = await get_keybot_settings(user_id)
         if s and s.wallet_address:
@@ -502,6 +525,13 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         text, keyboard = await _build_menu(user_id)
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer(f"✅ Stop loss set to {val}%")
+
+    elif action.startswith("set_ts:"):
+        val = float(action.split(":", 1)[1])
+        await upsert_keybot_settings(user_id, trail_stop_pct=val)
+        text, keyboard = await _build_menu(user_id)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.answer(f"✅ Trailing stop set to {val}%")
 
     elif action == "max_positions":
         await callback.message.edit_text(

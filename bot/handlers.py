@@ -104,12 +104,12 @@ def build_trade_card(data: dict) -> str:
         f"",
         f"[{score_bar}] *{data['total']}/100*",
         f"",
-        f"  • Liquidity:            {data['components']['liquidity']:.1f}/20",
-        f"  • Volume:               {data['components']['volume']:.1f}/20",
+        f"  • Liquidity Health:     {data['components']['liquidity']:.1f}/20",
+        f"  • Volume Velocity:      {data['components']['volume']:.1f}/20",
         f"  • Momentum:             {data['components']['momentum']:.1f}/20",
-        f"  • Holder Distribution:  {data['components']['holder_distribution']:.1f}/15",
+        f"  • Holder Activity:      {data['components']['holder_distribution']:.1f}/15",
         f"  • Contract Safety:      {data['components']['contract_safety']:.1f}/15",
-        f"  • Deployer Reputation:  {data['components']['deployer_reputation']:.1f}/10",
+        f"  • Market Strength:      {data['components'].get('market_strength', data['components'].get('deployer_reputation', 0)):.1f}/10",
         f"",
         f"{'─' * 34}",
         f"📋 Verdict: {emoji} *{data['verdict']}*",
@@ -3450,27 +3450,37 @@ async def cb_share_signal(callback: CallbackQuery, bot: Bot):
 
     if MAIN_GROUP_ID == 0:
         await callback.answer(
-            "⚠️ MAIN_GROUP_ID is not configured yet. Set it in .env", show_alert=True
+            "MAIN_GROUP_ID is not configured yet. Set it in .env", show_alert=True
         )
         return
 
-    await callback.answer("📢 Sharing signal to main group…")
-
-    data = await scan_token(address)
-    if data is None:
-        await callback.answer("❌ Failed to re-fetch token data.", show_alert=True)
+    # Use allow_any_dex=True so tokens on any DEX can be shared
+    # (the original scan may have passed but a refetch with DEX filter fails)
+    from bot.scanner import fetch_token_data, parse_token_metrics, calculate_ai_score
+    pair = await fetch_token_data(address, allow_any_dex=True)
+    if pair is None:
+        await callback.answer("Failed to re-fetch token data.", show_alert=True)
         return
+
+    metrics = parse_token_metrics(pair)
+    score_data = calculate_ai_score(metrics)
+    data = {**metrics, **score_data}
 
     card_text = build_trade_card(data)
     keyboard = trade_card_keyboard(dex_url=data.get("dex_url", ""), contract_address=address)
 
     shared_by = callback.from_user.username or str(callback.from_user.id)
-    await bot.send_message(
-        chat_id=MAIN_GROUP_ID,
-        text=f"📢 *Signal shared by @{shared_by}*\n\n{card_text}",
-        parse_mode="Markdown",
-        reply_markup=keyboard,
-    )
+    try:
+        await bot.send_message(
+            chat_id=MAIN_GROUP_ID,
+            text=f"📢 *Signal shared by @{shared_by}*\n\n{card_text}",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+        await callback.answer("Signal shared to main group!")
+    except Exception as exc:
+        logger.error("Share signal failed: %s", exc)
+        await callback.answer(f"Failed to share: {exc}", show_alert=True)
 
 
 # ── Callback: Flag as Risky ───────────────────────────────────────────────────

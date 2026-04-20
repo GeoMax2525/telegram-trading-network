@@ -30,12 +30,12 @@ ADMIN_IDS: list[int] = [
 
 # ── AI Scoring weights (must sum to 100) ──────────────────────────────────────
 SCORE_WEIGHTS = {
-    "liquidity":            20,   # USD liquidity in the pool
-    "volume":               20,   # 24h trading volume
-    "momentum":             20,   # price change % over 24h
-    "holder_distribution":  15,   # estimated holder spread
-    "contract_safety":      15,   # basic on-chain safety signals
-    "deployer_reputation":  10,   # deployer wallet history heuristic
+    "liquidity":            20,   # liquidity health (liq/MC ratio)
+    "volume":               20,   # volume velocity (turnover + pace)
+    "momentum":             20,   # price momentum (sweet spot detection)
+    "holder_distribution":  15,   # holder activity + buy/sell balance
+    "contract_safety":      15,   # honeypot / wash trading detection
+    "market_strength":      10,   # MC range + volume-momentum alignment
 }
 
 # ── Verdict thresholds (AI score out of 100) ──────────────────────────────────

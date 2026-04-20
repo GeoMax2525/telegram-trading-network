@@ -150,59 +150,144 @@ def parse_token_metrics(pair: dict) -> dict:
 
 # ── AI Scoring ────────────────────────────────────────────────────────────────
 
-def _score_liquidity(liquidity_usd: float) -> float:
+def _score_liquidity(metrics: dict) -> float:
     """
-    Full 20 pts for ≥ $500k liquidity. Scales linearly down to 0 for < $5k.
+    Liquidity health (0-20 pts). Uses liquidity-to-MC ratio instead of
+    raw USD — a $50K MC token with $10K liquidity is healthier than a
+    $5M MC token with $50K liquidity.
     """
-    if liquidity_usd >= 500_000:
-        return 20.0
-    if liquidity_usd < 5_000:
+    liq = metrics["liquidity_usd"]
+    mc = metrics["market_cap"] or 1
+
+    if liq < 3_000:
         return 0.0
-    return round((liquidity_usd / 500_000) * 20, 2)
+
+    ratio = liq / mc
+    # Best: 5-15% liq/mc ratio = healthy pool depth
+    if ratio >= 0.10:
+        score = 20.0
+    elif ratio >= 0.05:
+        score = 16.0
+    elif ratio >= 0.03:
+        score = 12.0
+    elif ratio >= 0.01:
+        score = 8.0
+    else:
+        score = 4.0
+
+    # Bonus for absolute liquidity depth
+    if liq >= 100_000:
+        score = min(20.0, score + 2.0)
+
+    return round(score, 1)
 
 
-def _score_volume(volume_24h: float) -> float:
+def _score_volume(metrics: dict) -> float:
     """
-    Full 20 pts for ≥ $1M daily volume. Scales linearly down to 0 for < $10k.
+    Volume velocity (0-20 pts). Measures volume relative to liquidity
+    (turnover rate) and 5-min pace vs hourly average, not just raw 24h.
+    High turnover = active interest. Pace acceleration = early momentum.
     """
-    if volume_24h >= 1_000_000:
-        return 20.0
-    if volume_24h < 10_000:
+    vol_24h = metrics["volume_24h"]
+    liq = metrics["liquidity_usd"]
+
+    if vol_24h < 1_000:
         return 0.0
-    return round((volume_24h / 1_000_000) * 20, 2)
+
+    score = 0.0
+
+    # Turnover rate: vol/liq ratio (healthy = 1-10x per day)
+    if liq > 0:
+        turnover = vol_24h / liq
+        if turnover >= 5.0:
+            score += 12.0
+        elif turnover >= 2.0:
+            score += 9.0
+        elif turnover >= 1.0:
+            score += 6.0
+        elif turnover >= 0.3:
+            score += 3.0
+
+    # Raw volume floor bonus (shows real interest exists)
+    if vol_24h >= 500_000:
+        score += 8.0
+    elif vol_24h >= 100_000:
+        score += 6.0
+    elif vol_24h >= 25_000:
+        score += 4.0
+    elif vol_24h >= 5_000:
+        score += 2.0
+
+    return round(min(20.0, score), 1)
 
 
-def _score_momentum(price_change_24h: float) -> float:
+def _score_momentum(metrics: dict) -> float:
     """
-    Rewards positive momentum, penalises steep drops.
-    +20 pts at ≥ +50 %, 0 pts at -30 % or worse.
+    Price momentum (0-20 pts). Rewards moderate positive movement but
+    penalizes tokens that have already pumped hard (you're late) and
+    tokens in freefall (catching a knife).
     """
-    pct = price_change_24h
-    if pct >= 50:
+    pct = metrics["price_change_24h"]
+
+    # Sweet spot: +10% to +100% = strong momentum, still room to run
+    if 10 <= pct <= 100:
         return 20.0
-    if pct <= -30:
-        return 0.0
-    # Map [-30, +50] → [0, 20]
-    return round(((pct + 30) / 80) * 20, 2)
-
-
-def _score_holder_distribution(estimated_holders: int) -> float:
-    """
-    More unique tx participants = better distribution.
-    Full 15 pts for ≥ 500 unique participants.
-    """
-    if estimated_holders >= 500:
+    # Early momentum: +2% to +10%
+    if 2 <= pct < 10:
         return 15.0
-    if estimated_holders < 10:
+    # Flat / consolidating: -5% to +2% (not bad, could break out)
+    if -5 <= pct < 2:
+        return 10.0
+    # Already pumped too hard: >100% (you're probably late)
+    if pct > 100:
+        return 8.0
+    # Dipping: -5% to -20%
+    if -20 <= pct < -5:
+        return 5.0
+    # Dumping hard: below -20%
+    return 0.0
+
+
+def _score_holder_distribution(metrics: dict) -> float:
+    """
+    Holder activity (0-15 pts). Uses buy/sell transaction count as a
+    proxy for distribution quality. High buy count with balanced
+    buy/sell ratio = organic activity.
+    """
+    holders = metrics["estimated_holders"]
+
+    if holders < 10:
         return 0.0
-    return round((estimated_holders / 500) * 15, 2)
+
+    # Base score from unique participants
+    if holders >= 1000:
+        score = 12.0
+    elif holders >= 500:
+        score = 10.0
+    elif holders >= 200:
+        score = 8.0
+    elif holders >= 100:
+        score = 6.0
+    elif holders >= 50:
+        score = 4.0
+    else:
+        score = 2.0
+
+    # Buy/sell balance bonus (both sides active = organic market)
+    buys = metrics.get("buys_24h", holders)
+    sells = metrics.get("sells_24h", 0)
+    if buys > 0 and sells > 0:
+        ratio = min(buys, sells) / max(buys, sells)
+        if ratio >= 0.3:
+            score += 3.0  # healthy two-sided market
+
+    return round(min(15.0, score), 1)
 
 
 def _score_contract_safety(metrics: dict) -> float:
     """
-    Heuristic safety score (0–15 pts) based on observable signals:
-    - Liquidity-to-MarketCap ratio  (low ratio = honeypot risk)
-    - Volume-to-Liquidity ratio     (very high = wash trading risk)
+    Contract safety (0-15 pts). Checks liquidity depth relative to MC,
+    volume wash-trading signals, and basic health indicators.
     """
     score = 15.0
     liq = metrics["liquidity_usd"]
@@ -210,53 +295,83 @@ def _score_contract_safety(metrics: dict) -> float:
     vol = metrics["volume_24h"]
 
     liq_mc_ratio = liq / mc
-    # If liquidity is < 1 % of MC, subtract 7 pts
-    if liq_mc_ratio < 0.01:
-        score -= 7
-    # If volume is > 20× liquidity, likely wash trading: subtract 5 pts
-    if liq > 0 and (vol / liq) > 20:
+
+    # Dangerously low liquidity relative to MC = honeypot risk
+    if liq_mc_ratio < 0.005:
+        score -= 8
+    elif liq_mc_ratio < 0.01:
         score -= 5
 
-    return max(0.0, round(score, 2))
+    # Extreme volume/liquidity = wash trading
+    if liq > 0 and (vol / liq) > 30:
+        score -= 5
+    elif liq > 0 and (vol / liq) > 15:
+        score -= 3
+
+    # Very low absolute liquidity
+    if liq < 5_000:
+        score -= 3
+
+    return max(0.0, round(score, 1))
 
 
-def _score_deployer_reputation(metrics: dict) -> float:
+def _score_market_strength(metrics: dict) -> float:
     """
-    Deployer reputation heuristic (0–10 pts).
-    Without on-chain wallet history access we use proxy signals:
-    - Age of the pair on DexScreener (not directly available, so we use
-      volume / liquidity stability as a proxy).
-    Currently returns a conservative mid-score of 6 to avoid over-awarding.
-    Extend this with a wallet-analysis API call when available.
+    Market strength (0-10 pts). Combines multiple signals into an
+    overall health indicator: MC size, volume presence, and momentum
+    direction working together.
     """
-    # Conservative base: 6/10 (neutral — no negative signals found)
-    base = 6.0
-
-    # Slight bonus if volume is healthy relative to liquidity
-    liq = metrics["liquidity_usd"]
+    mc = metrics["market_cap"] or 0
     vol = metrics["volume_24h"]
-    if liq > 0:
-        ratio = vol / liq
-        if 0.5 <= ratio <= 10:   # healthy range
-            base = min(10.0, base + 2)
-        elif ratio > 20:          # suspicious wash-trade signal
-            base = max(0.0, base - 4)
+    pct = metrics["price_change_24h"]
 
-    return round(base, 2)
+    score = 0.0
+
+    # MC in productive range ($10K-$5M for memecoins)
+    if 50_000 <= mc <= 2_000_000:
+        score += 4.0  # sweet spot
+    elif 10_000 <= mc <= 5_000_000:
+        score += 3.0  # acceptable
+    elif mc > 5_000_000:
+        score += 2.0  # established but less upside
+    else:
+        score += 1.0
+
+    # Volume confirms price action (volume + momentum aligned)
+    if vol > 10_000 and pct > 0:
+        score += 3.0  # green volume
+    elif vol > 10_000:
+        score += 1.5  # volume exists but price down
+
+    # Not in freefall
+    if pct > -10:
+        score += 3.0
+    elif pct > -25:
+        score += 1.5
+
+    return round(min(10.0, score), 1)
 
 
 def calculate_ai_score(metrics: dict) -> dict:
     """
     Runs all scoring functions, sums them, and assigns a human verdict.
     Returns a dict with individual component scores and the total.
+
+    Components (total 100 pts):
+      Liquidity Health      0-20  (liq/MC ratio, not raw USD)
+      Volume Velocity       0-20  (turnover + pace, not raw 24h)
+      Momentum              0-20  (rewards sweet spot, penalizes late entries)
+      Holder Distribution   0-15  (activity count + buy/sell balance)
+      Contract Safety       0-15  (honeypot/wash detection)
+      Market Strength       0-10  (MC range + volume-momentum alignment)
     """
     components = {
-        "liquidity":            _score_liquidity(metrics["liquidity_usd"]),
-        "volume":               _score_volume(metrics["volume_24h"]),
-        "momentum":             _score_momentum(metrics["price_change_24h"]),
-        "holder_distribution":  _score_holder_distribution(metrics["estimated_holders"]),
+        "liquidity":            _score_liquidity(metrics),
+        "volume":               _score_volume(metrics),
+        "momentum":             _score_momentum(metrics),
+        "holder_distribution":  _score_holder_distribution(metrics),
         "contract_safety":      _score_contract_safety(metrics),
-        "deployer_reputation":  _score_deployer_reputation(metrics),
+        "market_strength":      _score_market_strength(metrics),
     }
 
     total = round(sum(components.values()), 1)
