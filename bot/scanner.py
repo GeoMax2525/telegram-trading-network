@@ -223,28 +223,31 @@ def _score_volume(metrics: dict) -> float:
 
 def _score_momentum(metrics: dict) -> float:
     """
-    Price momentum (0-20 pts). Rewards moderate positive movement but
-    penalizes tokens that have already pumped hard (you're late) and
-    tokens in freefall (catching a knife).
+    Price momentum (0-20 pts). Rewards positive movement at any level.
+    Memecoins routinely do 200-1000% in a day — penalizing big moves
+    misses runners. Negative momentum is the real red flag.
     """
     pct = metrics["price_change_24h"]
 
-    # Sweet spot: +10% to +100% = strong momentum, still room to run
-    if 10 <= pct <= 100:
-        return 20.0
-    # Early momentum: +2% to +10%
-    if 2 <= pct < 10:
-        return 15.0
-    # Flat / consolidating: -5% to +2% (not bad, could break out)
-    if -5 <= pct < 2:
-        return 10.0
-    # Already pumped too hard: >100% (you're probably late)
-    if pct > 100:
-        return 8.0
-    # Dipping: -5% to -20%
-    if -20 <= pct < -5:
-        return 5.0
-    # Dumping hard: below -20%
+    # Strong positive momentum at any level
+    if pct >= 200:
+        return 20.0   # mooning
+    if pct >= 50:
+        return 20.0   # strong runner
+    if pct >= 10:
+        return 18.0   # healthy momentum
+    if pct >= 2:
+        return 14.0   # early momentum
+    # Flat / consolidating: -5% to +2%
+    if pct >= -5:
+        return 10.0   # neutral, could break either way
+    # Dipping: -5% to -15%
+    if pct >= -15:
+        return 6.0
+    # Dropping: -15% to -30%
+    if pct >= -30:
+        return 3.0
+    # Dumping hard: below -30%
     return 0.0
 
 
