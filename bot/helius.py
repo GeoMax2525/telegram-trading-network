@@ -4,7 +4,7 @@ helius.py — Shared Helius API client.
 Single reusable aiohttp session with:
   - Connection pooling (persistent session, not per-request)
   - Exponential backoff retry on 429 / 5xx errors
-  - Rate-limit aware (50 req/s on Developer plan)
+  - Rate-limit aware (200 req/s on Business plan)
   - Both RPC and Enhanced API endpoints
   - Proper error logging (no more silent failures)
 
@@ -22,9 +22,9 @@ from bot.config import HELIUS_RPC_URL, HELIUS_API_KEY
 logger = logging.getLogger(__name__)
 
 # ── Rate limit config ────────────────────────────────────────────────────────
-MAX_CONCURRENT = 40         # stay under 50 req/s Developer plan limit
+MAX_CONCURRENT = 150        # Business plan: 200 req/s capacity
 MAX_RETRIES    = 4          # retry count for transient errors
-BASE_DELAY     = 0.5        # initial backoff delay (seconds)
+BASE_DELAY     = 0.3        # initial backoff delay (seconds)
 
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 _session: aiohttp.ClientSession | None = None

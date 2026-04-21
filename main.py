@@ -123,7 +123,7 @@ async def main() -> None:
         "Helius: key=%s rpc=%s %s",
         key_preview,
         HELIUS_RPC_URL[:40] + "..." if len(HELIUS_RPC_URL) > 40 else HELIUS_RPC_URL,
-        "WARNING: DEMO KEY -- wallet data will fail!" if is_demo else "OK Developer plan",
+        "WARNING: DEMO KEY -- wallet data will fail!" if is_demo else "OK Business plan",
     )
     if is_demo:
         logger.warning("HELIUS_API_KEY is 'demo' — set HELIUS_API_KEY env var for wallet/transaction data")

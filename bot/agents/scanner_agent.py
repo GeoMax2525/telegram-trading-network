@@ -467,7 +467,7 @@ async def _source1_new_launches() -> list[dict]:
         }
 
     # Run profile checks concurrently (raised from 15 — Developer plan supports 50 req/s)
-    tasks = [_check_profile(p) for p in sol_profiles[:25]]
+    tasks = [_check_profile(p) for p in sol_profiles[:40]]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for r in results:
@@ -505,7 +505,7 @@ async def _source2_insider_wallets() -> list[dict]:
     if not wallets:
         logger.info("Scanner source2: no tiered wallets in DB — source will return empty until Agent 2 or GMGN imports some")
         return []
-    logger.info("Scanner source2: checking %d tier1/2/3 wallets for recent buys", len(wallets[:30]))
+    logger.info("Scanner source2: checking %d tier1/2/3 wallets for recent buys", len(wallets[:50]))
 
     since_ts = int(time.time()) - INSIDER_WINDOW
     # mint -> {1: count, 2: count, 3: count}
@@ -531,7 +531,7 @@ async def _source2_insider_wallets() -> list[dict]:
 
     tasks = [
         _check_wallet(w.address, int(w.tier or 2), getattr(w, "cluster_id", None))
-        for w in wallets[:30]   # doubled from 15 — Developer plan supports 50 req/s
+        for w in wallets[:50]   # Business plan: 200 req/s
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -647,7 +647,7 @@ async def _source3_volume_spikes() -> list[dict]:
             }
         return None
 
-    tasks = [_check_volume(p) for p in sol_profiles[:20]]
+    tasks = [_check_volume(p) for p in sol_profiles[:30]]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for r in results:
         if isinstance(r, dict):
@@ -1062,7 +1062,7 @@ async def run_once() -> tuple[int, int]:
     candidates_found = len(deduped)
 
     # Evaluate (rug filter + AI score + pattern match) with concurrency cap
-    semaphore = asyncio.Semaphore(8)  # raised from 3 — Developer plan supports 50 req/s
+    semaphore = asyncio.Semaphore(15)  # Business plan: 200 req/s
 
     async def _bounded_eval(raw):
         async with semaphore:
