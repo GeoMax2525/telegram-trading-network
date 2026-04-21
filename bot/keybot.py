@@ -135,7 +135,10 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
             callback_data=f"kbclose:{pos.id}",
         ))
     # Row last
-    builder.row(InlineKeyboardButton(text="❌ Close", callback_data="kb:close"))
+    builder.row(
+        InlineKeyboardButton(text="🔄 Refresh", callback_data="kb:refresh"),
+        InlineKeyboardButton(text="❌ Close", callback_data="kb:close"),
+    )
     return builder.as_markup()
 
 
@@ -509,6 +512,11 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         text, keyboard = await _build_menu(user_id)
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer("🗑️ Wallet removed")
+
+    elif action == "refresh":
+        text, keyboard = await _build_menu(user_id)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.answer("Refreshed")
 
     elif action == "close":
         await state.clear()
