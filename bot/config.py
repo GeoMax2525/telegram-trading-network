@@ -64,11 +64,17 @@ HELIUS_RPC_URL: str = os.getenv(
 )
 
 # HELIUS_API_KEY: prefer standalone env var, fall back to extracting from RPC URL.
-# The Developer plan provides a dedicated API key separate from the RPC URL.
 from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
 _parsed_rpc = _urlparse(HELIUS_RPC_URL)
 _key_from_url = _parse_qs(_parsed_rpc.query).get("api-key", [""])[0]
 HELIUS_API_KEY: str = os.getenv("HELIUS_API_KEY", "") or _key_from_url or "demo"
+
+# Business plan endpoints
+HELIUS_PARSE_URL: str = os.getenv(
+    "HELIUS_PARSE_URL",
+    "https://api.helius.xyz/v0",
+)
+HELIUS_LASERSTREAM_URL: str = os.getenv("HELIUS_LASERSTREAM_URL", "")
 
 # ── Database ──────────────────────────────────────────────────────────────────
 # Railway injects DATABASE_URL as postgres:// or postgresql://.
