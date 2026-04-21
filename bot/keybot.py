@@ -1198,9 +1198,7 @@ async def cb_close_position(callback: CallbackQuery):
     if pos is None or pos.status != "open":
         await callback.answer("Position already closed.", show_alert=True)
         return
-    if pos.user_id != user_id:
-        await callback.answer("Not your position.", show_alert=True)
-        return
+    # All positions are shared — any user can close any position
 
     keypair = get_keypair()
     if keypair is None:
