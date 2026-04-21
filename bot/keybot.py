@@ -285,10 +285,20 @@ def _menu_text(
             current_val_sol = pos.amount_sol_spent * ratio
             profit_sol      = current_val_sol - pos.amount_sol_spent
             profit_pct      = (ratio - 1.0) * 100.0
+            logger.info(
+                "Position %d value: entry_mc=%.0f current_mc=%.0f ratio=%.2fx "
+                "spent=%.4f value=%.4f",
+                pos.id, pos.entry_mc, current_mc, ratio,
+                pos.amount_sol_spent, current_val_sol,
+            )
         else:
             current_val_sol = pos.amount_sol_spent
             profit_sol      = 0.0
             profit_pct      = 0.0
+            logger.warning(
+                "Position %d value: entry_mc=%s current_mc=%s — using flat value",
+                pos.id, pos.entry_mc, current_mc,
+            )
 
         total_pos_sol   += current_val_sol
         current_val_usd  = current_val_sol * sol_price_usd if sol_price_usd else 0.0
@@ -916,6 +926,10 @@ async def cb_keybot_buy(callback: CallbackQuery):
 
     # Save position separately — DB failure must not hide a successful swap
     try:
+        # Clear cache so we get the freshest MC at time of actual purchase
+        from bot.scanner import _token_cache
+        _token_cache.pop(address, None)
+
         live        = await fetch_live_data(address)
         entry_mc    = (live["market_cap"] or None) if live else None
         entry_price = (live["price_usd"]  or None) if live else None
