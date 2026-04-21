@@ -339,8 +339,8 @@ async def _score_rug(candidate: dict) -> float:
         logger.info("Rug score: raw=%s → safety=%.0f", rc_raw, safety)
         return safety
 
-    logger.debug("Rug score: no rugcheck data — defaulting to 40 + gmgn=%+d", gmgn_bonus)
-    return max(1.0, min(100.0, 40.0 + gmgn_bonus))
+    logger.debug("Rug score: no rugcheck data — defaulting to 50 + gmgn=%+d", gmgn_bonus)
+    return max(1.0, min(100.0, 50.0 + gmgn_bonus))
 
 
 async def _score_caller(candidate: dict) -> float:

@@ -2836,13 +2836,14 @@ AGENT_PARAM_DEFAULTS = {
     # Pattern engine
     "pattern_min_samples": 3, "pattern_interval_hours": 6,
     # Confidence thresholds
-    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 60,
-    # MC weights — low
-    "low_mc_insider": 0.35, "low_mc_fingerprint": 0.28, "low_mc_chart": 0.05,
-    "low_mc_rug": 0.20, "low_mc_caller": 0.08, "low_mc_market": 0.04,
+    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 50,
+    # MC weights — low (rebalanced: insider reduced since data is sparse,
+    # fingerprint + rug carry more weight so tokens can actually pass threshold)
+    "low_mc_insider": 0.20, "low_mc_fingerprint": 0.30, "low_mc_chart": 0.10,
+    "low_mc_rug": 0.22, "low_mc_caller": 0.10, "low_mc_market": 0.08,
     # MC weights — mid
-    "mid_mc_insider": 0.30, "mid_mc_fingerprint": 0.25, "mid_mc_chart": 0.15,
-    "mid_mc_rug": 0.18, "mid_mc_caller": 0.08, "mid_mc_market": 0.04,
+    "mid_mc_insider": 0.25, "mid_mc_fingerprint": 0.25, "mid_mc_chart": 0.15,
+    "mid_mc_rug": 0.18, "mid_mc_caller": 0.10, "mid_mc_market": 0.07,
     # MC weights — high
     "high_mc_insider": 0.20, "high_mc_fingerprint": 0.20, "high_mc_chart": 0.30,
     "high_mc_rug": 0.15, "high_mc_caller": 0.10, "high_mc_market": 0.05,
@@ -3434,8 +3435,22 @@ async def init_agent_params() -> int:
     # Tighten paper trading: raise confidence threshold, reduce max open trades.
     # 56 trades/day at 19% WR = churning. Need to be much more selective.
     _tighten = {
-        "conf_paper_threshold": 60.0,    # only high-conviction trades
-        "max_open_paper_trades": 3.0,    # fewer concurrent = more selective
+        "conf_paper_threshold": 50.0,    # lowered from 60 — was mathematically impossible for low MC
+        "max_open_paper_trades": 3.0,
+        # Rebalanced low-MC weights so tokens can pass without insider data
+        "low_mc_insider": 0.20,
+        "low_mc_fingerprint": 0.30,
+        "low_mc_chart": 0.10,
+        "low_mc_rug": 0.22,
+        "low_mc_caller": 0.10,
+        "low_mc_market": 0.08,
+        # Rebalanced mid-MC weights
+        "mid_mc_insider": 0.25,
+        "mid_mc_fingerprint": 0.25,
+        "mid_mc_chart": 0.15,
+        "mid_mc_rug": 0.18,
+        "mid_mc_caller": 0.10,
+        "mid_mc_market": 0.07,
     }
     try:
         async with AsyncSessionLocal() as session:

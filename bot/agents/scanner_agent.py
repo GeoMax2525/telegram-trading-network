@@ -987,10 +987,14 @@ async def run_once() -> tuple[int, int]:
     # once mode flipped back to paper. Cross-tick dedup is now handled
     # by DB gates (has_open_paper_trade + has_recent_manual_close)
     # which are correct and respect the actual trade state.
+    # Consume pending candidates (TG signals, etc.) BEFORE clearing.
+    # Previous bug: .clear() wiped TG signals before they were evaluated.
+    injected_candidates = list(state.pending_candidates)
     state.pending_candidates.clear()
+    if injected_candidates:
+        logger.info("Scanner: consumed %d injected candidates (TG signals, etc.)", len(injected_candidates))
 
-    # Load ALL pattern types — scanner was previously only using winner_2x,
-    # completely ignoring mega_runner, winner_5x, winner_10x patterns.
+    # Load ALL pattern types
     pattern_2x   = await get_pattern_by_type("winner_2x")
     pattern_5x   = await get_pattern_by_type("winner_5x")
     pattern_10x  = await get_pattern_by_type("winner_10x")
@@ -998,10 +1002,7 @@ async def run_once() -> tuple[int, int]:
     all_patterns = [p for p in [pattern_2x, pattern_5x, pattern_10x, pattern_mega] if p is not None]
     logger.info("Scanner: loaded %d pattern types for matching", len(all_patterns))
 
-    # Gather raw candidates from all 4 sources concurrently. Source 1 and
-    # Source 3 both hit DexScreener PROFILES_URL (historically); Source 2
-    # uses Helius wallet-history; Source 4 reads the local Token table
-    # for GMGN-flagged tokens (trending / smart money).
+    # Gather raw candidates from all 5 sources concurrently.
     s1, s2, s3, s4 = await asyncio.gather(
         _source1_new_launches(),
         _source2_insider_wallets(),
@@ -1011,6 +1012,8 @@ async def run_once() -> tuple[int, int]:
     )
 
     raw_candidates: list[dict] = []
+    # Source 5: injected candidates (TG signals, manual additions)
+    raw_candidates.extend(injected_candidates)
     per_source_counts = {"s1_new_launch": 0, "s2_insider": 0, "s3_volume": 0, "s4_gmgn": 0}
     for label, result in zip(
         ("s1_new_launch", "s2_insider", "s3_volume", "s4_gmgn"),
