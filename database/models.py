@@ -2797,7 +2797,7 @@ AGENT_PARAM_DEFAULTS = {
     # Pattern engine
     "pattern_min_samples": 3, "pattern_interval_hours": 6,
     # Confidence thresholds
-    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 55,
+    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 60,
     # MC weights — low
     "low_mc_insider": 0.35, "low_mc_fingerprint": 0.28, "low_mc_chart": 0.05,
     "low_mc_rug": 0.20, "low_mc_caller": 0.08, "low_mc_market": 0.04,
@@ -3395,8 +3395,8 @@ async def init_agent_params() -> int:
     # Tighten paper trading: raise confidence threshold, reduce max open trades.
     # 56 trades/day at 19% WR = churning. Need to be much more selective.
     _tighten = {
-        "conf_paper_threshold": 55.0,    # was ~20-45, way too loose
-        "max_open_paper_trades": 3.0,    # was 5, fewer concurrent = more selective
+        "conf_paper_threshold": 60.0,    # only high-conviction trades
+        "max_open_paper_trades": 3.0,    # fewer concurrent = more selective
     }
     try:
         async with AsyncSessionLocal() as session:

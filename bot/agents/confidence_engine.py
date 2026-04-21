@@ -577,12 +577,63 @@ async def score_candidate(candidate: dict) -> dict:
     pattern_tags = match_pattern_types(matchable)
     resolved = await resolve_trade_params(pattern_tags)
 
-    trade_tp_x         = resolved["tp_x"]
-    trade_sl_pct       = resolved["sl_pct"]
-    trade_position_pct = resolved.get("position_pct", 10.0)  # learned per pattern_type
+    base_tp  = resolved["tp_x"]
+    base_sl  = resolved["sl_pct"]
+    trade_position_pct = resolved.get("position_pct", 10.0)
     trail_enabled      = resolved["trail_enabled"]
     trail_trigger      = resolved["trail_trigger"]
     trail_pct          = resolved["trail_pct"]
+
+    # ── Per-trade adaptive TP/SL ─────────────────────────────────────
+    # Override base TP/SL based on THIS trade's characteristics.
+    # MC size: smaller tokens have more room to run but also dump harder.
+    # Confidence: higher confidence = wider SL (give it room), tighter on low conf.
+    # Momentum: already pumped = lower TP (less room), fresh = higher TP.
+
+    pct_24h = candidate.get("price_change_24h", 0) or 0
+
+    # MC-based TP adjustment
+    if mcap < 50_000:
+        mc_tp = 8.0    # micro cap — huge upside potential
+        mc_sl = 20.0   # but also high risk, cut quick
+    elif mcap < 200_000:
+        mc_tp = 5.0    # small cap — strong upside
+        mc_sl = 22.0
+    elif mcap < 500_000:
+        mc_tp = 4.0    # mid
+        mc_sl = 25.0
+    elif mcap < 2_000_000:
+        mc_tp = 3.0    # larger — moderate upside
+        mc_sl = 25.0
+    else:
+        mc_tp = 2.0    # big cap for memecoin
+        mc_sl = 20.0
+
+    # Momentum adjustment — already pumped = lower TP
+    if pct_24h > 500:
+        mc_tp = min(mc_tp, 2.0)   # already 5x'd, limited upside
+    elif pct_24h > 200:
+        mc_tp = min(mc_tp, 3.0)   # already 2x'd
+    elif pct_24h > 50:
+        mc_tp = min(mc_tp, mc_tp * 0.8)  # some move priced in
+
+    # Confidence adjustment — high conf = give room, low conf = tight SL
+    if confidence >= 75:
+        mc_sl = min(mc_sl + 5, 30.0)   # strong conviction, wider stop
+        trail_trigger = 1.5             # start trailing earlier
+    elif confidence < 50:
+        mc_sl = max(mc_sl - 5, 15.0)   # weak conviction, tight stop
+        mc_tp = min(mc_tp, 3.0)         # don't expect big from weak setup
+
+    # Blend: weighted average of pattern-learned and per-trade adaptive
+    # 40% learned (Agent 6 history), 60% adaptive (this trade's characteristics)
+    trade_tp_x  = round(base_tp * 0.4 + mc_tp * 0.6, 2)
+    trade_sl_pct = round(base_sl * 0.4 + mc_sl * 0.6, 1)
+
+    # Enable trailing stop earlier for high-confidence trades
+    if confidence >= 70 and not trail_enabled:
+        trail_enabled = True
+        trail_trigger = 1.5
     profile_tag_csv    = ",".join(pattern_tags)
     params_source = (
         f"ai_learned({resolved['matched_rows']}/{len(pattern_tags)})"
