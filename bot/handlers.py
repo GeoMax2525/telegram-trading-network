@@ -393,15 +393,26 @@ async def _do_scan(message: Message, address: str) -> None:
     entry_liq = data["liquidity_usd"] if data.get("liquidity_usd", 0) > 0 else None
     logger.info("SCAN entry_mc=%s entry_liq=%s token=%s", entry_mc, entry_liq, data["name"])
 
-    await log_scan(
-        contract_address=address,
-        token_name=data["name"],
-        ai_score=data["total"],
-        scanned_by=message.from_user.username or str(message.from_user.id),
-        group_id=message.chat.id,
-        entry_price=entry_mc,
-        entry_liquidity=entry_liq,
-    )
+    # Only create a new scan if this token hasn't been scanned before.
+    # Rescanning the same token should update the existing record, not
+    # create a duplicate that resets the peak multiplier.
+    from database.models import get_scan_by_address, update_scan_pnl
+    existing = await get_scan_by_address(address)
+    if existing:
+        # Update existing scan with current MC (tracks peak via max())
+        if entry_mc:
+            await update_scan_pnl(existing.id, entry_mc)
+        logger.info("SCAN: updated existing scan id=%d for %s", existing.id, data["name"])
+    else:
+        await log_scan(
+            contract_address=address,
+            token_name=data["name"],
+            ai_score=data["total"],
+            scanned_by=message.from_user.username or str(message.from_user.id),
+            group_id=message.chat.id,
+            entry_price=entry_mc,
+            entry_liquidity=entry_liq,
+        )
 
 
 # ── /hub — Live Dashboard ─────────────────────────────────────────────────────
