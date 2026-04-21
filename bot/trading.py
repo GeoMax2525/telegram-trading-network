@@ -74,9 +74,13 @@ async def get_ultra_order(
     amount: int,
     wallet_address: str,
     input_mint: str = SOL_MINT,
+    slippage_bps: int = 500,
 ) -> dict:
     """
     Fetches a Jupiter Ultra order for *input_mint* → *output_mint*.
+
+    slippage_bps: max slippage in basis points (500 = 5%).
+    Protects against getting rekt by price impact on thin pools.
 
     Returns the full order dict which includes:
       - transaction   (base64 tx ready to sign)
@@ -89,6 +93,7 @@ async def get_ultra_order(
         "outputMint": output_mint,
         "amount":     str(amount),
         "taker":      wallet_address,
+        "slippageBps": str(slippage_bps),
     }
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
         async with session.get(

@@ -888,10 +888,23 @@ async def cb_keybot_buy(callback: CallbackQuery):
         amount_lamports = int(s.buy_amount_sol * 1_000_000_000)
         wallet_address  = str(keypair.pubkey())
 
-        # Get Ultra order (quote + transaction in one step)
-        order            = await get_ultra_order(address, amount_lamports, wallet_address)
+        # Get Ultra order with 5% max slippage protection
+        order            = await get_ultra_order(address, amount_lamports, wallet_address, slippage_bps=500)
         price_impact     = float(order.get("priceImpactPct", 0))
         tokens_received  = str(order.get("outAmount", ""))
+
+        # Reject if price impact is too high — protect from thin pool slippage
+        MAX_PRICE_IMPACT = 10.0  # percent
+        if abs(price_impact) > MAX_PRICE_IMPACT:
+            await status_msg.edit_text(
+                f"*Swap Rejected — Price Impact Too High*\n\n"
+                f"Price impact: {price_impact:.1f}%\n"
+                f"Max allowed: {MAX_PRICE_IMPACT}%\n\n"
+                f"The pool is too thin for this buy size. "
+                f"Try a smaller amount or wait for more liquidity.",
+                parse_mode="Markdown",
+            )
+            return
 
         # Sign & submit
         await status_msg.edit_text("⏳ Signing and sending transaction…")
