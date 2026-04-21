@@ -121,7 +121,7 @@ SCORE_FIELDS = {
 # Full set of pattern_types Agent 6 learns per. Re-exported from
 # trade_profiles so there's exactly one place to edit when adding more.
 PATTERN_TYPES = _ALL_PATTERN_TYPES
-MIN_SAMPLE_FOR_LEARNING = 5   # was 10 — lowered for faster warm-up
+MIN_SAMPLE_FOR_LEARNING = 3   # lowered from 5 — start learning faster
 DEFAULT_TP_X = 5.0
 DEFAULT_SL_PCT = 25.0
 DEFAULT_POSITION_PCT = 10.0

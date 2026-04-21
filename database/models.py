@@ -1593,17 +1593,56 @@ async def get_wallet_counts() -> dict:
     return {"total": total, "tier1": tier1, "tier2": tier2, "tier3": tier3}
 
 
-async def get_winning_scans(since: "datetime | None" = None) -> list["Scan"]:
-    """Returns scans with peak_multiplier >= 2 and a known entry MC."""
+class _WinningScanProxy:
+    """Lightweight proxy so PaperTrade winners can be consumed by wallet_analyst
+    which expects objects with .contract_address, .token_name, .peak_multiplier."""
+    def __init__(self, contract_address: str, token_name: str, peak_multiplier: float):
+        self.contract_address = contract_address
+        self.token_name = token_name or "?"
+        self.peak_multiplier = peak_multiplier
+
+
+async def get_winning_scans(since: "datetime | None" = None) -> list:
+    """Returns winning tokens (peak >= 2x) from BOTH the Scan table (caller
+    submissions) AND the PaperTrade table (autonomous trades). This feeds
+    Agent 2 wallet analyst so it can discover early buyers on proven winners."""
+    results = []
+    seen_mints: set[str] = set()
+
     async with AsyncSessionLocal() as session:
+        # Source 1: Caller scans with peak >= 2x
         q = select(Scan).where(
             Scan.peak_multiplier >= 2,
             Scan.entry_price.is_not(None),
         )
         if since is not None:
             q = q.where(Scan.scanned_at > since)
-        result = await session.execute(q.order_by(Scan.scanned_at.asc()))
-        return list(result.scalars().all())
+        scan_rows = (await session.execute(q.order_by(Scan.scanned_at.asc()))).scalars().all()
+        for s in scan_rows:
+            results.append(s)
+            seen_mints.add(s.contract_address)
+
+        # Source 2: Paper trade winners with peak >= 2x
+        pq = select(PaperTrade).where(
+            PaperTrade.peak_multiple >= 2,
+            PaperTrade.entry_mc.is_not(None),
+            PaperTrade.token_address.is_not(None),
+        )
+        if since is not None:
+            pq = pq.where(PaperTrade.opened_at > since)
+        paper_rows = (await session.execute(pq.order_by(PaperTrade.opened_at.asc()))).scalars().all()
+        for pt in paper_rows:
+            if pt.token_address not in seen_mints:
+                results.append(_WinningScanProxy(
+                    contract_address=pt.token_address,
+                    token_name=pt.token_name,
+                    peak_multiplier=pt.peak_multiple or 2.0,
+                ))
+                seen_mints.add(pt.token_address)
+
+    logger.info("get_winning_scans: %d from scans + %d from paper trades = %d total",
+                len(scan_rows), len(results) - len(scan_rows), len(results))
+    return results
 
 
 # ── Pattern helpers (Agent 3) ─────────────────────────────────────────────────
