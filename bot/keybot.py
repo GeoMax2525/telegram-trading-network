@@ -1262,57 +1262,99 @@ async def cb_close_position(callback: CallbackQuery):
 
 # ── Background: position monitor ──────────────────────────────────────────────
 
+# In-memory peak MC tracker for trailing stop (resets on restart)
+_peak_mc: dict[int, float] = {}
+
 async def position_monitor_loop(bot: Bot) -> None:
     """
-    Every 5 minutes checks all open positions across all users:
-    - If current MC >= entry_mc * take_profit_x → sell + close as tp_hit
-    - If current MC <= entry_mc * (1 - stop_loss_pct/100) → sell + close as sl_hit
+    Every 30 seconds checks all open positions across all users:
+    - TP hit: current MC >= entry_mc * take_profit_x
+    - SL hit: current MC <= entry_mc * (1 - stop_loss_pct/100)
+    - Breakeven: once peak >= 1.5x entry, SL moves to entry_mc
+    - Trailing stop: once peak >= 2x entry, SL follows at 20% below peak
     Sends a notification to CALLER_GROUP_ID on auto-close.
     """
     await asyncio.sleep(60)   # startup delay
-    logger.info("Position monitor started — checking every 5 minutes")
+    logger.info("Position monitor started — checking every 30 seconds")
     while True:
         try:
             positions = await get_open_positions()   # all users
-            logger.info("Position monitor tick: %d open position(s)", len(positions))
+            if positions:
+                logger.info("Position monitor tick: %d open position(s)", len(positions))
             keypair   = get_keypair()
 
             for pos in positions:
                 try:
+                    # Clear cache for fresh data
+                    from bot.scanner import _token_cache
+                    _token_cache.pop(pos.token_address, None)
+
                     live = await fetch_live_data(pos.token_address)
                     if not live or not live.get("market_cap"):
-                        logger.warning("Position %d (%s): no live data from DexScreener", pos.id, pos.token_name)
+                        logger.warning("Position %d (%s): no live data", pos.id, pos.token_name)
                         continue
                     current_mc = live["market_cap"]
 
-                    # Patch entry_mc if it was 0/None at buy time (token not indexed yet)
+                    # Patch entry_mc if it was 0/None at buy time
                     if pos.entry_mc is None or pos.entry_mc <= 0:
                         logger.warning(
-                            "Position %d (%s): entry_mc was %s — patching to current MC %s",
+                            "Position %d (%s): entry_mc was %s — patching to %s",
                             pos.id, pos.token_name, pos.entry_mc, _fmt_mc(current_mc),
                         )
                         await update_position_entry_mc(pos.id, current_mc)
-                        pos.entry_mc = current_mc  # update in-memory so this tick proceeds
+                        pos.entry_mc = current_mc
+
+                    mult = round(current_mc / pos.entry_mc, 2)
+
+                    # Track peak MC for trailing stop
+                    prev_peak = _peak_mc.get(pos.id, pos.entry_mc)
+                    if current_mc > prev_peak:
+                        _peak_mc[pos.id] = current_mc
+                    peak_mc = _peak_mc.get(pos.id, current_mc)
+                    peak_mult = round(peak_mc / pos.entry_mc, 2)
+
+                    # Dynamic SL based on peak performance
+                    base_sl_mc = pos.entry_mc * (1 - pos.stop_loss_pct / 100)
+
+                    if peak_mult >= 2.0:
+                        # Trailing stop: 20% below peak
+                        trail_sl_mc = peak_mc * 0.80
+                        effective_sl_mc = max(base_sl_mc, trail_sl_mc)
+                        sl_mode = "trail"
+                    elif peak_mult >= 1.5:
+                        # Breakeven stop: SL moves to entry
+                        effective_sl_mc = max(base_sl_mc, pos.entry_mc)
+                        sl_mode = "breakeven"
+                    else:
+                        effective_sl_mc = base_sl_mc
+                        sl_mode = "fixed"
 
                     tp_mc  = pos.entry_mc * pos.take_profit_x
-                    sl_mc  = pos.entry_mc * (1 - pos.stop_loss_pct / 100)
-                    mult   = round(current_mc / pos.entry_mc, 2)
                     hit_tp = current_mc >= tp_mc
-                    hit_sl = current_mc <= sl_mc
+                    hit_sl = current_mc <= effective_sl_mc
 
                     logger.info(
-                        "Position %d (%s): entry_mc=%s current_mc=%s mult=%.2fx "
-                        "| TP target=%s (hit=%s) SL target=%s (hit=%s)",
-                        pos.id, pos.token_name,
-                        _fmt_mc(pos.entry_mc), _fmt_mc(current_mc), mult,
+                        "Position %d (%s): %.2fx (peak %.2fx) | "
+                        "TP %s (hit=%s) SL %s [%s] (hit=%s)",
+                        pos.id, pos.token_name, mult, peak_mult,
                         _fmt_mc(tp_mc), hit_tp,
-                        _fmt_mc(sl_mc), hit_sl,
+                        _fmt_mc(effective_sl_mc), sl_mode, hit_sl,
                     )
 
                     if not (hit_tp or hit_sl):
                         continue
 
-                    reason = "tp_hit" if hit_tp else "sl_hit"
+                    if hit_tp:
+                        reason = "tp_hit"
+                    elif sl_mode == "trail":
+                        reason = "trail_hit"
+                    elif sl_mode == "breakeven":
+                        reason = "breakeven_stop"
+                    else:
+                        reason = "sl_hit"
+
+                    # Clean up peak tracker
+                    _peak_mc.pop(pos.id, None)
                     emoji  = "🎯" if hit_tp else "🛑"
                     label  = "TAKE PROFIT HIT" if hit_tp else "STOP LOSS HIT"
 
@@ -1385,5 +1427,4 @@ async def position_monitor_loop(bot: Bot) -> None:
         except Exception as exc:
             logger.error("Position monitor loop error: %s", exc)
 
-        await asyncio.sleep(300)   # 5 minutes
-        logger.info("Position monitor: waking up for next tick")
+        await asyncio.sleep(30)   # 30 seconds — fast enough for memecoin TP/SL
