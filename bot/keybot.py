@@ -363,7 +363,7 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     # Fetch SOL balance + open positions concurrently
     gathered = await asyncio.gather(
         get_sol_balance(s.wallet_address) if s.wallet_address else asyncio.sleep(0),
-        get_open_positions(user_id=user_id),
+        get_open_positions(),  # show all positions, not just this user's
         return_exceptions=True,
     )
     balance_result, positions_result = gathered[0], gathered[1]
