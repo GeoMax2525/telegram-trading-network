@@ -289,12 +289,16 @@ async def _check_open_trades(bot) -> None:
                         continue
 
             # Check fixed SL — with grace period.
-            # Don't trigger SL in the first 5 minutes. Memecoins regularly
-            # wick 25-35% on the first candle after entry and recover.
-            # Selling the first dip is the #1 source of false SL hits.
-            SL_GRACE_MINUTES = 5
+            # Memecoins wick 30-50% on entry and recover. Don't sell the dip.
+            # Grace period scales with MC: smaller = more volatile = longer grace.
+            if entry_mc < 100_000:
+                sl_grace_min = 10   # micro caps need 10 min to settle
+            elif entry_mc < 500_000:
+                sl_grace_min = 7
+            else:
+                sl_grace_min = 5
             sl_threshold = 1.0 - (pt.stop_loss_pct / 100.0)
-            if current_mult <= sl_threshold and age_hours >= (SL_GRACE_MINUTES / 60.0):
+            if current_mult <= sl_threshold and age_hours >= (sl_grace_min / 60.0):
                 pnl = round(-sol * (1.0 - current_mult), 4)
                 await close_paper_trade(pt.id, "sl_hit", pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)

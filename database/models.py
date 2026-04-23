@@ -2836,7 +2836,7 @@ AGENT_PARAM_DEFAULTS = {
     # Pattern engine
     "pattern_min_samples": 3, "pattern_interval_hours": 6,
     # Confidence thresholds
-    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 55,
+    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 60,
     # MC weights — low (rebalanced: insider reduced since data is sparse,
     # fingerprint + rug carry more weight so tokens can actually pass threshold)
     "low_mc_insider": 0.20, "low_mc_fingerprint": 0.30, "low_mc_chart": 0.10,
@@ -2889,7 +2889,7 @@ AGENT_PARAM_DEFAULTS = {
     "expired_exit_threshold":  1.20,
 
     # Profit protection (strategy, applied globally in paper monitor)
-    "breakeven_trigger":       1.5,   # once peak >=1.5x, SL moves to 1.0x
+    "breakeven_trigger":       2.0,   # once peak >=2.0x, SL moves to 1.0x (was 1.5x — too tight)
     "profit_trail_trigger":    2.0,   # once peak >=2.0x, start trailing
     "profit_trail_pct":        0.15,  # distance from peak while trailing
 
@@ -3402,6 +3402,21 @@ async def init_agent_params() -> int:
     except Exception as exc:
         logger.warning("trail_sl_enabled migration failed: %s", exc)
 
+    # Raise breakeven trigger from 1.5x to 2.0x (was killing recovering trades)
+    try:
+        async with AsyncSessionLocal() as session:
+            be_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "breakeven_trigger")
+            )).scalar_one_or_none()
+            if be_row and be_row.param_value < 2.0:
+                logger.info("Raising breakeven_trigger from %.1f to 2.0", be_row.param_value)
+                be_row.param_value = 2.0
+                be_row.updated_at = datetime.utcnow()
+                await session.commit()
+                added += 1
+    except Exception as exc:
+        logger.warning("breakeven_trigger migration failed: %s", exc)
+
     # One-shot: raise TP defaults and enable trailing stop on all ai_trade_params
     # rows that still have the old 1.8x-3.0x TP and trail disabled.
     try:
@@ -3435,7 +3450,7 @@ async def init_agent_params() -> int:
     # Tighten paper trading: raise confidence threshold, reduce max open trades.
     # 56 trades/day at 19% WR = churning. Need to be much more selective.
     _tighten = {
-        "conf_paper_threshold": 55.0,    # balanced: passable but selective
+        "conf_paper_threshold": 60.0,    # selective — marginal candidates rejected
         "max_open_paper_trades": 3.0,
         # Rebalanced low-MC weights so tokens can pass without insider data
         "low_mc_insider": 0.20,

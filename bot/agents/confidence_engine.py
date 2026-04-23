@@ -671,24 +671,24 @@ async def score_candidate(candidate: dict) -> dict:
 
     pct_24h = candidate.get("price_change_24h", 0) or 0
 
-    # MC-based TP/SL — memecoins need WIDE stops and REALISTIC targets.
-    # A 20% SL on a memecoin is just selling normal volatility.
-    # The trailing stop at 2x is the real exit, TP is the dream target.
+    # MC-based TP/SL — memecoins wick 30-50% on normal volatility.
+    # SL must be WIDER than the normal wick range or you sell every dip.
+    # Trailing stop at 2x is the real exit mechanism.
     if mcap < 50_000:
-        mc_tp = 5.0    # micro cap — high upside but TP must be reachable
-        mc_sl = 35.0   # wide stop — these tokens wick 30% and recover
+        mc_tp = 5.0
+        mc_sl = 50.0   # micro caps wick 40-50% and recover — must survive
     elif mcap < 200_000:
-        mc_tp = 4.0    # small cap
-        mc_sl = 35.0   # still wide — normal volatility range
+        mc_tp = 4.0
+        mc_sl = 45.0   # small caps wick 30-40%
     elif mcap < 500_000:
-        mc_tp = 3.0    # mid
-        mc_sl = 30.0
+        mc_tp = 3.0
+        mc_sl = 40.0
     elif mcap < 2_000_000:
-        mc_tp = 2.5    # larger
-        mc_sl = 28.0
+        mc_tp = 2.5
+        mc_sl = 35.0
     else:
-        mc_tp = 2.0    # big cap for memecoin
-        mc_sl = 25.0
+        mc_tp = 2.0
+        mc_sl = 30.0
 
     # Momentum adjustment — already pumped = lower TP
     if pct_24h > 500:
@@ -696,22 +696,22 @@ async def score_candidate(candidate: dict) -> dict:
     elif pct_24h > 200:
         mc_tp = min(mc_tp, 3.0)
 
-    # Confidence adjustment
+    # Confidence adjustment — do NOT lower trail trigger for high conf
     if confidence >= 75:
-        mc_sl = min(mc_sl + 5, 40.0)   # strong conviction, very wide stop
-        trail_trigger = 1.5
+        mc_sl = min(mc_sl + 5, 55.0)
     elif confidence < 50:
-        mc_sl = max(mc_sl - 5, 25.0)   # weak conviction but still reasonable
+        mc_sl = max(mc_sl - 5, 35.0)
         mc_tp = min(mc_tp, 3.0)
 
-    # Blend: weighted average of pattern-learned and per-trade adaptive
-    # 40% learned (Agent 6 history), 60% adaptive (this trade's characteristics)
-    trade_tp_x  = round(base_tp * 0.4 + mc_tp * 0.6, 2)
-    trade_sl_pct = round(base_sl * 0.4 + mc_sl * 0.6, 1)
+    # Blend: 70% learned (Agent 6 history), 30% adaptive
+    # Agent 6 learned values should dominate, not the heuristic
+    trade_tp_x  = round(base_tp * 0.7 + mc_tp * 0.3, 2)
+    trade_sl_pct = round(base_sl * 0.7 + mc_sl * 0.3, 1)
 
-    # Enable trailing stop earlier for high-confidence trades
-    if confidence >= 70 and not trail_enabled:
+    # Trailing stop stays at 2.0x baseline — do NOT lower it
+    if not trail_enabled:
         trail_enabled = True
+        trail_trigger = 2.0
         trail_trigger = 1.5
     profile_tag_csv    = ",".join(pattern_tags)
     params_source = (
