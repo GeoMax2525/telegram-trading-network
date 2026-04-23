@@ -16,7 +16,7 @@ import logging
 from datetime import datetime, timedelta
 
 from bot import state
-from bot.config import CALLER_GROUP_ID
+from bot.config import CALLER_GROUP_ID, SCAN_TOPIC_ID
 from bot.scanner import fetch_live_data
 from database.models import (
     get_open_paper_trades,
@@ -209,7 +209,7 @@ async def _check_open_trades(bot) -> None:
                         f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
                         f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
                         f"Balance: {bal:.2f} SOL",
-                    ]))
+                    ]), message_thread_id=SCAN_TOPIC_ID)
                 except Exception:
                     pass
                 continue
@@ -235,7 +235,7 @@ async def _check_open_trades(bot) -> None:
                             f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
                             f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
                             f"Balance: {bal:.2f} SOL",
-                        ]))
+                        ]), message_thread_id=SCAN_TOPIC_ID)
                     except Exception:
                         pass
                     continue
@@ -256,7 +256,7 @@ async def _check_open_trades(bot) -> None:
                         f"🪙 {name} | {current_mult:.1f}x | +{pnl:.4f} SOL",
                         f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
                         f"Balance: {bal:.2f} SOL",
-                    ]))
+                    ]), message_thread_id=SCAN_TOPIC_ID)
                 except Exception:
                     pass
                 continue
@@ -283,7 +283,7 @@ async def _check_open_trades(bot) -> None:
                                 f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
                                 f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
                                 f"Balance: {bal:.2f} SOL",
-                            ]))
+                            ]), message_thread_id=SCAN_TOPIC_ID)
                         except Exception:
                             pass
                         continue
@@ -305,7 +305,7 @@ async def _check_open_trades(bot) -> None:
                         f"🪙 {name} | SL hit | {pnl:.4f} SOL",
                         f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
                         f"Balance: {bal:.2f} SOL",
-                    ]))
+                    ]), message_thread_id=SCAN_TOPIC_ID)
                 except Exception:
                     pass
 
