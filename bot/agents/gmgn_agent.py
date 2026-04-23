@@ -193,6 +193,39 @@ async def gmgn_wallet_stats(address: str) -> dict | None:
     return None
 
 
+async def gmgn_token_holders(mint: str) -> list:
+    """Get top token holders — shows concentration and whale activity."""
+    data = await _run_cli("token", "holders", "--chain", "sol", "--address", mint)
+    if isinstance(data, dict):
+        return (data.get("data") or {}).get("holders") or data.get("holders") or []
+    return []
+
+
+async def gmgn_market_signals(limit: int = 50) -> list:
+    """Get market signals: price spikes, smart money buys, large buys."""
+    data = await _run_cli("market", "signal", "--chain", "sol", "--limit", str(limit))
+    if isinstance(data, dict):
+        signals = data.get("data") or data.get("signals") or []
+        if isinstance(signals, dict):
+            # Flatten signal groups into one list
+            all_sigs = []
+            for group in signals.values():
+                if isinstance(group, list):
+                    all_sigs.extend(group)
+            return all_sigs
+        return signals if isinstance(signals, list) else []
+    return []
+
+
+async def gmgn_trenches(status: str = "completed", limit: int = 50) -> list:
+    """Get trenches tokens — new creation, near completion, completed."""
+    data = await _run_cli("market", "trenches", "--chain", "sol",
+                          "--status", status, "--limit", str(limit))
+    if isinstance(data, dict):
+        return (data.get("data") or {}).get("tokens") or data.get("list") or []
+    return []
+
+
 async def gmgn_kline(mint: str, resolution: str = "1m") -> list:
     data = await _run_cli("market", "kline", "--chain", "sol",
                           "--address", mint, "--resolution", resolution)
@@ -661,7 +694,72 @@ async def gmgn_agent_loop() -> None:
                 logger.error("GMGN top buyer extraction error: %s", exc)
             await asyncio.sleep(TOP_COIN_POLL)
 
+    async def _kol_loop():
+        """Track KOL (Key Opinion Leader) trades — influencer wallets."""
+        while True:
+            try:
+                kol_trades = await gmgn_kol_trades(limit=50)
+                if kol_trades:
+                    kol_wallets = 0
+                    for trade in kol_trades:
+                        addr = trade.get("maker") or trade.get("wallet_address")
+                        side = trade.get("side")
+                        if not addr or (side and side != "buy"):
+                            continue
+                        # KOL wallets are high-signal — save as tier 2
+                        await upsert_wallet(
+                            address=addr, score=70.0, tier=2,
+                            win_rate=0.55, avg_multiple=2.5,
+                            wins=1, losses=0, total_trades=1,
+                            source="gmgn", wallet_type="early_insider",
+                        )
+                        kol_wallets += 1
+                    if kol_wallets:
+                        logger.info("GMGN KOL: imported %d KOL wallets", kol_wallets)
+            except Exception as exc:
+                logger.error("GMGN KOL tracking error: %s", exc)
+            await asyncio.sleep(TRADE_POLL)
+
+    async def _signal_loop():
+        """Track market signals — price spikes, smart money buys, large buys.
+        Injects high-signal tokens directly into scanner pipeline."""
+        while True:
+            try:
+                signals = await gmgn_market_signals(limit=30)
+                if signals:
+                    from bot import state as _st
+                    injected = 0
+                    from bot.scanner import mint_suffix_ok as _suf
+                    for sig in signals:
+                        mint = sig.get("address") or sig.get("base_address")
+                        if not mint or not _suf(mint):
+                            continue
+                        name = sig.get("name") or sig.get("symbol") or "?"
+                        mc = float(sig.get("market_cap") or sig.get("usd_market_cap") or 0)
+                        signal_type = sig.get("signal_type") or sig.get("type") or "unknown"
+
+                        _st.pending_candidates.append({
+                            "mint": mint,
+                            "name": name,
+                            "symbol": sig.get("symbol") or "?",
+                            "mcap": mc,
+                            "liquidity": float(sig.get("liquidity") or 0),
+                            "source": "gmgn_signal",
+                            "gmgn_signal_type": signal_type,
+                        })
+                        injected += 1
+
+                    if injected:
+                        logger.info("GMGN signals: injected %d tokens into scanner (%s)",
+                                    injected, ", ".join(set(
+                                        s.get("signal_type") or "?" for s in signals[:5]
+                                    )))
+            except Exception as exc:
+                logger.error("GMGN signal tracking error: %s", exc)
+            await asyncio.sleep(TRADE_POLL)
+
     await asyncio.gather(
-        _token_loop(), _wallet_loop(), _trade_loop(), _top_buyer_loop(),
+        _token_loop(), _wallet_loop(), _trade_loop(),
+        _top_buyer_loop(), _kol_loop(), _signal_loop(),
         return_exceptions=True,
     )

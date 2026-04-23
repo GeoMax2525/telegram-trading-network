@@ -343,19 +343,39 @@ async def _score_rug(candidate: dict) -> float:
             # Deep token info — KOL presence, holder quality
             info = await gmgn_token_info(mint)
             if info:
-                # KOL (Key Opinion Leader) buying is a positive signal
+                # KOL buying is a strong positive signal
                 kol_count = int(info.get("kol_count") or info.get("smart_buy_24h") or 0)
                 if kol_count >= 3:
-                    gmgn_bonus += 10
+                    gmgn_bonus += 15
                     gmgn_flags.append(f"kol={kol_count}")
                 elif kol_count >= 1:
-                    gmgn_bonus += 5
+                    gmgn_bonus += 8
+
+                # Smart money buying
+                smart_buys = int(info.get("smart_buy_24h") or 0)
+                if smart_buys >= 5:
+                    gmgn_bonus += 10
+                    gmgn_flags.append(f"smart_buys={smart_buys}")
 
                 # Wash trading detection
                 wash = float(info.get("wash_trading_ratio") or 0)
                 if wash > 0.3:
                     gmgn_bonus -= 15
                     gmgn_flags.append(f"wash={wash:.0%}")
+
+            # Bundle detection via top holders
+            from bot.agents.gmgn_agent import gmgn_token_holders
+            holders = await gmgn_token_holders(mint)
+            if holders and len(holders) >= 3:
+                # Check if top holders are all from the same creator (bundled)
+                top_3_pct = sum(float(h.get("percentage") or h.get("pct") or 0)
+                               for h in holders[:3])
+                if top_3_pct > 50:
+                    gmgn_bonus -= 20
+                    gmgn_flags.append(f"bundled_top3={top_3_pct:.0f}%")
+                elif top_3_pct > 30:
+                    gmgn_bonus -= 10
+                    gmgn_flags.append(f"concentrated_top3={top_3_pct:.0f}%")
 
             if gmgn_flags:
                 logger.info("Agent5 GMGN deep: %s → %s bonus=%+d",
