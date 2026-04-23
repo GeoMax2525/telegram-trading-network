@@ -77,7 +77,7 @@ FULL_BATCH       = 25    # full review every 25 trades
 MAJOR_BATCH      = 50    # major recalibration every 50 trades
 POLL_INTERVAL    = 60    # check every 1 minute (chaos: was 2 min)
 STARTUP_DELAY    = 15    # lowered so heartbeat shows up fast in Railway logs
-MAX_WEIGHT_SHIFT = 0.10  # normal-mode full/major weight shift cap
+MAX_WEIGHT_SHIFT = 0.15  # raised from 0.10 (batch sizes increased)
 MIN_WEIGHT       = 0.02
 WEEKLY_HOUR      = 9
 
@@ -88,7 +88,7 @@ WEEKLY_HOUR      = 9
 AGGRESSIVE_WR_ENTER      = 0.40   # effective_wr below this → go aggressive
 AGGRESSIVE_WR_EXIT       = 0.50   # effective_wr at/above this → back to normal
 AGGRESSIVE_MICRO_BATCH   = 2      # vs normal MICRO_BATCH=3
-AGGRESSIVE_MAX_SHIFT     = 0.20   # vs normal MAX_WEIGHT_SHIFT=0.10
+AGGRESSIVE_MAX_SHIFT     = 0.30   # vs normal MAX_WEIGHT_SHIFT=0.15
 NORMAL_MICRO_SHIFT_RATIO = 0.20   # micro-level shift = this * max_shift
 
 # Default weights
@@ -593,6 +593,20 @@ async def _optimize_trade_params(regime: str) -> int:
         if avg_runup > 1.15 and runup_samples:
             new_tp = min(TP_CEILING, new_tp + 0.5)
             reasons.append(f"1h_runup={avg_runup:.2f}x (sold early)")
+
+        # Post-close signals: sold_too_early / sold_too_late from paper monitor
+        early_count = sum(1 for t in trades if getattr(t, "sold_too_early", False))
+        late_count = sum(1 for t in trades if getattr(t, "sold_too_late", False))
+        early_rate = early_count / n
+        late_rate = late_count / n
+
+        if early_rate > 0.15:
+            new_tp = min(TP_CEILING, new_tp + 0.8)
+            reasons.append(f"sold_too_early={early_rate:.0%} → raise TP")
+
+        if late_rate > 0.20:
+            new_sl = min(SL_CEILING, new_sl + 5.0)
+            reasons.append(f"sold_too_late={late_rate:.0%} → widen SL")
 
         # Clamp
         new_tp = round(max(TP_FLOOR, min(TP_CEILING, new_tp)), 2)

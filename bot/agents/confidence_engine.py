@@ -392,8 +392,28 @@ async def _score_caller(candidate: dict) -> float:
 
 
 def _score_market() -> float:
-    """Placeholder until SOL price feed is integrated."""
-    return 50.0
+    """Score 0-100 based on SOL 24h change and market regime."""
+    sol_change = getattr(state, "sol_24h_change", 0.0) or 0.0
+    regime = getattr(state, "market_regime", "NEUTRAL")
+
+    if sol_change > 5.0:
+        base = 80.0
+    elif sol_change > 2.0:
+        base = 65.0
+    elif sol_change > -2.0:
+        base = 50.0
+    elif sol_change > -5.0:
+        base = 35.0
+    else:
+        base = 20.0
+
+    # Regime adjustment from Agent 6
+    if regime == "GOOD":
+        base = min(100, base + 10)
+    elif regime == "BAD":
+        base = max(0, base - 10)
+
+    return round(base, 1)
 
 
 # ── Main scoring function ────────────────────────────────────────────────────

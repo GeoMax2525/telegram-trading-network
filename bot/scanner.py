@@ -69,7 +69,7 @@ def _pair_dex_id(pair: dict) -> str:
 # Scanner ticks every 15s and often re-evaluates the same tokens.
 import time as _time_mod
 _token_cache: dict[str, tuple[float, dict]] = {}  # address -> (expire_ts, pair_data)
-_CACHE_TTL = 300  # 5 minutes
+_CACHE_TTL = 60   # 1 minute (was 5 min — too stale for 30s paper monitor)
 
 
 def _cache_get(address: str) -> Optional[dict]:

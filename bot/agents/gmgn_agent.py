@@ -152,11 +152,23 @@ async def gmgn_token_info(mint: str) -> dict | None:
     data = await _run_cli("token", "info", "--chain", "sol", "--address", mint)
     if isinstance(data, dict):
         return data.get("data") or data
+    # HTTP fallback
+    data = await _http_get_json(
+        f"https://openapi.gmgn.ai/defi/quotation/v1/tokens/sol/{mint}", timeout=10,
+    )
+    if isinstance(data, dict):
+        return data.get("data") or data
     return None
 
 
 async def gmgn_token_security(mint: str) -> dict | None:
     data = await _run_cli("token", "security", "--chain", "sol", "--address", mint)
+    if isinstance(data, dict):
+        return data.get("data") or data
+    # HTTP fallback
+    data = await _http_get_json(
+        f"https://openapi.gmgn.ai/defi/quotation/v1/tokens/sol/{mint}/security", timeout=10,
+    )
     if isinstance(data, dict):
         return data.get("data") or data
     return None

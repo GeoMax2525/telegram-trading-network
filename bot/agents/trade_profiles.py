@@ -370,11 +370,19 @@ async def resolve_trade_params(pattern_types: list[str]) -> dict:
 
     fallback_used = False
     if trained_tps:
-        tp_x  = max(trained_tps)
-        sl_pct = min(trained_sls)
-        # For position sizing, use the MEAN of trained pcts (not max) so
-        # no single aggressive pattern_type dominates. Conservative by
-        # design — we'd rather under-size than over-size.
+        # Confidence-weighted average instead of max/min.
+        # Prevents one outlier pattern from dominating TP/SL.
+        tp_weights = []
+        sl_weights = []
+        for pt in trained_types:
+            row = rows.get(pt)
+            w = float(row.confidence or 50.0) if row else 50.0
+            tp_weights.append(w)
+            sl_weights.append(w)
+
+        total_tw = sum(tp_weights) or 1.0
+        tp_x = sum(t * w for t, w in zip(trained_tps, tp_weights)) / total_tw
+        sl_pct = sum(s * w for s, w in zip(trained_sls, sl_weights)) / sum(sl_weights or [1.0])
         position_pct = sum(trained_pos) / len(trained_pos)
     elif untrained_tps:
         # Fresh install fallback: mean of seeded defaults. Not max/min,

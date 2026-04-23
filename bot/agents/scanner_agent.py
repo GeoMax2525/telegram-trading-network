@@ -505,7 +505,15 @@ async def _source2_insider_wallets() -> list[dict]:
     if not wallets:
         logger.info("Scanner source2: no tiered wallets in DB — source will return empty until Agent 2 or GMGN imports some")
         return []
-    logger.info("Scanner source2: checking %d tier1/2/3 wallets for recent buys", len(wallets[:50]))
+
+    # Prioritize wallets: tier 1 >> tier 2 >> tier 3, then by win rate and recency
+    def _wallet_priority(w):
+        tier_w = {1: 100, 2: 10, 3: 1}.get(int(w.tier or 3), 1)
+        wr_bonus = 1.0 + float(w.win_rate or 0) * 0.5
+        return tier_w * wr_bonus
+
+    wallets = sorted(wallets, key=_wallet_priority, reverse=True)
+    logger.info("Scanner source2: checking %d tier1/2/3 wallets (prioritized)", len(wallets[:50]))
 
     since_ts = int(time.time()) - INSIDER_WINDOW
     # mint -> {1: count, 2: count, 3: count}
