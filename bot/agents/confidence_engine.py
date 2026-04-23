@@ -651,38 +651,38 @@ async def score_candidate(candidate: dict) -> dict:
 
     pct_24h = candidate.get("price_change_24h", 0) or 0
 
-    # MC-based TP adjustment
+    # MC-based TP/SL — memecoins need WIDE stops and REALISTIC targets.
+    # A 20% SL on a memecoin is just selling normal volatility.
+    # The trailing stop at 2x is the real exit, TP is the dream target.
     if mcap < 50_000:
-        mc_tp = 8.0    # micro cap — huge upside potential
-        mc_sl = 20.0   # but also high risk, cut quick
+        mc_tp = 5.0    # micro cap — high upside but TP must be reachable
+        mc_sl = 35.0   # wide stop — these tokens wick 30% and recover
     elif mcap < 200_000:
-        mc_tp = 5.0    # small cap — strong upside
-        mc_sl = 22.0
+        mc_tp = 4.0    # small cap
+        mc_sl = 35.0   # still wide — normal volatility range
     elif mcap < 500_000:
-        mc_tp = 4.0    # mid
-        mc_sl = 25.0
+        mc_tp = 3.0    # mid
+        mc_sl = 30.0
     elif mcap < 2_000_000:
-        mc_tp = 3.0    # larger — moderate upside
-        mc_sl = 25.0
+        mc_tp = 2.5    # larger
+        mc_sl = 28.0
     else:
         mc_tp = 2.0    # big cap for memecoin
-        mc_sl = 20.0
+        mc_sl = 25.0
 
     # Momentum adjustment — already pumped = lower TP
     if pct_24h > 500:
-        mc_tp = min(mc_tp, 2.0)   # already 5x'd, limited upside
+        mc_tp = min(mc_tp, 2.0)
     elif pct_24h > 200:
-        mc_tp = min(mc_tp, 3.0)   # already 2x'd
-    elif pct_24h > 50:
-        mc_tp = min(mc_tp, mc_tp * 0.8)  # some move priced in
+        mc_tp = min(mc_tp, 3.0)
 
-    # Confidence adjustment — high conf = give room, low conf = tight SL
+    # Confidence adjustment
     if confidence >= 75:
-        mc_sl = min(mc_sl + 5, 30.0)   # strong conviction, wider stop
-        trail_trigger = 1.5             # start trailing earlier
+        mc_sl = min(mc_sl + 5, 40.0)   # strong conviction, very wide stop
+        trail_trigger = 1.5
     elif confidence < 50:
-        mc_sl = max(mc_sl - 5, 15.0)   # weak conviction, tight stop
-        mc_tp = min(mc_tp, 3.0)         # don't expect big from weak setup
+        mc_sl = max(mc_sl - 5, 25.0)   # weak conviction but still reasonable
+        mc_tp = min(mc_tp, 3.0)
 
     # Blend: weighted average of pattern-learned and per-trade adaptive
     # 40% learned (Agent 6 history), 60% adaptive (this trade's characteristics)

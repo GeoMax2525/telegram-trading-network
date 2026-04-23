@@ -131,8 +131,8 @@ DEFAULT_POSITION_PCT = 10.0
 # normal price action, so 10% SL guaranteed insta-stopout on every
 # trade. Raised to 20.0 so trades get meaningful room to breathe
 # while still capping downside at a sane loss.
-SL_FLOOR = 15.0
-SL_CEILING = 50.0
+SL_FLOOR = 25.0
+SL_CEILING = 45.0
 TP_FLOOR = 2.0
 TP_CEILING = 20.0
 
