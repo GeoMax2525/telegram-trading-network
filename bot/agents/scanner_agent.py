@@ -1101,6 +1101,10 @@ async def run_once() -> tuple[int, int]:
             continue
         state.data_points_today += 1
 
+        # Record sighting for confirmation gate
+        from bot.agents.candidate_tracker import record_sighting, is_confirmed, get_sighting_info
+        record_sighting(result["mint"], result.get("match_score", 0))
+
         # Pass every qualifying candidate to Agent 5 for confidence scoring
         try:
             scored = await score_candidate(result)
@@ -1116,6 +1120,18 @@ async def run_once() -> tuple[int, int]:
         # Open paper trade if Agent 5 flagged it
         if scored.get("paper_trade"):
             mint_addr = scored.get("mint", "")
+
+            # Confirmation gate: token must be seen 2+ times across ticks
+            # before opening a trade. Prevents instant pump-and-dump entries.
+            if not is_confirmed(mint_addr):
+                sighting = get_sighting_info(mint_addr)
+                count = sighting["count"] if sighting else 0
+                logger.info(
+                    "Scanner: %s needs confirmation (%d/2 sightings) — waiting",
+                    (scored.get("name") or "?")[:20], count,
+                )
+                state.pending_candidates.append(scored)
+                continue
             token_name = scored.get("name")
 
             # Hard cap on concurrent open positions. Runs BEFORE any

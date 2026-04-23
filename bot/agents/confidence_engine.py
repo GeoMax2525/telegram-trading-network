@@ -304,26 +304,65 @@ async def _score_chart(candidate: dict) -> tuple[float, str]:
 async def _score_rug(candidate: dict) -> float:
     """
     Returns 1–100 safety score (higher = safer).
-    Checks both Rugcheck data and GMGN security.
+    Deep checks via both Rugcheck and GMGN security + token info.
+    Catches bundled tokens, botted volume, entrapment, and rug setups.
     """
-    # GMGN security check (if available)
     gmgn_bonus = 0
+    gmgn_flags: list[str] = []
     mint = candidate.get("mint", "")
     if mint:
         try:
-            from bot.agents.gmgn_agent import gmgn_token_security
+            from bot.agents.gmgn_agent import gmgn_token_security, gmgn_token_info
+
+            # Deep security check
             sec = await gmgn_token_security(mint)
             if sec:
-                # GMGN security flags
                 if sec.get("renounced_mint") and sec.get("renounced_freeze_account"):
-                    gmgn_bonus += 10  # fully renounced = safer
+                    gmgn_bonus += 10
+                    gmgn_flags.append("renounced")
+
                 rug_ratio = float(sec.get("rug_ratio") or 0)
                 if rug_ratio > 0.3:
-                    gmgn_bonus -= 20  # high rug risk
+                    gmgn_bonus -= 25
+                    gmgn_flags.append(f"rug_ratio={rug_ratio:.0%}")
                 elif rug_ratio < 0.1:
-                    gmgn_bonus += 5   # low rug risk
+                    gmgn_bonus += 5
+
+                # Bundler / bot detection
+                bot_ratio = float(sec.get("bot_ratio") or sec.get("bluechip_ratio") or 0)
+                if bot_ratio > 0.5:
+                    gmgn_bonus -= 15
+                    gmgn_flags.append(f"bot_ratio={bot_ratio:.0%}")
+
+                # Entrapment ratio (honeypot-like behavior)
+                entrap = float(sec.get("entrapment_ratio") or 0)
+                if entrap > 0.2:
+                    gmgn_bonus -= 20
+                    gmgn_flags.append(f"entrapment={entrap:.0%}")
+
+            # Deep token info — KOL presence, holder quality
+            info = await gmgn_token_info(mint)
+            if info:
+                # KOL (Key Opinion Leader) buying is a positive signal
+                kol_count = int(info.get("kol_count") or info.get("smart_buy_24h") or 0)
+                if kol_count >= 3:
+                    gmgn_bonus += 10
+                    gmgn_flags.append(f"kol={kol_count}")
+                elif kol_count >= 1:
+                    gmgn_bonus += 5
+
+                # Wash trading detection
+                wash = float(info.get("wash_trading_ratio") or 0)
+                if wash > 0.3:
+                    gmgn_bonus -= 15
+                    gmgn_flags.append(f"wash={wash:.0%}")
+
+            if gmgn_flags:
+                logger.info("Agent5 GMGN deep: %s → %s bonus=%+d",
+                            mint[:12], ", ".join(gmgn_flags), gmgn_bonus)
+
         except Exception as exc:
-            logger.warning("Agent5: GMGN security check failed for %s: %s",
+            logger.warning("Agent5: GMGN deep check failed for %s: %s",
                            mint[:12], exc)
 
     rc_norm = candidate.get("rugcheck_normalised")
