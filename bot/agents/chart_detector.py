@@ -55,14 +55,46 @@ async def _fetch_pair_address(mint: str) -> str | None:
 
 async def _fetch_ohlcv(pair_address: str) -> list[dict]:
     """
-    Fetch recent trade data and build synthetic candles from pair info.
-    DexScreener provides price/volume snapshots we can work with.
-
-    Future: replace with real OHLCV candles from GeckoTerminal
-    (api.geckoterminal.com, free, no API key). Would enable proper
-    RSI, EMA crossover, and multi-candle pattern detection. Current
-    single-snapshot approach limits pattern accuracy significantly.
+    Fetch real OHLCV candles from GeckoTerminal (free, no API key).
+    Returns list of candle dicts with open, high, low, close, volume.
+    Falls back to DexScreener synthetic data if GeckoTerminal fails.
     """
+    # Try GeckoTerminal first — real 5-minute OHLCV candles
+    gecko_url = (
+        f"https://api.geckoterminal.com/api/v2/networks/solana/pools/"
+        f"{pair_address}/ohlcv/minute?aggregate=5&limit=50"
+    )
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as session:
+            async with session.get(gecko_url, headers={"Accept": "application/json"}) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    ohlcv_list = (data.get("data") or {}).get("attributes", {}).get("ohlcv_list") or []
+                    if ohlcv_list and len(ohlcv_list) >= 5:
+                        candles = []
+                        for c in ohlcv_list:
+                            # GeckoTerminal format: [timestamp, open, high, low, close, volume]
+                            if len(c) >= 6:
+                                candles.append({
+                                    "timestamp": int(c[0]),
+                                    "open": float(c[1]),
+                                    "high": float(c[2]),
+                                    "low": float(c[3]),
+                                    "close": float(c[4]),
+                                    "volume": float(c[5]),
+                                })
+                        if candles:
+                            # Sort oldest first
+                            candles.sort(key=lambda x: x["timestamp"])
+                            logger.debug("Chart: %d real candles from GeckoTerminal for %s",
+                                         len(candles), pair_address[:12])
+                            return candles
+    except Exception as exc:
+        logger.debug("Chart: GeckoTerminal failed for %s: %s", pair_address[:12], exc)
+
+    # Fallback: DexScreener synthetic candle
     url = OHLCV_URL.format(pair_address=pair_address)
     try:
         async with aiohttp.ClientSession(
@@ -73,19 +105,17 @@ async def _fetch_ohlcv(pair_address: str) -> list[dict]:
                     return []
                 data = await resp.json(content_type=None)
     except Exception as exc:
-        logger.debug("Chart: OHLCV fetch failed for %s: %s", pair_address[:12], exc)
+        logger.debug("Chart: DexScreener fallback failed for %s: %s", pair_address[:12], exc)
         return []
 
     pair = data.get("pair") or (data.get("pairs") or [None])[0] if isinstance(data, dict) else None
     if not pair:
         return []
 
-    # Extract available price/volume data points
     price_usd = float(pair.get("priceUsd") or 0)
     volume = pair.get("volume") or {}
     price_change = pair.get("priceChange") or {}
 
-    # Build synthetic candle summary from available data
     return [{
         "pair": pair,
         "price": price_usd,
@@ -109,7 +139,11 @@ async def _fetch_ohlcv(pair_address: str) -> list[dict]:
 def _compute_rsi(changes: list[float], period: int = 14) -> float:
     """Compute RSI from a list of price changes."""
     if len(changes) < period:
-        return 50.0  # neutral if not enough data
+        # Use available data if at least 5 candles
+        if len(changes) >= 5:
+            period = len(changes)
+        else:
+            return 50.0  # neutral if not enough data
 
     gains = [c for c in changes[-period:] if c > 0]
     losses = [-c for c in changes[-period:] if c < 0]
@@ -119,6 +153,87 @@ def _compute_rsi(changes: list[float], period: int = 14) -> float:
 
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
+
+
+def _compute_ema(prices: list[float], period: int) -> list[float]:
+    """Compute EMA from a list of prices."""
+    if len(prices) < period:
+        return prices[:]
+    multiplier = 2 / (period + 1)
+    ema = [sum(prices[:period]) / period]
+    for price in prices[period:]:
+        ema.append(price * multiplier + ema[-1] * (1 - multiplier))
+    return ema
+
+
+def _candles_to_signals(candles: list[dict]) -> dict:
+    """
+    Convert real OHLCV candles into trading signals.
+    Returns a dict compatible with the pattern detectors.
+    """
+    if not candles or len(candles) < 3:
+        return {}
+
+    closes = [c["close"] for c in candles]
+    volumes = [c["volume"] for c in candles]
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
+
+    current = closes[-1]
+    prev = closes[-2]
+
+    # Price changes
+    changes = [(closes[i] - closes[i-1]) / closes[i-1] * 100
+               for i in range(1, len(closes)) if closes[i-1] > 0]
+
+    # RSI from real data
+    rsi = _compute_rsi(changes)
+
+    # EMA 9/21 from real data
+    ema9 = _compute_ema(closes, 9)
+    ema21 = _compute_ema(closes, 21)
+    ema_bullish = len(ema9) > 0 and len(ema21) > 0 and ema9[-1] > ema21[-1]
+
+    # Volume analysis
+    avg_vol = sum(volumes[:-1]) / max(len(volumes) - 1, 1)
+    current_vol = volumes[-1]
+    vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
+
+    # Recent price action
+    last_5 = closes[-5:] if len(closes) >= 5 else closes
+    change_recent = ((last_5[-1] - last_5[0]) / last_5[0] * 100) if last_5[0] > 0 else 0
+
+    last_12 = closes[-12:] if len(closes) >= 12 else closes
+    change_h1 = ((last_12[-1] - last_12[0]) / last_12[0] * 100) if last_12[0] > 0 else 0
+
+    # Support/resistance from highs and lows
+    recent_high = max(highs[-10:]) if len(highs) >= 10 else max(highs)
+    recent_low = min(lows[-10:]) if len(lows) >= 10 else min(lows)
+    range_pct = ((recent_high - recent_low) / recent_low * 100) if recent_low > 0 else 0
+
+    # Higher lows detection (bullish)
+    higher_lows = True
+    low_list = lows[-6:] if len(lows) >= 6 else lows
+    for i in range(1, len(low_list)):
+        if low_list[i] < low_list[i-1] * 0.98:
+            higher_lows = False
+            break
+
+    return {
+        "has_real_candles": True,
+        "rsi": rsi,
+        "ema_bullish": ema_bullish,
+        "vol_ratio": vol_ratio,
+        "change_m5": change_recent,
+        "change_h1": change_h1,
+        "volume_m5": current_vol,
+        "volume_h1": sum(volumes[-12:]) if len(volumes) >= 12 else sum(volumes),
+        "range_pct": range_pct,
+        "higher_lows": higher_lows,
+        "near_high": current >= recent_high * 0.95,
+        "near_low": current <= recent_low * 1.05,
+        "candle_count": len(candles),
+    }
 
 
 def _volume_spike_ratio(vol_m5: float, vol_h1: float) -> float:
@@ -131,8 +246,15 @@ def _volume_spike_ratio(vol_m5: float, vol_h1: float) -> float:
     return vol_m5 / hourly_avg_per_5m
 
 
-def _ema_momentum(change_m5: float, change_h1: float) -> str:
-    """Simple EMA crossover proxy using price changes."""
+def _ema_momentum(change_m5: float, change_h1: float, data: dict | None = None) -> str:
+    """EMA crossover — real EMA 9/21 when candles available, proxy otherwise."""
+    if data and data.get("has_real_candles") and "ema_bullish" in data:
+        if data["ema_bullish"] and data.get("vol_ratio", 1) > 1.2:
+            return "bullish"
+        if not data["ema_bullish"]:
+            return "bearish"
+        return "neutral"
+
     if change_m5 > 0 and change_h1 > 0 and change_m5 > change_h1 / 12:
         return "bullish"
     if change_m5 < 0 and change_h1 < 0:
@@ -448,22 +570,34 @@ def _detect_fakeout_recovery(data: dict) -> tuple[float, bool]:
 
 def _rsi_adjustment(data: dict) -> float:
     """
-    Returns score adjustment based on RSI proxy.
-    Oversold (< 30 proxy): +10
-    Overbought (> 70 proxy): -15
-    Normal: 0
+    Returns score adjustment based on RSI.
+    Uses real RSI from candles when available, proxy otherwise.
     """
-    # Use multi-timeframe changes as RSI proxy
+    # Real RSI from GeckoTerminal candles
+    if data.get("has_real_candles") and "rsi" in data:
+        rsi = data["rsi"]
+        # More granular with real data
+        if rsi < 25:
+            return 15.0    # deeply oversold — strong bounce
+        if rsi < 35:
+            return 8.0     # oversold
+        if rsi > 80:
+            return -20.0   # extremely overbought
+        if rsi > 70:
+            return -10.0   # overbought
+        return 0.0
+
+    # Proxy RSI from DexScreener changes
     changes = [
         data.get("change_m5", 0),
-        data.get("change_h1", 0) / 12,  # normalize to per-5m
+        data.get("change_h1", 0) / 12,
     ]
-    rsi = _compute_rsi(changes * 7)  # expand to get enough data points
+    rsi = _compute_rsi(changes * 7)
 
     if rsi < 30:
-        return 10.0   # oversold bounce potential
+        return 10.0
     if rsi > 70:
-        return -15.0  # overbought risk
+        return -15.0
     return 0.0
 
 
@@ -512,7 +646,17 @@ async def analyze_chart(candidate: dict) -> dict:
         logger.debug("Chart: no candle data for %s", mint[:12])
         return {"chart_score": 35.0, "pattern_name": "none", "patterns_detected": [], "rsi_adj": 0, "momentum": "neutral"}
 
-    data = candle_data[0]
+    # Check if we got real OHLCV candles or synthetic DexScreener data
+    if len(candle_data) >= 5 and "open" in candle_data[0]:
+        # Real candles from GeckoTerminal — use proper technical analysis
+        signals = _candles_to_signals(candle_data)
+        data = signals
+        logger.info("Chart[%s]: using %d real candles — RSI=%.0f EMA=%s vol_ratio=%.1f",
+                     mint[:12], signals.get("candle_count", 0),
+                     signals.get("rsi", 50), signals.get("ema_bullish"),
+                     signals.get("vol_ratio", 1))
+    else:
+        data = candle_data[0]
 
     # Run all pattern detectors — log every attempt
     detected: list[tuple[str, float]] = []
@@ -564,8 +708,8 @@ async def analyze_chart(candidate: dict) -> dict:
     rsi_adj = _rsi_adjustment(data)
     base_score += rsi_adj
 
-    # EMA momentum
-    momentum = _ema_momentum(data.get("change_m5", 0), data.get("change_h1", 0))
+    # EMA momentum — uses real EMA when candles available
+    momentum = _ema_momentum(data.get("change_m5", 0), data.get("change_h1", 0), data=data)
     if momentum == "bullish":
         base_score += 5.0
     elif momentum == "bearish":

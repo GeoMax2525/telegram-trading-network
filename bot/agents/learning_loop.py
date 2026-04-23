@@ -72,9 +72,9 @@ from database.models import (
 logger = logging.getLogger(__name__)
 
 # Intervals
-MICRO_BATCH      = 3     # micro-adjust every N trades (chaos: was 10)
-FULL_BATCH       = 5     # full review every N trades (chaos: was 50)
-MAJOR_BATCH      = 15    # major recalibration every N trades (chaos: was 100)
+MICRO_BATCH      = 10    # micro-adjust every 10 trades (stabilized — was 3)
+FULL_BATCH       = 25    # full review every 25 trades
+MAJOR_BATCH      = 50    # major recalibration every 50 trades
 POLL_INTERVAL    = 60    # check every 1 minute (chaos: was 2 min)
 STARTUP_DELAY    = 15    # lowered so heartbeat shows up fast in Railway logs
 MAX_WEIGHT_SHIFT = 0.10  # normal-mode full/major weight shift cap
