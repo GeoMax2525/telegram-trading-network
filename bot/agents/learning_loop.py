@@ -87,7 +87,7 @@ WEEKLY_HOUR      = 9
 # Hysteresis prevents flapping between modes on every cycle.
 AGGRESSIVE_WR_ENTER      = 0.40   # effective_wr below this → go aggressive
 AGGRESSIVE_WR_EXIT       = 0.50   # effective_wr at/above this → back to normal
-AGGRESSIVE_MICRO_BATCH   = 2      # vs normal MICRO_BATCH=3
+AGGRESSIVE_MICRO_BATCH   = 5      # vs normal MICRO_BATCH=10 (was 2 — too noisy)
 AGGRESSIVE_MAX_SHIFT     = 0.30   # vs normal MAX_WEIGHT_SHIFT=0.15
 NORMAL_MICRO_SHIFT_RATIO = 0.20   # micro-level shift = this * max_shift
 
