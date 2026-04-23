@@ -1245,11 +1245,13 @@ async def cb_close_position(callback: CallbackQuery):
             await add_daily_loss(user_id, abs(pnl_sol))
 
         pnl_emoji = "🟢" if pnl_sol >= 0 else "🔴"
+        real_mult = round(sol_received / pos.amount_sol_spent, 2) if pos.amount_sol_spent > 0 else 0
         await status_msg.edit_text(
             f"✅ *Position Closed*\n\n"
             f"🪙 Token:          {pos.token_name}\n"
-            f"💰 SOL Received:   {sol_received} SOL\n"
-            f"{pnl_emoji} PnL:            {pnl_sol:+.4f} SOL\n\n"
+            f"💰 Spent:          {pos.amount_sol_spent:.4f} SOL\n"
+            f"💰 Received:       {sol_received:.4f} SOL\n"
+            f"{pnl_emoji} PnL:            {pnl_sol:+.4f} SOL ({real_mult}x)\n\n"
             f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
             parse_mode="Markdown",
             disable_web_page_preview=True,
@@ -1383,17 +1385,21 @@ async def position_monitor_loop(bot: Bot) -> None:
                             sol_received = round(out_lamports / 1_000_000_000, 4)
                             signature    = await execute_ultra_order(order, keypair)
                             pnl_sol      = round(sol_received - pos.amount_sol_spent, 4)
+                            # Use actual SOL for the multiplier — MC ratio can disagree
+                            # with real returns due to slippage on entry
+                            real_mult = round(sol_received / pos.amount_sol_spent, 2) if pos.amount_sol_spent > 0 else mult
                             await close_position(pos.id, reason, pnl_sol)
                             if pnl_sol < 0:
                                 await add_daily_loss(pos.user_id, abs(pnl_sol))
 
                             pnl_sign = "+" if pnl_sol >= 0 else ""
+                            pnl_emoji = "🟢" if pnl_sol >= 0 else "🔴"
                             await bot.send_message(
                                 CALLER_GROUP_ID,
                                 f"{emoji} *{label}*\n\n"
                                 f"🪙 Token: {pos.token_name}\n"
-                                f"📊 Entry MC: {entry_str} | Exit MC: {exit_str}\n"
-                                f"📈 Result: {mult}x | PNL: {pnl_sign}{pnl_sol:.4f} SOL\n\n"
+                                f"💰 Spent: {pos.amount_sol_spent:.4f} SOL | Received: {sol_received:.4f} SOL\n"
+                                f"{pnl_emoji} PNL: {pnl_sign}{pnl_sol:.4f} SOL ({real_mult}x)\n\n"
                                 f"🔗 [View on Solscan](https://solscan.io/tx/{signature})",
                                 parse_mode="Markdown",
                                 disable_web_page_preview=True,
