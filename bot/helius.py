@@ -29,10 +29,12 @@ BASE_DELAY     = 0.3        # initial backoff delay (seconds)
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 _session: aiohttp.ClientSession | None = None
 
-# ── Enhanced API base URLs (uses HELIUS_PARSE_URL if set) ────────────────────
-_parse_base = HELIUS_PARSE_URL.rstrip("/") if HELIUS_PARSE_URL else "https://api.helius.xyz/v0"
-ENHANCED_TX_URL   = f"{_parse_base}/transactions"
-ENHANCED_ADDR_URL = f"{_parse_base}/addresses/{{address}}/transactions"
+# ── Enhanced API base URLs ────────────────────────────────────────────────────
+# Always use the standard Helius API endpoint. HELIUS_PARSE_URL env var
+# was causing 404 errors when set to a custom endpoint that doesn't
+# support the /transactions path.
+ENHANCED_TX_URL   = "https://api.helius.xyz/v0/transactions"
+ENHANCED_ADDR_URL = "https://api.helius.xyz/v0/addresses/{address}/transactions"
 
 
 async def _get_session() -> aiohttp.ClientSession:

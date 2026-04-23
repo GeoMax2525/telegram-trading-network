@@ -130,23 +130,22 @@ ALL_PATTERN_TYPES = [
     "dead_token",
 ]
 
-# Default rows seeded on first boot. Baseline tp=5.0 / sl=25.0 / trail ON
-# at 2x trigger. Trailing stop is the primary exit mechanism — TP is set
-# high so runners can run, and the trail captures profit on the way down.
+# Default rows seeded on first boot. Baseline tp=5.0 / sl=40.0 / trail ON
+# at 2x trigger. SL at 40% because memecoins wick 30-50% on normal volatility.
 # Agent 6 learns per-type from outcomes over time.
-def _default(tp=5.0, sl=25.0, trig=2.0, on=1):
+def _default(tp=5.0, sl=40.0, trig=2.0, on=1):
     return {"tp_x": tp, "sl_pct": sl, "trail_trigger": trig, "trail_on": on}
 
 DEFAULT_AI_TRADE_PARAMS = {
-    # Baseline — trailing stop as primary exit, high TP to let runners run
-    "new_launch":     _default(5.0, 25.0),
-    "insider_wallet": _default(8.0, 20.0),
-    "volume_spike":   _default(5.0, 25.0),
-    "low_mc":         _default(5.0, 25.0),
-    "mid_mc":         _default(5.0, 25.0),
-    "high_mc":        _default(4.0, 20.0),
-    "high_chart":     _default(5.0, 25.0),
-    "high_caller":    _default(5.0, 20.0),
+    # Baseline — wide SL to survive memecoin volatility
+    "new_launch":     _default(5.0, 40.0),
+    "insider_wallet": _default(8.0, 35.0),
+    "volume_spike":   _default(5.0, 40.0),
+    "low_mc":         _default(5.0, 45.0),
+    "mid_mc":         _default(5.0, 40.0),
+    "high_mc":        _default(4.0, 35.0),
+    "high_chart":     _default(5.0, 40.0),
+    "high_caller":    _default(5.0, 35.0),
     # New rows — uniform baselines, learned from outcomes
     "early_entry":            _default(),
     "late_entry":             _default(),
