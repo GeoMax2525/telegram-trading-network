@@ -348,7 +348,7 @@ async def _import_gmgn_wallets() -> int:
     skip_tier_zero    = 0
 
     imported = 0
-    for address in list(wallet_addrs)[:20]:  # cap to avoid rate limits
+    for address in list(wallet_addrs)[:50]:  # Business plan: higher cap
         short = f"{address[:4]}..{address[-4:]}"
         stats = await gmgn_wallet_stats(address)
         if not stats:
@@ -496,6 +496,124 @@ async def _track_smart_money_trades() -> int:
     return new_signals
 
 
+# ── Top coin early buyer extraction ─────────────────────────────────────────
+# The missing link: find what's winning → who bought it early → follow them.
+# This is how the insider wallet database actually gets populated with
+# proven early buyers instead of just GMGN's generic smart money list.
+
+TOP_COIN_POLL = 600  # every 10 minutes
+
+async def _extract_top_coin_buyers() -> int:
+    """
+    Pull top trending/gaining coins from GMGN, get their early buyers,
+    save those wallets with high scores. This feeds the insider signal.
+
+    Flow: trending coins → top_traders per coin → upsert_wallet as early_insider
+    """
+    # Get top gaining tokens across multiple timeframes
+    all_mints: list[tuple[str, str, float]] = []  # (mint, name, mc)
+
+    for interval in ("1h", "6h"):
+        tokens = await gmgn_trending(interval=interval, limit=20)
+        for t in (tokens or []):
+            mint = t.get("address")
+            name = t.get("name") or t.get("symbol") or "?"
+            mc = float(t.get("market_cap") or 0)
+            if mint and mc > 10_000:
+                all_mints.append((mint, name, mc))
+
+    if not all_mints:
+        return 0
+
+    # Deduplicate
+    seen: set[str] = set()
+    unique_mints = []
+    for m, n, mc in all_mints:
+        if m not in seen:
+            seen.add(m)
+            unique_mints.append((m, n, mc))
+
+    logger.info("GMGN top coin buyers: analyzing %d trending tokens for early buyers",
+                len(unique_mints))
+
+    wallets_found = 0
+    wallets_saved = 0
+
+    # Check top 10 trending coins for their early buyers
+    for mint, name, mc in unique_mints[:10]:
+        try:
+            traders = await gmgn_top_traders(mint)
+            if not traders:
+                await asyncio.sleep(1)
+                continue
+
+            for trader in traders[:10]:  # top 10 traders per coin
+                addr = trader.get("address") or trader.get("wallet_address")
+                if not addr:
+                    continue
+
+                wallets_found += 1
+
+                # Check if this is actually a profitable early buyer
+                profit = float(trader.get("profit") or trader.get("realized_profit") or 0)
+                buy_amount = float(trader.get("buy_amount_cur") or trader.get("cost") or 0)
+
+                if profit <= 0 and buy_amount <= 0:
+                    continue  # skip losers and dust
+
+                # Calculate rough multiple
+                if buy_amount > 0 and profit > 0:
+                    multiple = 1.0 + (profit / buy_amount)
+                else:
+                    multiple = 2.0  # assume winner if profit > 0
+
+                # Score higher for bigger winners
+                if multiple >= 5.0:
+                    score = 80.0
+                    tier = 2
+                elif multiple >= 2.0:
+                    score = 65.0
+                    tier = 2
+                else:
+                    score = 50.0
+                    tier = 3
+
+                await upsert_wallet(
+                    address=addr,
+                    score=score,
+                    tier=tier,
+                    win_rate=0.60 if multiple >= 2.0 else 0.40,
+                    avg_multiple=round(min(multiple, 20.0), 2),
+                    wins=1,
+                    losses=0,
+                    total_trades=1,
+                    avg_entry_mcap=mc * 0.1 if mc else None,  # estimate early entry MC
+                    source="gmgn",
+                    wallet_type="early_insider" if multiple >= 3.0 else "gmgn_smart",
+                )
+                wallets_saved += 1
+
+            await asyncio.sleep(1.5)  # rate limit
+
+        except Exception as exc:
+            logger.warning("GMGN top buyers: failed for %s: %s", name[:20], exc)
+            await asyncio.sleep(1)
+
+    if wallets_saved:
+        logger.info(
+            "GMGN top coin buyers: found %d wallets, saved %d (from %d coins)",
+            wallets_found, wallets_saved, len(unique_mints[:10]),
+        )
+        await log_agent_run(
+            "gmgn_top_buyers",
+            tokens_found=len(unique_mints[:10]),
+            tokens_saved=wallets_saved,
+            notes=f"extracted early buyers from top trending coins",
+        )
+
+    return wallets_saved
+
+
 # ── Background loops ─────────────────────────────────────────────────────────
 
 async def gmgn_agent_loop() -> None:
@@ -508,8 +626,8 @@ async def gmgn_agent_loop() -> None:
         logger.info("GMGN agent: use /testgmgn in Claude Code session for GMGN data.")
         return
 
-    logger.info("GMGN agent started — tokens:%ds wallets:%ds trades:%ds",
-                TOKEN_POLL, WALLET_POLL, TRADE_POLL)
+    logger.info("GMGN agent started — tokens:%ds wallets:%ds trades:%ds top_buyers:%ds",
+                TOKEN_POLL, WALLET_POLL, TRADE_POLL, TOP_COIN_POLL)
 
     async def _token_loop():
         while True:
@@ -535,7 +653,15 @@ async def gmgn_agent_loop() -> None:
                 logger.error("GMGN trade tracking error: %s", exc)
             await asyncio.sleep(TRADE_POLL)
 
+    async def _top_buyer_loop():
+        while True:
+            try:
+                await _extract_top_coin_buyers()
+            except Exception as exc:
+                logger.error("GMGN top buyer extraction error: %s", exc)
+            await asyncio.sleep(TOP_COIN_POLL)
+
     await asyncio.gather(
-        _token_loop(), _wallet_loop(), _trade_loop(),
+        _token_loop(), _wallet_loop(), _trade_loop(), _top_buyer_loop(),
         return_exceptions=True,
     )
