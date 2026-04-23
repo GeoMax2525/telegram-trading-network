@@ -25,9 +25,9 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
-TOKEN_POLL = 120      # 2 minutes
+TOKEN_POLL = 300      # 5 minutes (was 2 — too fast, hitting rate limits)
 WALLET_POLL = 3600    # 1 hour
-TRADE_POLL = 300      # 5 minutes
+TRADE_POLL = 600      # 10 minutes (was 5 — rate limit protection)
 STARTUP_DELAY = 90
 
 
@@ -534,7 +534,7 @@ async def _track_smart_money_trades() -> int:
 # This is how the insider wallet database actually gets populated with
 # proven early buyers instead of just GMGN's generic smart money list.
 
-TOP_COIN_POLL = 600  # every 10 minutes
+TOP_COIN_POLL = 1200  # every 20 minutes (rate limit protection)
 
 async def _extract_top_coin_buyers() -> int:
     """
