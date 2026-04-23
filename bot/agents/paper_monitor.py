@@ -345,17 +345,34 @@ async def _check_open_trades(bot) -> None:
                             pass
                         continue
 
-            # Check fixed SL — with grace period.
-            # Memecoins wick 30-50% on entry and recover. Don't sell the dip.
-            # Grace period scales with MC: smaller = more volatile = longer grace.
-            if entry_mc < 100_000:
-                sl_grace_min = 10   # micro caps need 10 min to settle
-            elif entry_mc < 500_000:
-                sl_grace_min = 7
-            else:
-                sl_grace_min = 5
+            # Phase-based exit strategy for memecoins:
+            #
+            # Phase 1 (0-15 min): NO SL at all. Let the token breathe.
+            #   Memecoins wick 30-60% on entry and recover. Any fixed SL
+            #   during this phase just sells the bottom of every dip.
+            #
+            # Phase 2 (15-45 min): Only exit if token dropped >60% (catastrophic).
+            #   This catches actual rugs while letting normal volatility play out.
+            #
+            # Phase 3 (45+ min): Full SL active. If the token hasn't moved
+            #   by now, the trade thesis is dead. Use the configured SL%.
+            #
+            # The trailing stop (activated at 2x peak) handles profitable exits
+            # throughout all phases. This SL logic only handles losing positions.
             sl_threshold = 1.0 - (pt.stop_loss_pct / 100.0)
-            if current_mult <= sl_threshold and age_hours >= (sl_grace_min / 60.0):
+            catastrophic_threshold = 0.40  # 60% drop = rug, always exit
+
+            if age_hours < 0.25:
+                # Phase 1: first 15 min — only exit on catastrophic drop (rug)
+                should_sl = current_mult <= catastrophic_threshold
+            elif age_hours < 0.75:
+                # Phase 2: 15-45 min — wider threshold (50% drop)
+                should_sl = current_mult <= 0.50
+            else:
+                # Phase 3: 45+ min — full configured SL
+                should_sl = current_mult <= sl_threshold
+
+            if should_sl:
                 pnl = round(-sol * (1.0 - current_mult), 4)
                 await _close_and_track(pt.id, "sl_hit", pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
