@@ -1129,6 +1129,26 @@ async def run_once() -> tuple[int, int]:
         if scored.get("paper_trade"):
             mint_addr = scored.get("mint", "")
 
+            # Session cooldown — stop trading after 5 consecutive losses
+            from datetime import datetime as _dt
+            if state.session_cooldown_until and _dt.utcnow() < state.session_cooldown_until:
+                logger.info(
+                    "Scanner: SKIP %s — session cooldown (5 consecutive losses, resumes %s)",
+                    scored.get("name", "?")[:20],
+                    state.session_cooldown_until.strftime("%H:%M UTC"),
+                )
+                continue
+
+            # Cold streak caution — raise threshold during losing streaks
+            if state.session_cold_streak:
+                cold_conf = scored.get("confidence_score", 0)
+                if cold_conf < 70:
+                    logger.info(
+                        "Scanner: SKIP %s — cold streak (3+ losses), need conf >= 70 (got %.0f)",
+                        scored.get("name", "?")[:20], cold_conf,
+                    )
+                    continue
+
             # Confirmation gate: token must be seen 2+ times across ticks
             # before opening a trade. Prevents instant pump-and-dump entries.
             if not is_confirmed(mint_addr):
@@ -1262,6 +1282,15 @@ async def run_once() -> tuple[int, int]:
             max_abs = float(sp.get("max_position_sol") or 5.0)
 
             learned_pct = float(scored.get("trade_position_pct", 10.0)) / 100.0
+
+            # Session-aware position sizing
+            if state.session_hot_streak:
+                # Winning streak — increase size by 50% (confidence is high)
+                learned_pct = min(learned_pct * 1.5, 0.25)
+            elif state.session_cold_streak:
+                # Losing streak — halve size (preserve capital)
+                learned_pct = learned_pct * 0.5
+
             paper_sol = round(
                 min(
                     state.paper_balance * learned_pct,

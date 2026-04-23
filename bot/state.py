@@ -44,6 +44,19 @@ paper_trades_today:          int             = 0
 data_points_today:           int             = 0       # total candidates scored
 paper_resets:                int             = 0       # how many times balance reset to starting
 
+# ── Session awareness (real-time trading context) ───────────────────────────
+# Tracks recent trade outcomes so the system can adapt in real-time,
+# not just after Agent 6 reviews. Updated by paper_monitor on every close.
+session_recent_results:      list[str]       = []   # last 10: "win" / "loss" / "be"
+session_consecutive_losses:  int             = 0
+session_consecutive_wins:    int             = 0
+session_today_wins:          int             = 0
+session_today_losses:        int             = 0
+session_last_close_reason:   str             = ""
+session_hot_streak:          bool            = False   # 3+ consecutive wins
+session_cold_streak:         bool            = False   # 3+ consecutive losses
+session_cooldown_until:      datetime | None = None    # pause trading until this time
+
 # ── Backfill progress ────────────────────────────────────────────────────────
 backfill_running:            bool            = False
 backfill_progress:           str             = "Not started"

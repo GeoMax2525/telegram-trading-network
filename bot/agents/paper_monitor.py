@@ -44,6 +44,63 @@ MAX_FETCH_FAILS    = 5     # consecutive failures before auto-close
 _fetch_fail_counts: dict[int, int] = {}
 
 
+async def _close_and_track(trade_id, reason, pnl, peak_mc, peak_mult):
+    """Close a paper trade AND update session context in one call."""
+    await close_paper_trade(trade_id, reason, pnl, peak_mc, peak_mult)
+    # Determine outcome from reason
+    if reason in ("tp_hit", "trail_hit", "profit_trail"):
+        _update_session_context("win")
+    elif reason in ("breakeven_stop",):
+        _update_session_context("be")
+    elif reason in ("sl_hit", "dead_api", "dead_token"):
+        _update_session_context("loss")
+    # stale, expired, reset = meta, don't track
+
+
+def _update_session_context(outcome: str) -> None:
+    """Update session awareness state after every trade close.
+    outcome: 'win', 'loss', or 'be' (breakeven)."""
+    from datetime import datetime, timedelta
+
+    # Track last 10 results
+    state.session_recent_results.append(outcome)
+    if len(state.session_recent_results) > 10:
+        state.session_recent_results.pop(0)
+
+    # Consecutive tracking
+    if outcome == "win":
+        state.session_consecutive_wins += 1
+        state.session_consecutive_losses = 0
+        state.session_today_wins += 1
+    elif outcome == "loss":
+        state.session_consecutive_losses += 1
+        state.session_consecutive_wins = 0
+        state.session_today_losses += 1
+    else:
+        state.session_consecutive_wins = 0
+        state.session_consecutive_losses = 0
+
+    # Streak detection
+    state.session_hot_streak = state.session_consecutive_wins >= 3
+    state.session_cold_streak = state.session_consecutive_losses >= 3
+
+    # Auto-cooldown: pause trading after 5 consecutive losses
+    if state.session_consecutive_losses >= 5:
+        state.session_cooldown_until = datetime.utcnow() + timedelta(minutes=30)
+        logger.warning(
+            "SESSION: 5 consecutive losses — cooling down for 30 min until %s",
+            state.session_cooldown_until.strftime("%H:%M UTC"),
+        )
+
+    state.session_last_close_reason = outcome
+    logger.info(
+        "SESSION: %s | streak W:%d L:%d | today W:%d L:%d | hot=%s cold=%s",
+        outcome, state.session_consecutive_wins, state.session_consecutive_losses,
+        state.session_today_wins, state.session_today_losses,
+        state.session_hot_streak, state.session_cold_streak,
+    )
+
+
 # ── Open trade monitoring ────────────────────────────────────────────────────
 
 _parse_pattern_tags = parse_pattern_tags
@@ -105,7 +162,7 @@ async def _check_open_trades(bot) -> None:
                 )
                 if fails >= MAX_FETCH_FAILS:
                     pnl = round(-pt.paper_sol_spent * 0.5, 4)
-                    await close_paper_trade(pt.id, "dead_api", pnl, pt.peak_mc, pt.peak_multiple)
+                    await _close_and_track(pt.id, "dead_api", pnl, pt.peak_mc, pt.peak_multiple)
                     bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                     state.paper_balance = bal
                     logger.warning(
@@ -196,7 +253,7 @@ async def _check_open_trades(bot) -> None:
             be_trigger = float(cfg.get("breakeven_trigger", 1.5) or 1.5)
             if peak_mult >= be_trigger and current_mult <= 1.0:
                 pnl = round(sol * (current_mult - 1), 4)
-                await close_paper_trade(pt.id, "breakeven_stop", pnl, peak_mc, peak_mult)
+                await _close_and_track(pt.id, "breakeven_stop", pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_balance = bal
                 logger.info(
@@ -222,7 +279,7 @@ async def _check_open_trades(bot) -> None:
                 trail_stop_mult = peak_mult * (1.0 - pt_pct)
                 if current_mult <= trail_stop_mult:
                     pnl = round(sol * (current_mult - 1), 4)
-                    await close_paper_trade(pt.id, "profit_trail", pnl, peak_mc, peak_mult)
+                    await _close_and_track(pt.id, "profit_trail", pnl, peak_mc, peak_mult)
                     bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                     state.paper_balance = bal
                     logger.info(
@@ -243,7 +300,7 @@ async def _check_open_trades(bot) -> None:
             # Check TP
             if current_mult >= pt.take_profit_x:
                 pnl = round(sol * (current_mult - 1), 4)
-                await close_paper_trade(pt.id, "tp_hit", pnl, peak_mc, peak_mult)
+                await _close_and_track(pt.id, "tp_hit", pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_balance = bal
                 logger.info(
@@ -269,7 +326,7 @@ async def _check_open_trades(bot) -> None:
                     trail_stop_mult = peak_mult * (1.0 - float(resolved["trail_pct"]))
                     if current_mult <= trail_stop_mult:
                         pnl = round(sol * (current_mult - 1), 4)
-                        await close_paper_trade(pt.id, "trail_hit", pnl, peak_mc, peak_mult)
+                        await _close_and_track(pt.id, "trail_hit", pnl, peak_mc, peak_mult)
                         bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                         state.paper_balance = bal
                         logger.info(
@@ -300,7 +357,7 @@ async def _check_open_trades(bot) -> None:
             sl_threshold = 1.0 - (pt.stop_loss_pct / 100.0)
             if current_mult <= sl_threshold and age_hours >= (sl_grace_min / 60.0):
                 pnl = round(-sol * (1.0 - current_mult), 4)
-                await close_paper_trade(pt.id, "sl_hit", pnl, peak_mc, peak_mult)
+                await _close_and_track(pt.id, "sl_hit", pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_balance = bal
                 logger.info(
