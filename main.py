@@ -30,6 +30,7 @@ from bot.agents.learning_loop import learning_loop
 from bot.agents.paper_monitor import paper_monitor_loop
 from bot.agents.gmgn_agent import gmgn_agent_loop
 from bot.agents.tg_scraper import tg_scraper_loop
+from bot.agents.laserstream import laserstream_loop
 from database.models import init_db, init_agent_params, get_param, compute_paper_balance, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses, seed_ai_trade_params
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -179,6 +180,10 @@ async def main() -> None:
         logger.info("TG scraper: queued for startup (session string found)")
     else:
         logger.info("TG scraper: skipped (TG_SESSION_STRING not set)")
+
+    # LaserStream — real-time token detection via Helius WebSocket
+    asyncio.create_task(laserstream_loop())
+    logger.info("LaserStream: queued for startup")
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     try:
