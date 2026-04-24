@@ -26,6 +26,7 @@ from database.models import (
     update_paper_post_close,
     compute_paper_balance,
     get_params,
+    AsyncSessionLocal, PaperTrade,
 )
 from bot.scanner import mint_suffix_ok
 from bot.agents.trade_profiles import resolve_trade_params, parse_pattern_tags
@@ -297,9 +298,77 @@ async def _check_open_trades(bot) -> None:
                         pass
                     continue
 
-            # Check TP
+            # ── Scale out: sell partial at milestones instead of all-or-nothing ──
+            # Real meme traders take profit on the way up:
+            #   30% at 2x, 30% at 3x, trail the remaining 40%
+            # This locks in gains while letting runners run.
+            remaining = float(getattr(pt, "remaining_pct", 100) or 100)
+            realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
+
+            scale_out_done = False
+            if remaining > 70 and current_mult >= 2.0:
+                # First scale: sell 30% at 2x
+                sell_pct = 30.0
+                sell_sol = sol * (sell_pct / 100.0) * (current_mult - 1)
+                new_remaining = remaining - sell_pct
+                new_realized = realized + sell_sol
+                try:
+                    async with AsyncSessionLocal() as sess:
+                        trade = await sess.get(PaperTrade, pt.id)
+                        if trade:
+                            trade.remaining_pct = new_remaining
+                            trade.realized_pnl_sol = new_realized
+                            await sess.commit()
+                except Exception:
+                    pass
+                logger.info(
+                    "Paper SCALE OUT %s: sold 30%% at %.1fx | +%.4f SOL | remaining %.0f%%",
+                    name, current_mult, sell_sol, new_remaining,
+                )
+                try:
+                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                        f"📈 PAPER TRADE — SCALE OUT (30%)",
+                        f"🪙 {name} | {current_mult:.1f}x | +{sell_sol:.4f} SOL",
+                        f"Remaining: {new_remaining:.0f}% still running",
+                    ]), message_thread_id=SCAN_TOPIC_ID)
+                except Exception:
+                    pass
+                scale_out_done = True
+
+            elif remaining > 40 and remaining <= 70 and current_mult >= 3.0:
+                # Second scale: sell another 30% at 3x
+                sell_pct = 30.0
+                sell_sol = sol * (sell_pct / 100.0) * (current_mult - 1)
+                new_remaining = remaining - sell_pct
+                new_realized = realized + sell_sol
+                try:
+                    async with AsyncSessionLocal() as sess:
+                        trade = await sess.get(PaperTrade, pt.id)
+                        if trade:
+                            trade.remaining_pct = new_remaining
+                            trade.realized_pnl_sol = new_realized
+                            await sess.commit()
+                except Exception:
+                    pass
+                logger.info(
+                    "Paper SCALE OUT %s: sold 30%% at %.1fx | +%.4f SOL | remaining %.0f%%",
+                    name, current_mult, sell_sol, new_remaining,
+                )
+                try:
+                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                        f"📈 PAPER TRADE — SCALE OUT (30%)",
+                        f"🪙 {name} | {current_mult:.1f}x | +{sell_sol:.4f} SOL",
+                        f"Remaining: {new_remaining:.0f}% — trailing stop active",
+                    ]), message_thread_id=SCAN_TOPIC_ID)
+                except Exception:
+                    pass
+                scale_out_done = True
+
+            # Check TP — only on remaining position
             if current_mult >= pt.take_profit_x:
-                pnl = round(sol * (current_mult - 1), 4)
+                # Close remaining position at TP
+                remaining_sol = sol * (remaining / 100.0)
+                pnl = round(realized + remaining_sol * (current_mult - 1), 4)
                 await _close_and_track(pt.id, "tp_hit", pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_balance = bal

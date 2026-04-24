@@ -330,6 +330,10 @@ class PaperTrade(Base):
     peak_multiple     = Column(Float,       nullable=True)
     close_reason      = Column(String(32),  nullable=True)   # tp_hit / sl_hit / expired
     paper_pnl_sol     = Column(Float,       nullable=True)
+    # Scaling out: track remaining position and realized profit
+    remaining_pct     = Column(Float,       nullable=False, default=100.0)  # % of position still open
+    realized_pnl_sol  = Column(Float,       nullable=False, default=0.0)   # profit already taken
+    trade_reasoning   = Column(String(512), nullable=True)  # why the trade was opened
     opened_at         = Column(DateTime,    default=datetime.utcnow, nullable=False)
     closed_at         = Column(DateTime,    nullable=True)
     # Post-close tracking (filled by monitor over 24h after close)
@@ -506,6 +510,9 @@ _NEW_PAPER_TRADE_COLS = [
     ("zero_volume_since", "TIMESTAMP"),
     ("last_move_at",      "TIMESTAMP"),
     ("last_move_mc",      "REAL"),
+    ("remaining_pct",     "REAL DEFAULT 100"),
+    ("realized_pnl_sol",  "REAL DEFAULT 0"),
+    ("trade_reasoning",   "TEXT"),
 ]
 
 _NEW_AI_TRADE_PARAMS_COLS = [

@@ -708,11 +708,35 @@ async def score_candidate(candidate: dict) -> dict:
     trade_tp_x  = round(base_tp * 0.7 + mc_tp * 0.3, 2)
     trade_sl_pct = round(base_sl * 0.7 + mc_sl * 0.3, 1)
 
-    # Trailing stop stays at 2.0x baseline — do NOT lower it
+    # Trailing stop stays at 2.0x baseline
     if not trail_enabled:
         trail_enabled = True
         trail_trigger = 2.0
-        trail_trigger = 1.5
+
+    # Build trade reasoning — explains WHY this trade was opened
+    reasons = []
+    if fingerprint >= 60:
+        reasons.append(f"strong pattern match ({fingerprint:.0f})")
+    if insider >= 55:
+        reasons.append(f"insider wallet activity ({insider:.0f})")
+    if chart >= 60:
+        reasons.append(f"bullish chart ({chart:.0f})")
+    if rug >= 80:
+        reasons.append(f"clean safety ({rug:.0f})")
+    if tg_boost > 0:
+        reasons.append(f"TG signal (+{tg_boost:.0f})")
+    if market >= 60:
+        reasons.append(f"favorable market ({market:.0f})")
+    if candidate.get("gmgn_smart_money"):
+        reasons.append("GMGN smart money")
+    if candidate.get("gmgn_trending"):
+        reasons.append("GMGN trending")
+    mc_str = f"${mcap/1000:.0f}K" if mcap < 1_000_000 else f"${mcap/1_000_000:.1f}M"
+    trade_reasoning = (
+        f"Bought at {mc_str} MC | conf={confidence:.0f} | "
+        + ", ".join(reasons[:4]) if reasons else f"Bought at {mc_str} MC | conf={confidence:.0f} | baseline signals"
+    )
+
     profile_tag_csv    = ",".join(pattern_tags)
     params_source = (
         f"ai_learned({resolved['matched_rows']}/{len(pattern_tags)})"
@@ -781,4 +805,5 @@ async def score_candidate(candidate: dict) -> dict:
         "trail_enabled":     trail_enabled,
         "trail_trigger":     trail_trigger,
         "trail_pct":         trail_pct,
+        "trade_reasoning":   trade_reasoning,
     }
