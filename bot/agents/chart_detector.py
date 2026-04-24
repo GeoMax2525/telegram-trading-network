@@ -601,136 +601,201 @@ def _rsi_adjustment(data: dict) -> float:
     return 0.0
 
 
-# ── Main analysis function ───────────────────────────────────────────────────
+# ── Meme Strength Score — indicator-based, no classical patterns ──────────────
+#
+# Classical chart patterns (bull flag, head & shoulders, etc.) don't work
+# on memecoins. What real meme traders use:
+#   1. RSI on 5m with degen thresholds (buy <30, scale out >75)
+#   2. Volume spike / delta (the #1 entry signal)
+#   3. EMA slope for momentum direction
+#   4. Higher highs / lows (trend confirmation)
+#   5. Buy/sell pressure ratio
+#
+# This replaces ALL_PATTERNS with pure indicator confluence scoring.
 
-ALL_PATTERNS = {
-    "bull_flag":              _detect_bull_flag,
-    "ascending_triangle":     _detect_ascending_triangle,
-    "double_bottom":          _detect_double_bottom,
-    "falling_wedge":          _detect_falling_wedge,
-    "cup_and_handle":         _detect_cup_and_handle,
-    "launchpad_setup":        _detect_launchpad_setup,
-    "caller_pump":            _detect_caller_pump,
-    "fakeout_recovery":       _detect_fakeout_recovery,
-    # insider_accumulation handled separately (needs insider_count)
-}
+
+def _meme_strength_from_candles(signals: dict) -> tuple[float, str, list[str]]:
+    """
+    Score a token's meme strength from real candle indicators.
+    Returns (score 0-100, primary_signal, list of active signals).
+    """
+    score = 50.0  # neutral start
+    active_signals: list[str] = []
+    primary = "neutral"
+
+    rsi = signals.get("rsi", 50)
+    vol_ratio = signals.get("vol_ratio", 1.0)
+    ema_bull = signals.get("ema_bullish", False)
+    higher_lows = signals.get("higher_lows", False)
+    near_high = signals.get("near_high", False)
+    change_m5 = signals.get("change_m5", 0)
+    change_h1 = signals.get("change_h1", 0)
+
+    # RSI — the most important indicator for meme entry/exit
+    if rsi < 28:
+        score += 25     # deeply oversold — strong buy zone
+        active_signals.append(f"RSI oversold ({rsi:.0f})")
+        primary = "oversold_bounce"
+    elif rsi < 35:
+        score += 15     # approaching oversold
+        active_signals.append(f"RSI low ({rsi:.0f})")
+        primary = "dip_buy"
+    elif rsi > 80:
+        score -= 20     # extremely overbought — exit zone
+        active_signals.append(f"RSI overbought ({rsi:.0f})")
+        primary = "overbought"
+    elif rsi > 72:
+        score -= 10     # hot — caution
+        active_signals.append(f"RSI hot ({rsi:.0f})")
+
+    # Volume spike — #1 entry signal for memes
+    if vol_ratio >= 5.0:
+        score += 25     # massive volume surge
+        active_signals.append(f"volume explosion ({vol_ratio:.1f}x avg)")
+        if primary == "neutral":
+            primary = "volume_surge"
+    elif vol_ratio >= 3.0:
+        score += 18     # strong volume
+        active_signals.append(f"high volume ({vol_ratio:.1f}x avg)")
+        if primary == "neutral":
+            primary = "volume_spike"
+    elif vol_ratio >= 1.5:
+        score += 8      # above average
+        active_signals.append(f"active volume ({vol_ratio:.1f}x)")
+    elif vol_ratio < 0.5:
+        score -= 10     # dead volume
+        active_signals.append("low volume")
+
+    # EMA momentum — trend direction
+    if ema_bull and change_m5 > 0:
+        score += 10
+        active_signals.append("bullish momentum")
+    elif not ema_bull and change_m5 < -5:
+        score -= 10
+        active_signals.append("bearish momentum")
+
+    # Higher lows — trend confirmation
+    if higher_lows:
+        score += 8
+        active_signals.append("higher lows (uptrend)")
+
+    # Near recent high — breakout potential
+    if near_high and vol_ratio >= 1.5:
+        score += 10
+        active_signals.append("testing highs with volume")
+        if primary in ("neutral", "volume_spike"):
+            primary = "breakout"
+
+    # RSI divergence detection (price up but RSI dropping = exhaustion)
+    if change_h1 > 20 and rsi < 50:
+        score += 5      # hidden bullish divergence
+        active_signals.append("bullish divergence")
+    elif change_h1 > 50 and rsi > 70:
+        score -= 8      # bearish divergence — price extended
+        active_signals.append("bearish divergence")
+
+    return max(10.0, min(100.0, score)), primary, active_signals
+
+
+def _meme_strength_from_synthetic(data: dict) -> tuple[float, str, list[str]]:
+    """
+    Score from DexScreener synthetic data when no real candles available.
+    Uses volume ratio and price changes as proxy indicators.
+    """
+    score = 50.0
+    active_signals: list[str] = []
+    primary = "neutral"
+
+    vol_ratio = _volume_spike_ratio(data.get("volume_m5", 0), data.get("volume_h1", 0))
+    change_m5 = data.get("change_m5", 0)
+    change_h1 = data.get("change_h1", 0)
+
+    # Volume spike
+    if vol_ratio >= 3.0:
+        score += 20
+        active_signals.append(f"volume surge ({vol_ratio:.1f}x)")
+        primary = "volume_spike"
+    elif vol_ratio >= 1.5:
+        score += 8
+        active_signals.append(f"active volume ({vol_ratio:.1f}x)")
+
+    # Momentum proxy
+    momentum = _ema_momentum(change_m5, change_h1)
+    if momentum == "bullish":
+        score += 10
+        active_signals.append("bullish")
+    elif momentum == "bearish":
+        score -= 10
+        active_signals.append("bearish")
+
+    # RSI proxy
+    rsi_adj = _rsi_adjustment(data)
+    score += rsi_adj
+    if rsi_adj > 0:
+        active_signals.append("oversold bounce")
+    elif rsi_adj < 0:
+        active_signals.append("overbought")
+
+    return max(10.0, min(100.0, score)), primary, active_signals
 
 
 async def analyze_chart(candidate: dict) -> dict:
     """
-    Analyze chart patterns for a candidate token.
+    Meme Strength Analyzer — replaces classical pattern detection.
+
+    Uses RSI, volume spikes, EMA momentum, and price action to score
+    how strong a token's momentum is RIGHT NOW. No bull flags or cup
+    and handles — those don't work on memecoins.
 
     Returns:
         {
             "chart_score": 0-100,
-            "pattern_name": str or "none",
-            "patterns_detected": list of pattern names,
+            "pattern_name": str (primary signal),
+            "patterns_detected": list of active signals,
             "rsi_adj": float,
             "momentum": str,
         }
     """
     mint = candidate.get("mint", "")
-    insider_count = candidate.get("insider_count", 0)
 
     if not mint:
         return {"chart_score": 30.0, "pattern_name": "none", "patterns_detected": [], "rsi_adj": 0, "momentum": "neutral"}
 
-    # Fetch pair data
     pair_address = await _fetch_pair_address(mint)
     if not pair_address:
-        logger.debug("Chart: no pair found for %s", mint[:12])
         return {"chart_score": 35.0, "pattern_name": "none", "patterns_detected": [], "rsi_adj": 0, "momentum": "neutral"}
 
     candle_data = await _fetch_ohlcv(pair_address)
     if not candle_data:
-        logger.debug("Chart: no candle data for %s", mint[:12])
         return {"chart_score": 35.0, "pattern_name": "none", "patterns_detected": [], "rsi_adj": 0, "momentum": "neutral"}
 
-    # Check if we got real OHLCV candles or synthetic DexScreener data
+    # Use real candles when available, synthetic fallback otherwise
     if len(candle_data) >= 5 and "open" in candle_data[0]:
-        # Real candles from GeckoTerminal — use proper technical analysis
         signals = _candles_to_signals(candle_data)
-        data = signals
-        logger.info("Chart[%s]: using %d real candles — RSI=%.0f EMA=%s vol_ratio=%.1f",
-                     mint[:12], signals.get("candle_count", 0),
-                     signals.get("rsi", 50), signals.get("ema_bullish"),
-                     signals.get("vol_ratio", 1))
+        score, primary, active = _meme_strength_from_candles(signals)
+        rsi = signals.get("rsi", 50)
+        momentum = "bullish" if signals.get("ema_bullish") else "bearish" if signals.get("change_m5", 0) < -5 else "neutral"
+        logger.info(
+            "Chart[%s]: MEME STRENGTH %.0f | RSI=%.0f | vol=%.1fx | %s | signals: %s",
+            mint[:12], score, rsi, signals.get("vol_ratio", 1),
+            primary, ", ".join(active[:4]) if active else "none",
+        )
     else:
         data = candle_data[0]
+        score, primary, active = _meme_strength_from_synthetic(data)
+        rsi = 50
+        momentum = _ema_momentum(data.get("change_m5", 0), data.get("change_h1", 0))
+        logger.info(
+            "Chart[%s]: MEME STRENGTH %.0f (synthetic) | %s | signals: %s",
+            mint[:12], score, primary, ", ".join(active[:4]) if active else "none",
+        )
 
-    # Run all pattern detectors — log every attempt
-    detected: list[tuple[str, float]] = []
-    all_scores: list[str] = []
-
-    for name, detector in ALL_PATTERNS.items():
-        score, matched = detector(data)
-        all_scores.append(f"{name}:{score:.0f}{'*' if matched else ''}")
-        if score > 0:  # chaos mode: include all non-zero scores
-            detected.append((name, score))
-
-    # Insider accumulation (special — needs insider_count)
-    ins_score, ins_matched = _detect_insider_accumulation(data, insider_count)
-    all_scores.append(f"insider_accum:{ins_score:.0f}{'*' if ins_matched else ''}")
-    if ins_score > 0:
-        detected.append(("insider_accumulation", ins_score))
-
-    logger.info("Chart[%s]: all patterns: %s", mint[:12], " | ".join(all_scores))
-
-    # Sort by score descending
-    detected.sort(key=lambda x: x[1], reverse=True)
-
-    # Compute chart score
-    if not detected:
-        base_score = 30.0
-        pattern_name = "none"
-    elif len(detected) == 1:
-        base_score = detected[0][1]
-        pattern_name = detected[0][0]
-    else:
-        # Multi-pattern confluence
-        base_score = detected[0][1]
-        pattern_name = detected[0][0]
-
-        # Check for confluence bonus
-        if len(detected) >= 3:
-            base_score += 25.0  # 3+ patterns
-        elif len(detected) >= 2:
-            base_score += 15.0  # 2 patterns
-
-        # Check for conflicting patterns (some bearish + bullish)
-        bearish_patterns = {"falling_wedge", "fakeout_recovery", "double_bottom"}
-        bullish_patterns = {"bull_flag", "ascending_triangle", "caller_pump"}
-        det_names = {d[0] for d in detected}
-        if det_names & bearish_patterns and det_names & bullish_patterns:
-            base_score -= 20.0  # conflicting signals
-
-    # RSI adjustment
-    rsi_adj = _rsi_adjustment(data)
-    base_score += rsi_adj
-
-    # EMA momentum — uses real EMA when candles available
-    momentum = _ema_momentum(data.get("change_m5", 0), data.get("change_h1", 0), data=data)
-    if momentum == "bullish":
-        base_score += 5.0
-    elif momentum == "bearish":
-        base_score -= 10.0
-
-    # Clamp to 15-100 (chaos mode: never return 0)
-    chart_score = round(max(15.0, min(100.0, base_score)), 1)
-
-    pattern_names = [d[0] for d in detected]
-
-    logger.info(
-        "Chart: %s score=%.1f pattern=%s detected=%s momentum=%s rsi_adj=%.0f",
-        mint[:12], chart_score, pattern_name,
-        ",".join(pattern_names) if pattern_names else "none",
-        momentum, rsi_adj,
-    )
+    rsi_adj = _rsi_adjustment({"rsi": rsi, "has_real_candles": len(candle_data) >= 5} if len(candle_data) >= 5 else candle_data[0] if candle_data else {})
 
     return {
-        "chart_score":       chart_score,
-        "pattern_name":      pattern_name,
-        "patterns_detected": pattern_names,
+        "chart_score":       round(score, 1),
+        "pattern_name":      primary,
+        "patterns_detected": active,
         "rsi_adj":           rsi_adj,
         "momentum":          momentum,
     }
