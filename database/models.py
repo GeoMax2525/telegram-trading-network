@@ -3498,6 +3498,40 @@ async def init_agent_params() -> int:
     except Exception as exc:
         logger.warning("Paper tightening migration failed: %s", exc)
 
+    # One-shot: nuke all wallet data and let the new pipeline rebuild.
+    # The old 530 "gmgn_smart" wallets have zero trade history and zero
+    # classification. The new top-coin buyer extraction directly tags
+    # wallets as early_insider from real winning trades.
+    try:
+        async with AsyncSessionLocal() as session:
+            wallet_reset_flag = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "wallet_reset_v2_done")
+            )).scalar_one_or_none()
+            if wallet_reset_flag is None or wallet_reset_flag.param_value < 1.0:
+                # Clear all wallets and related data
+                from sqlalchemy import delete
+                w_count = (await session.execute(
+                    select(func.count(Wallet.address))
+                )).scalar() or 0
+                await session.execute(delete(WalletTokenTrade))
+                await session.execute(delete(WalletCluster))
+                await session.execute(delete(Wallet))
+                # Set flag so this only runs once
+                if wallet_reset_flag:
+                    wallet_reset_flag.param_value = 1.0
+                    wallet_reset_flag.updated_at = datetime.utcnow()
+                else:
+                    session.add(AgentParam(param_name="wallet_reset_v2_done", param_value=1.0))
+                await session.commit()
+                logger.warning(
+                    "WALLET RESET V2: cleared %d wallets + all trades + clusters. "
+                    "New pipeline will rebuild from top-coin buyer extraction.",
+                    w_count,
+                )
+                added += 1
+    except Exception as exc:
+        logger.warning("Wallet reset v2 failed: %s", exc)
+
     return added
 
 
