@@ -101,9 +101,68 @@ async def _handle_transaction(tx_data: dict) -> None:
         logger.info("LaserStream: detected new token %s — injected into scanner", mint[:12])
 
 
+# ── Whale mirroring ──────────────────────────────────────────────────────────
+# When a tracked whale wallet buys a token, mirror it instantly.
+# Checks the top tier 1/2 wallets from DB and watches their buys.
+
+_whale_wallets: set[str] = set()
+_whale_refresh_interval = 300  # refresh whale list every 5 min
+
+async def _refresh_whale_list() -> None:
+    """Load top tier 1/2 wallets from DB for real-time mirroring."""
+    global _whale_wallets
+    try:
+        from database.models import get_tier_wallets
+        wallets = await get_tier_wallets(max_tier=2)
+        if wallets:
+            _whale_wallets = {w.address for w in wallets[:30]}
+            logger.info("LaserStream: watching %d whale wallets for mirroring", len(_whale_wallets))
+    except Exception as exc:
+        logger.warning("LaserStream: whale list refresh failed: %s", exc)
+
+
+async def _handle_whale_buy(tx_data: dict) -> None:
+    """Check if a transaction is a buy by a tracked whale wallet."""
+    from bot.scanner import mint_suffix_ok
+
+    fee_payer = tx_data.get("feePayer") or ""
+    if fee_payer not in _whale_wallets:
+        return
+
+    # This whale is buying — find what token
+    token_transfers = tx_data.get("tokenTransfers") or []
+    for transfer in token_transfers:
+        to_addr = transfer.get("toUserAccount")
+        mint = transfer.get("mint")
+
+        if to_addr == fee_payer and mint and mint_suffix_ok(mint):
+            # Whale is receiving tokens = buying
+            existing_mints = {c.get("mint") for c in state.pending_candidates}
+            if mint in existing_mints:
+                continue
+
+            state.pending_candidates.append({
+                "mint": mint,
+                "name": None,
+                "symbol": None,
+                "mcap": None,
+                "liquidity": None,
+                "source": "whale_mirror",
+                "insider_count": 1,
+                "insider_tier_1_count": 1,
+                "insider_buy_age_s": 0,
+            })
+            state.data_points_today += 1
+            logger.info(
+                "WHALE MIRROR: %s..%s bought %s — injected with insider boost",
+                fee_payer[:4], fee_payer[-4:], mint[:12],
+            )
+
+
 async def laserstream_loop() -> None:
     """
     Connect to Helius Enhanced WebSocket and stream transactions.
+    Handles both new token detection AND whale wallet mirroring.
     Auto-reconnects on disconnect.
     """
     ws_url = _get_ws_url()
@@ -112,6 +171,7 @@ async def laserstream_loop() -> None:
         return
 
     await asyncio.sleep(STARTUP_DELAY)
+    await _refresh_whale_list()
     logger.info("LaserStream: connecting to %s...", ws_url[:50])
 
     while True:
@@ -120,9 +180,8 @@ async def laserstream_loop() -> None:
                 async with session.ws_connect(ws_url, heartbeat=30) as ws:
                     logger.info("LaserStream: connected — subscribing to token events")
 
-                    # Subscribe to transaction notifications
-                    # Helius Enhanced WebSocket supports transactionSubscribe
-                    subscribe_msg = {
+                    # Subscribe to pool creation events (new tokens)
+                    pool_sub = {
                         "jsonrpc": "2.0",
                         "id": 1,
                         "method": "transactionSubscribe",
@@ -139,8 +198,33 @@ async def laserstream_loop() -> None:
                             },
                         ],
                     }
-                    await ws.send_json(subscribe_msg)
+                    await ws.send_json(pool_sub)
                     logger.info("LaserStream: subscribed to pool creation events")
+
+                    # Subscribe to whale wallet transactions (mirroring)
+                    if _whale_wallets:
+                        whale_sub = {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "transactionSubscribe",
+                            "params": [
+                                {
+                                    "failed": False,
+                                    "accountInclude": list(_whale_wallets)[:30],
+                                },
+                                {
+                                    "commitment": "confirmed",
+                                    "encoding": "jsonParsed",
+                                    "transactionDetails": "full",
+                                    "maxSupportedTransactionVersion": 0,
+                                },
+                            ],
+                        }
+                        await ws.send_json(whale_sub)
+                        logger.info("LaserStream: subscribed to %d whale wallets", len(_whale_wallets))
+
+                    # Background task: refresh whale list periodically
+                    last_whale_refresh = asyncio.get_event_loop().time()
 
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
@@ -159,6 +243,13 @@ async def laserstream_loop() -> None:
 
                                 if tx:
                                     await _handle_transaction(tx)
+                                    await _handle_whale_buy(tx)
+
+                                # Periodic whale list refresh
+                                now = asyncio.get_event_loop().time()
+                                if now - last_whale_refresh > _whale_refresh_interval:
+                                    await _refresh_whale_list()
+                                    last_whale_refresh = now
 
                             except json.JSONDecodeError:
                                 pass
