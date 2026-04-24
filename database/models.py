@@ -2830,7 +2830,7 @@ AGENT_PARAM_DEFAULTS = {
     # Scanner — all DB-driven so Agent 6 can tune the upstream gate.
     # Source functions load these once per tick instead of using hardcoded
     # constants. /setparam also works for manual overrides.
-    "scanner_min_mc": 10000, "scanner_max_mc": 5000000, "scanner_min_liquidity": 5000,
+    "scanner_min_mc": 5000, "scanner_max_mc": 15000000, "scanner_min_liquidity": 3000,
     "scanner_min_ai_score": 40, "scanner_rugcheck_max_risk": 500,
     "scanner_interval_seconds": 15, "scanner_max_candidates": 10,
     "scanner_max_age_hours": 4.0,
@@ -3462,8 +3462,12 @@ async def init_agent_params() -> int:
     # Tighten paper trading: raise confidence threshold, reduce max open trades.
     # 56 trades/day at 19% WR = churning. Need to be much more selective.
     _tighten = {
-        "conf_paper_threshold": 55.0,    # balanced — with phase-based SL, can be looser
+        "conf_paper_threshold": 55.0,
         "max_open_paper_trades": 3.0,
+        # Widen scanner range to catch both fresh launches AND established runners
+        "scanner_min_mc": 5000.0,        # was 10K — catch earlier
+        "scanner_max_mc": 15000000.0,    # was 5M — catch mid-cap runners too
+        "scanner_min_liquidity": 3000.0, # was 5K — catch fresher tokens
         # Rebalanced low-MC weights so tokens can pass without insider data
         "low_mc_insider": 0.20,
         "low_mc_fingerprint": 0.30,
