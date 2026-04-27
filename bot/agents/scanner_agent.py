@@ -1300,6 +1300,7 @@ async def run_once() -> tuple[int, int]:
                     pattern_type=scored.get("profile_tag") or scored.get("source"),
                     tp_x=scored.get("trade_tp_x", 3.0),
                     sl_pct=scored.get("trade_sl_pct", 30.0),
+                    trade_reasoning=scored.get("trade_reasoning"),
                 )
                 # Recompute balance from DB (trade deducted via open_paper_trade)
                 state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)

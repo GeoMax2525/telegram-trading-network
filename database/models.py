@@ -2369,6 +2369,7 @@ async def open_paper_trade(
     entry_mc: float | None, entry_price: float | None,
     paper_sol: float, confidence: float,
     pattern_type: str | None, tp_x: float, sl_pct: float,
+    trade_reasoning: str | None = None,
 ) -> "PaperTrade":
     async with AsyncSessionLocal() as session:
         pt = PaperTrade(
@@ -2378,6 +2379,7 @@ async def open_paper_trade(
             pattern_type=pattern_type, take_profit_x=tp_x,
             stop_loss_pct=sl_pct, status="open",
             peak_mc=entry_mc, peak_multiple=1.0,
+            trade_reasoning=trade_reasoning,
         )
         session.add(pt)
         await session.commit()
