@@ -3440,14 +3440,15 @@ async def init_agent_params() -> int:
                 new_trail_on = int(defaults["trail_on"])
                 new_trail_trig = float(defaults["trail_trigger"])
                 # Migrate rows with tight SL or low TP — raise to safe minimums
+                # Reset ALL rows to new tight-SL strategy
                 needs_update = (
-                    row.optimal_tp_x < 4.0
+                    row.optimal_sl_pct > 25.0  # tighten anything above 25%
+                    or row.optimal_tp_x < 4.0
                     or not row.trail_sl_enabled
-                    or row.optimal_sl_pct < 35.0  # raise all SLs below 35%
                 )
                 if needs_update:
                     row.optimal_tp_x = max(row.optimal_tp_x, new_tp)
-                    row.optimal_sl_pct = max(row.optimal_sl_pct, 35.0)  # minimum 35% SL
+                    row.optimal_sl_pct = min(row.optimal_sl_pct, 20.0)  # cap at 20% SL
                     row.trail_sl_enabled = new_trail_on
                     row.trail_sl_trigger_pct = new_trail_trig
                     row.updated_at = datetime.utcnow()

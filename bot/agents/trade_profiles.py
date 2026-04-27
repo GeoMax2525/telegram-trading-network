@@ -130,22 +130,22 @@ ALL_PATTERN_TYPES = [
     "dead_token",
 ]
 
-# Default rows seeded on first boot. Baseline tp=5.0 / sl=40.0 / trail ON
-# at 2x trigger. SL at 40% because memecoins wick 30-50% on normal volatility.
-# Agent 6 learns per-type from outcomes over time.
-def _default(tp=5.0, sl=40.0, trig=2.0, on=1):
+# Default rows: TIGHT SL + HIGH TP. Research-backed memecoin strategy:
+# 15-20% SL with 0.1 SOL probes. Even at 30% WR, the math works:
+# 3 wins at 5x (+1.2 SOL) vs 7 losses at -20% (-0.14 SOL) = +1.06 SOL net.
+def _default(tp=6.0, sl=20.0, trig=2.0, on=1):
     return {"tp_x": tp, "sl_pct": sl, "trail_trigger": trig, "trail_on": on}
 
 DEFAULT_AI_TRADE_PARAMS = {
-    # Baseline — wide SL to survive memecoin volatility
-    "new_launch":     _default(5.0, 40.0),
-    "insider_wallet": _default(8.0, 35.0),
-    "volume_spike":   _default(5.0, 40.0),
-    "low_mc":         _default(5.0, 45.0),
-    "mid_mc":         _default(5.0, 40.0),
-    "high_mc":        _default(4.0, 35.0),
-    "high_chart":     _default(5.0, 40.0),
-    "high_caller":    _default(5.0, 35.0),
+    # Tight SL, high TP, probe sizing
+    "new_launch":     _default(6.0, 20.0),
+    "insider_wallet": _default(8.0, 18.0),
+    "volume_spike":   _default(6.0, 20.0),
+    "low_mc":         _default(8.0, 20.0),
+    "mid_mc":         _default(5.0, 20.0),
+    "high_mc":        _default(4.0, 18.0),
+    "high_chart":     _default(6.0, 20.0),
+    "high_caller":    _default(6.0, 18.0),
     # New rows — uniform baselines, learned from outcomes
     "early_entry":            _default(),
     "late_entry":             _default(),

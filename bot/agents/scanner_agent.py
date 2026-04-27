@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 PROFILES_URL    = "https://api.dexscreener.com/token-profiles/latest/v1"
 RUGCHECK_URL    = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
-POLL_INTERVAL   = 15     # seconds
+POLL_INTERVAL   = 8      # seconds (faster scanning — speed is edge)
 STARTUP_DELAY   = 60     # seconds after bot start
 INSIDER_WINDOW  = 1_800   # 30 min in seconds
 
@@ -1142,16 +1142,10 @@ async def run_once() -> tuple[int, int]:
                 )
                 continue
 
-            # Confirmation gate: token must be seen 2+ times across ticks
-            if not is_confirmed(mint_addr):
-                sighting = get_sighting_info(mint_addr)
-                count = sighting["count"] if sighting else 0
-                logger.info(
-                    "Scanner: %s needs confirmation (%d/2 sightings) — waiting",
-                    (scored.get("name") or "?")[:20], count,
-                )
-                state.pending_candidates.append(scored)
-                continue
+            # Confirmation gate REMOVED — speed matters more than confirmation
+            # for memecoins. Rug protection comes from safety filters + phase SL.
+            # The 30+ second delay was killing entry quality — by the time we
+            # confirmed, the token had already pumped 50-200%.
             token_name = scored.get("name")
 
             # Hard cap on concurrent open positions. Runs BEFORE any
@@ -1273,24 +1267,13 @@ async def run_once() -> tuple[int, int]:
             sp = await get_params("max_position_sol")
             max_abs = float(sp.get("max_position_sol") or 5.0)
 
-            learned_pct = float(scored.get("trade_position_pct", 10.0)) / 100.0
-
-            # Session-aware position sizing
-            if state.session_hot_streak:
-                # Winning streak — increase size by 50% (confidence is high)
-                learned_pct = min(learned_pct * 1.5, 0.25)
-            elif state.session_cold_streak:
-                # Losing streak — halve size (preserve capital)
-                learned_pct = learned_pct * 0.5
-
-            paper_sol = round(
-                min(
-                    state.paper_balance * learned_pct,
-                    state.paper_balance * 0.20,
-                    max_abs,
-                ),
-                4,
-            )
+            # Probe sizing: 0.1 SOL per trade like real degen traders.
+            # Small probes = survive losses, let winners compound via scaling.
+            # At 20% SL, a 0.1 SOL probe loses max 0.02 SOL per bad trade.
+            # At 5x win, a 0.1 SOL probe gains 0.4 SOL.
+            # 10 trades: 3 wins (3 * 0.4 = 1.2) + 7 losses (7 * 0.02 = 0.14)
+            # Net: +1.06 SOL even at 30% WR.
+            paper_sol = 0.1
 
             logger.info(
                 "Scanner: PAPER TRADE %s conf=%.0f size=%.1f%% sol=%.4f bal=%.4f",

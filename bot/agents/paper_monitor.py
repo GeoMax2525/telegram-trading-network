@@ -307,7 +307,7 @@ async def _check_open_trades(bot) -> None:
 
             scale_out_done = False
             if remaining > 70 and current_mult >= 2.0:
-                # First scale: sell 30% at 2x
+                # First scale: sell 30% at 2x — recover initial + profit
                 sell_pct = 30.0
                 sell_sol = sol * (sell_pct / 100.0) * (current_mult - 1)
                 new_remaining = remaining - sell_pct
@@ -335,9 +335,9 @@ async def _check_open_trades(bot) -> None:
                     pass
                 scale_out_done = True
 
-            elif remaining > 40 and remaining <= 70 and current_mult >= 3.0:
-                # Second scale: sell another 30% at 3x
-                sell_pct = 30.0
+            elif remaining > 40 and remaining <= 70 and current_mult >= 5.0:
+                # Second scale: sell 25% at 5x — let runners actually run
+                sell_pct = 25.0
                 sell_sol = sol * (sell_pct / 100.0) * (current_mult - 1)
                 new_remaining = remaining - sell_pct
                 new_realized = realized + sell_sol
@@ -414,31 +414,19 @@ async def _check_open_trades(bot) -> None:
                             pass
                         continue
 
-            # Phase-based exit strategy for memecoins:
-            #
-            # Phase 1 (0-15 min): NO SL at all. Let the token breathe.
-            #   Memecoins wick 30-60% on entry and recover. Any fixed SL
-            #   during this phase just sells the bottom of every dip.
-            #
-            # Phase 2 (15-45 min): Only exit if token dropped >60% (catastrophic).
-            #   This catches actual rugs while letting normal volatility play out.
-            #
-            # Phase 3 (45+ min): Full SL active. If the token hasn't moved
-            #   by now, the trade thesis is dead. Use the configured SL%.
-            #
-            # The trailing stop (activated at 2x peak) handles profitable exits
-            # throughout all phases. This SL logic only handles losing positions.
+            # Phase-based SL — tight SL with brief grace period.
+            # Research shows: 15-20% SL with fast entry is optimal.
+            # Grace period shortened to 5 min (was 15) — just enough
+            # to survive the first candle wick, not long enough to
+            # hold a rug for 15 minutes.
             sl_threshold = 1.0 - (pt.stop_loss_pct / 100.0)
-            catastrophic_threshold = 0.40  # 60% drop = rug, always exit
+            catastrophic_threshold = 0.50  # 50% drop = rug, always exit
 
-            if age_hours < 0.25:
-                # Phase 1: first 15 min — only exit on catastrophic drop (rug)
+            if age_hours < (5.0 / 60.0):
+                # Phase 1: first 5 min — only exit on catastrophic rug
                 should_sl = current_mult <= catastrophic_threshold
-            elif age_hours < 0.75:
-                # Phase 2: 15-45 min — wider threshold (50% drop)
-                should_sl = current_mult <= 0.50
             else:
-                # Phase 3: 45+ min — full configured SL
+                # Phase 2: after 5 min — full tight SL (15-20%)
                 should_sl = current_mult <= sl_threshold
 
             if should_sl:

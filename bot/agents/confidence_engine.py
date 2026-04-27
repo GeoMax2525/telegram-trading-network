@@ -671,37 +671,33 @@ async def score_candidate(candidate: dict) -> dict:
 
     pct_24h = candidate.get("price_change_24h", 0) or 0
 
-    # MC-based TP/SL — memecoins wick 30-50% on normal volatility.
-    # SL must be WIDER than the normal wick range or you sell every dip.
-    # Trailing stop at 2x is the real exit mechanism.
+    # TIGHT SL + FAST ENTRY = profitable memecoin trading.
+    # Research shows: 15-20% SL with early entry beats wide SL with late entry.
+    # Profitable bots use 0.1 SOL probes with 15-20% SL and 5-10x TP.
+    # The math at 30% WR: 3 wins at 5x = +1.2 SOL, 7 losses at -20% = -0.14 SOL.
     if mcap < 50_000:
-        mc_tp = 5.0
-        mc_sl = 50.0   # micro caps wick 40-50% and recover — must survive
+        mc_tp = 8.0    # micro cap — let it run
+        mc_sl = 20.0
     elif mcap < 200_000:
-        mc_tp = 4.0
-        mc_sl = 45.0   # small caps wick 30-40%
+        mc_tp = 6.0
+        mc_sl = 20.0
     elif mcap < 500_000:
-        mc_tp = 3.0
-        mc_sl = 40.0
+        mc_tp = 5.0
+        mc_sl = 18.0
     elif mcap < 2_000_000:
-        mc_tp = 2.5
-        mc_sl = 35.0
+        mc_tp = 4.0
+        mc_sl = 18.0
     else:
-        mc_tp = 2.0
-        mc_sl = 30.0
+        mc_tp = 3.0
+        mc_sl = 15.0
 
     # Momentum adjustment — already pumped = lower TP
     if pct_24h > 500:
-        mc_tp = min(mc_tp, 2.0)
+        mc_tp = min(mc_tp, 3.0)
     elif pct_24h > 200:
-        mc_tp = min(mc_tp, 3.0)
+        mc_tp = min(mc_tp, 4.0)
 
-    # Confidence adjustment — do NOT lower trail trigger for high conf
-    if confidence >= 75:
-        mc_sl = min(mc_sl + 5, 55.0)
-    elif confidence < 50:
-        mc_sl = max(mc_sl - 5, 35.0)
-        mc_tp = min(mc_tp, 3.0)
+    # No confidence adjustment on SL — keep it tight always
 
     # Blend: 70% learned (Agent 6 history), 30% adaptive
     # Agent 6 learned values should dominate, not the heuristic

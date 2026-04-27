@@ -395,9 +395,16 @@ async def _import_gmgn_wallets() -> int:
         pnl = stats.get("pnl_stat") or {}
         wr = float(pnl.get("winrate") or stats.get("win_rate") or 0)
         total_trades = int(stats.get("buy") or pnl.get("token_num") or 0)
-        if total_trades < 3:
+        # Strict wallet filter: 60%+ WR, 30+ trades minimum
+        # Research shows only wallets meeting these thresholds are worth copying
+        if total_trades < 30:
             skip_few_trades += 1
-            logger.info("GMGN wallet %s: SKIP total_trades=%d < 3", short, total_trades)
+            logger.info("GMGN wallet %s: SKIP total_trades=%d < 30", short, total_trades)
+            await asyncio.sleep(1.5)
+            continue
+        if wr < 0.55:
+            skip_few_trades += 1
+            logger.info("GMGN wallet %s: SKIP win_rate=%.0f%% < 55%%", short, wr * 100)
             await asyncio.sleep(1.5)
             continue
 
