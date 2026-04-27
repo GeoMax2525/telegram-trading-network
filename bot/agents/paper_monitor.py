@@ -299,10 +299,40 @@ async def _check_open_trades(bot) -> None:
                         pass
                     continue
 
-            # ── Scale out: sell partial at milestones instead of all-or-nothing ──
-            # Real meme traders take profit on the way up:
-            #   30% at 2x, 30% at 3x, trail the remaining 40%
-            # This locks in gains while letting runners run.
+            # ── Scale IN: add size when token proves itself ────────────────
+            # Probe with 0.1 SOL, then scale up if the token pumps.
+            # This is how real traders work — don't risk big until it proves.
+            age_min = age_hours * 60
+            if (current_mult >= 1.5 and age_min >= 2 and age_min <= 10
+                    and sol < 0.25 and remaining >= 100):
+                # Token pumped 50%+ in first 2-10 min — add more size
+                add_sol = 0.2
+                if state.paper_balance >= add_sol + 0.1:
+                    try:
+                        async with AsyncSessionLocal() as sess:
+                            trade = await sess.get(PaperTrade, pt.id)
+                            if trade:
+                                trade.paper_sol_spent = round(trade.paper_sol_spent + add_sol, 4)
+                                await sess.commit()
+                                sol = trade.paper_sol_spent  # update local var
+                    except Exception:
+                        pass
+                    state.paper_balance -= add_sol
+                    logger.info(
+                        "Paper SCALE IN %s: added %.2f SOL at %.1fx | total position: %.2f SOL",
+                        name, add_sol, current_mult, sol,
+                    )
+                    try:
+                        await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                            f"💪 PAPER TRADE — SCALE IN",
+                            f"🪙 {name} | {current_mult:.1f}x confirmed | +{add_sol} SOL added",
+                            f"Total position: {sol:.2f} SOL",
+                        ]), message_thread_id=SCAN_TOPIC_ID)
+                    except Exception:
+                        pass
+
+            # ── Scale OUT: sell partial at milestones ────────────────────
+            # 30% at 2x, 25% at 5x, trail the remaining 45%
             remaining = float(getattr(pt, "remaining_pct", 100) or 100)
             realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
 
