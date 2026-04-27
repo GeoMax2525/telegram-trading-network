@@ -1130,27 +1130,19 @@ async def run_once() -> tuple[int, int]:
             mint_addr = scored.get("mint", "")
 
             # Session cooldown — stop trading after 5 consecutive losses
+            # But cap at 15 minutes max, and log clearly
             from datetime import datetime as _dt
             if state.session_cooldown_until and _dt.utcnow() < state.session_cooldown_until:
+                remaining = (state.session_cooldown_until - _dt.utcnow()).total_seconds()
+                if remaining > 900:  # cap at 15 min
+                    state.session_cooldown_until = _dt.utcnow() + timedelta(minutes=15)
                 logger.info(
-                    "Scanner: SKIP %s — session cooldown (5 consecutive losses, resumes %s)",
-                    scored.get("name", "?")[:20],
-                    state.session_cooldown_until.strftime("%H:%M UTC"),
+                    "Scanner: SKIP %s — session cooldown (%.0f min remaining)",
+                    scored.get("name", "?")[:20], remaining / 60,
                 )
                 continue
 
-            # Cold streak caution — raise threshold during losing streaks
-            if state.session_cold_streak:
-                cold_conf = scored.get("confidence_score", 0)
-                if cold_conf < 70:
-                    logger.info(
-                        "Scanner: SKIP %s — cold streak (3+ losses), need conf >= 70 (got %.0f)",
-                        scored.get("name", "?")[:20], cold_conf,
-                    )
-                    continue
-
             # Confirmation gate: token must be seen 2+ times across ticks
-            # before opening a trade. Prevents instant pump-and-dump entries.
             if not is_confirmed(mint_addr):
                 sighting = get_sighting_info(mint_addr)
                 count = sighting["count"] if sighting else 0
