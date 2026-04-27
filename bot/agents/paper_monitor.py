@@ -251,9 +251,10 @@ async def _check_open_trades(bot) -> None:
             # ── Profit protection ────────────────────────────────────────
             # Break-even SL: once peak crossed the breakeven trigger,
             # never let the trade close below 1.0x from here on.
-            be_trigger = float(cfg.get("breakeven_trigger", 1.5) or 1.5)
+            be_trigger = float(cfg.get("breakeven_trigger", 2.0) or 2.0)
             if peak_mult >= be_trigger and current_mult <= 1.0:
-                pnl = round(sol * (current_mult - 1), 4)
+                remaining_sol = sol * (remaining / 100.0)
+                pnl = round(realized + remaining_sol * (current_mult - 1), 4)
                 await _close_and_track(pt.id, "breakeven_stop", pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_balance = bal
@@ -394,7 +395,8 @@ async def _check_open_trades(bot) -> None:
                 if peak_mult >= trigger_mult:
                     trail_stop_mult = peak_mult * (1.0 - float(resolved["trail_pct"]))
                     if current_mult <= trail_stop_mult:
-                        pnl = round(sol * (current_mult - 1), 4)
+                        remaining_sol = sol * (remaining / 100.0)
+                        pnl = round(realized + remaining_sol * (current_mult - 1), 4)
                         await _close_and_track(pt.id, "trail_hit", pnl, peak_mc, peak_mult)
                         bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                         state.paper_balance = bal
@@ -430,7 +432,10 @@ async def _check_open_trades(bot) -> None:
                 should_sl = current_mult <= sl_threshold
 
             if should_sl:
-                pnl = round(-sol * (1.0 - current_mult), 4)
+                # PnL accounts for remaining position + already realized profit
+                remaining_sol = sol * (remaining / 100.0)
+                loss_on_remaining = round(-remaining_sol * (1.0 - current_mult), 4)
+                pnl = round(realized + loss_on_remaining, 4)
                 await _close_and_track(pt.id, "sl_hit", pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_balance = bal
