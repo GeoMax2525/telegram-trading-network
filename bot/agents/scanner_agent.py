@@ -1072,17 +1072,67 @@ async def run_once() -> tuple[int, int]:
 
     candidates_found = len(deduped)
 
-    # Evaluate (rug filter + AI score + pattern match) with concurrency cap
-    semaphore = asyncio.Semaphore(15)  # Business plan: 200 req/s
+    # Split TG signals from regular candidates — TG signals skip safety gates
+    tg_candidates = [c for c in deduped if c.get("source") == "tg_signal"]
+    regular_candidates = [c for c in deduped if c.get("source") != "tg_signal"]
+
+    # Evaluate regular candidates (rug filter + AI score + pattern match)
+    semaphore = asyncio.Semaphore(15)
 
     async def _bounded_eval(raw):
         async with semaphore:
             return await _evaluate_candidate(raw, pattern_2x, all_patterns=all_patterns)
 
     evaluated = await asyncio.gather(
-        *[_bounded_eval(c) for c in deduped[:20]],
+        *[_bounded_eval(c) for c in regular_candidates[:20]],
         return_exceptions=True,
     )
+
+    # TG signals bypass safety gates — go straight to scoring
+    # The 4am channel has already filtered these. Trust the signal.
+    for tg in tg_candidates:
+        mint = tg.get("mint", "")
+        pair = await fetch_token_data(mint, allow_any_dex=True)
+        if pair is None:
+            continue
+        metrics = parse_token_metrics(pair)
+        scan_data = await scan_token(mint, allow_any_dex=True)
+        ai_score = scan_data.get("total", 50) if scan_data else 50
+        mcap = metrics.get("market_cap", 0) or 0
+        liquidity = metrics.get("liquidity_usd", 0) or 0
+
+        tg_result = {
+            "mint": mint,
+            "name": metrics.get("name", tg.get("name") or "?"),
+            "symbol": metrics.get("symbol", "?"),
+            "source": "tg_signal",
+            "ai_score": ai_score,
+            "match_score": 60,  # bypass match threshold
+            "mcap": mcap,
+            "liquidity": liquidity,
+            "rugcheck": None,
+            "rugcheck_normalised": None,
+            "found_at": datetime.utcnow().isoformat(),
+            "insider_count": 0,
+            "tg_channel": tg.get("tg_channel"),
+            "dex_id": metrics.get("dex_id", ""),
+            "age_minutes": None,
+            "volume_m5": None,
+            "volume_h1": None,
+            "insider_tier_1_count": 0,
+            "insider_tier_2_count": 0,
+            "cluster_buy_count": 0,
+            "cluster_id_hit": None,
+            "gmgn_trending": False,
+            "gmgn_smart_money": False,
+            "lp_burned": None,
+            "dev_wallet_pct": tg.get("tg_dev_pct"),
+            "holder_count": tg.get("tg_holders"),
+            "top_10_concentration": tg.get("tg_top10_pct"),
+            "insider_buy_age_s": None,
+        }
+        evaluated = list(evaluated) + [tg_result]
+        logger.info("Scanner: TG signal %s bypassed gates — sent to Agent 5", metrics.get("name", "?")[:20])
 
     # Log evaluation results summary
     eval_none = sum(1 for r in evaluated if r is None)
