@@ -37,9 +37,9 @@ RECONNECT_DELAY = 5
 
 # Helius Enhanced WebSocket URL
 def _get_ws_url() -> str:
-    """Build the WebSocket URL from config."""
-    if HELIUS_LASERSTREAM_URL:
-        return HELIUS_LASERSTREAM_URL
+    """Build the WebSocket URL from config.
+    Uses atlas-mainnet (Enhanced WebSocket), NOT LaserStream (gRPC).
+    LaserStream requires gRPC protocol which aiohttp can't handle."""
     if HELIUS_API_KEY and HELIUS_API_KEY != "demo":
         return f"wss://atlas-mainnet.helius-rpc.com?api-key={HELIUS_API_KEY}"
     return ""
