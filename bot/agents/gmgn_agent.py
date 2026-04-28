@@ -203,7 +203,7 @@ async def gmgn_token_holders(mint: str) -> list:
 
 async def gmgn_market_signals(limit: int = 50) -> list:
     """Get market signals: price spikes, smart money buys, large buys."""
-    data = await _run_cli("market", "signal", "--chain", "sol", "--limit", str(limit))
+    data = await _run_cli("market", "signal", "--chain", "sol")
     if isinstance(data, dict):
         signals = data.get("data") or data.get("signals") or []
         if isinstance(signals, dict):
@@ -718,6 +718,7 @@ async def gmgn_agent_loop() -> None:
                             address=addr, score=70.0, tier=2,
                             win_rate=0.55, avg_multiple=2.5,
                             wins=1, losses=0, total_trades=1,
+                            avg_entry_mcap=None,
                             source="gmgn", wallet_type="early_insider",
                         )
                         kol_wallets += 1
