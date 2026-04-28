@@ -1088,51 +1088,55 @@ async def run_once() -> tuple[int, int]:
         return_exceptions=True,
     )
 
-    # TG signals bypass safety gates — go straight to scoring
-    # The 4am channel has already filtered these. Trust the signal.
+    # TG signals AUTO-BUY — skip ALL scoring, buy immediately with probe size.
+    # The 4am channel has already filtered these. Trust the signal completely.
     for tg in tg_candidates:
         mint = tg.get("mint", "")
+        if not mint:
+            continue
+
+        # Check if already have this position open
+        if await has_open_paper_trade(mint):
+            continue
+
+        # Get fresh MC for entry price
         pair = await fetch_token_data(mint, allow_any_dex=True)
         if pair is None:
+            logger.info("Scanner: TG signal %s — no pair data, skipping", mint[:12])
             continue
         metrics = parse_token_metrics(pair)
-        scan_data = await scan_token(mint, allow_any_dex=True)
-        ai_score = scan_data.get("total", 50) if scan_data else 50
-        mcap = metrics.get("market_cap", 0) or 0
-        liquidity = metrics.get("liquidity_usd", 0) or 0
+        entry_mc = metrics.get("market_cap", 0) or 0
+        token_name = metrics.get("name", "?")
 
-        tg_result = {
-            "mint": mint,
-            "name": metrics.get("name", tg.get("name") or "?"),
-            "symbol": metrics.get("symbol", "?"),
-            "source": "tg_signal",
-            "ai_score": ai_score,
-            "match_score": 60,  # bypass match threshold
-            "mcap": mcap,
-            "liquidity": liquidity,
-            "rugcheck": None,
-            "rugcheck_normalised": None,
-            "found_at": datetime.utcnow().isoformat(),
-            "insider_count": 0,
-            "tg_channel": tg.get("tg_channel"),
-            "dex_id": metrics.get("dex_id", ""),
-            "age_minutes": None,
-            "volume_m5": None,
-            "volume_h1": None,
-            "insider_tier_1_count": 0,
-            "insider_tier_2_count": 0,
-            "cluster_buy_count": 0,
-            "cluster_id_hit": None,
-            "gmgn_trending": False,
-            "gmgn_smart_money": False,
-            "lp_burned": None,
-            "dev_wallet_pct": tg.get("tg_dev_pct"),
-            "holder_count": tg.get("tg_holders"),
-            "top_10_concentration": tg.get("tg_top10_pct"),
-            "insider_buy_age_s": None,
-        }
-        evaluated = list(evaluated) + [tg_result]
-        logger.info("Scanner: TG signal %s bypassed gates — sent to Agent 5", metrics.get("name", "?")[:20])
+        if not entry_mc or entry_mc <= 0:
+            continue
+
+        # Auto-buy with probe size — no confidence scoring needed
+        try:
+            state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+            if state.paper_balance < 0.15:
+                continue
+
+            pt = await open_paper_trade(
+                token_address=mint,
+                token_name=token_name,
+                entry_mc=entry_mc,
+                entry_price=entry_mc,
+                paper_sol=0.1,
+                confidence=80.0,  # high confidence — trusted signal
+                pattern_type="tg_signal",
+                tp_x=8.0,   # let runners run
+                sl_pct=20.0,
+                trade_reasoning=f"AUTO-BUY from 4am channel [{tg.get('tg_channel', '?')}]",
+            )
+            state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+            state.paper_trades_today += 1
+            logger.info(
+                "Scanner: TG AUTO-BUY %s at MC=%s | 0.1 SOL | bal=%.4f",
+                token_name[:20], entry_mc, state.paper_balance,
+            )
+        except Exception as exc:
+            logger.error("Scanner: TG auto-buy failed for %s: %s", mint[:12], exc)
 
     # Log evaluation results summary
     eval_none = sum(1 for r in evaluated if r is None)
