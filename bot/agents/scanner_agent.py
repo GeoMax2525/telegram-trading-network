@@ -1326,10 +1326,9 @@ async def run_once() -> tuple[int, int]:
             paper_sol = 0.1
 
             logger.info(
-                "Scanner: PAPER TRADE %s conf=%.0f size=%.1f%% sol=%.4f bal=%.4f",
+                "Scanner: PAPER TRADE %s conf=%.0f sol=%.4f bal=%.4f",
                 scored.get("name", "?")[:20],
                 scored.get("confidence_score", 0),
-                learned_pct * 100,
                 paper_sol,
                 state.paper_balance,
             )
