@@ -1179,19 +1179,9 @@ async def run_once() -> tuple[int, int]:
         if scored.get("paper_trade"):
             mint_addr = scored.get("mint", "")
 
-            # Daily drawdown pause — if down >10% of starting balance today, stop
-            from datetime import datetime as _dt
-            if state.paper_balance < state.PAPER_STARTING_BALANCE * 0.90:
-                today_loss = state.PAPER_STARTING_BALANCE - state.paper_balance
-                logger.info(
-                    "Scanner: SKIP %s — daily drawdown pause (bal=%.2f, down %.1f%%)",
-                    scored.get("name", "?")[:20], state.paper_balance,
-                    (today_loss / state.PAPER_STARTING_BALANCE) * 100,
-                )
-                continue
-
             # Session cooldown — stop trading after 5 consecutive losses
             # But cap at 15 minutes max
+            from datetime import datetime as _dt
             if state.session_cooldown_until and _dt.utcnow() < state.session_cooldown_until:
                 remaining = (state.session_cooldown_until - _dt.utcnow()).total_seconds()
                 if remaining > 900:  # cap at 15 min
