@@ -2845,7 +2845,7 @@ AGENT_PARAM_DEFAULTS = {
     # Pattern engine
     "pattern_min_samples": 3, "pattern_interval_hours": 6,
     # Confidence thresholds
-    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 55,
+    "conf_full_threshold": 80, "conf_half_threshold": 70, "conf_paper_threshold": 45,
     # MC weights — low (rebalanced: insider reduced since data is sparse,
     # fingerprint + rug carry more weight so tokens can actually pass threshold)
     "low_mc_insider": 0.20, "low_mc_fingerprint": 0.30, "low_mc_chart": 0.10,
@@ -3465,7 +3465,7 @@ async def init_agent_params() -> int:
     # Tighten paper trading: raise confidence threshold, reduce max open trades.
     # 56 trades/day at 19% WR = churning. Need to be much more selective.
     _tighten = {
-        "conf_paper_threshold": 55.0,
+        "conf_paper_threshold": 45.0,  # low threshold OK with 0.1 SOL probes (max loss 0.02)
         "max_open_paper_trades": 3.0,
         # Widen scanner range to catch both fresh launches AND established runners
         "scanner_min_mc": 5000.0,        # was 10K — catch earlier
