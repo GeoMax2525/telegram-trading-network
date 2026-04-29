@@ -427,7 +427,7 @@ def _mode_label() -> str:
     return "🔴 OFF"
 
 
-def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
+async def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
     # Row 1: Paper sim toggle
@@ -439,6 +439,18 @@ def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
 
     # Row 2: Live trading — locked
     builder.row(InlineKeyboardButton(text="🟢 Live Trading: LOCKED 🔒", callback_data="hub:live_locked"))
+
+    # Individual close buttons for each open paper trade
+    try:
+        open_trades = await get_open_paper_trades()
+        for idx, pt in enumerate(open_trades[:5], 1):
+            name = (pt.token_name or "?")[:15]
+            builder.row(InlineKeyboardButton(
+                text=f"❌ Close #{idx} — {name}",
+                callback_data=f"hub:close_trade:{pt.id}",
+            ))
+    except Exception:
+        pass
 
     # Row 3: Navigation
     builder.row(
@@ -930,7 +942,7 @@ async def cmd_hub(message: Message):
         text = await _build_hub_text(state.autotrade_enabled)
         await message.reply(
             text, parse_mode="HTML",
-            reply_markup=_hub_keyboard(state.autotrade_enabled),
+            reply_markup=await _hub_keyboard(state.autotrade_enabled),
         )
     except Exception as exc:
         logger.error("Hub render failed: %s", exc)
@@ -947,7 +959,7 @@ async def cb_hub(callback: CallbackQuery):
         try:
             await callback.message.edit_text(
                 text, parse_mode="HTML",
-                reply_markup=_hub_keyboard(state.autotrade_enabled),
+                reply_markup=await _hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
             pass  # unchanged
@@ -967,7 +979,7 @@ async def cb_hub(callback: CallbackQuery):
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(
                 text, parse_mode="HTML",
-                reply_markup=_hub_keyboard(state.autotrade_enabled),
+                reply_markup=await _hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
             pass
@@ -1016,7 +1028,7 @@ async def cb_hub(callback: CallbackQuery):
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(
                 text, parse_mode="HTML",
-                reply_markup=_hub_keyboard(state.autotrade_enabled),
+                reply_markup=await _hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
             pass
@@ -1027,7 +1039,7 @@ async def cb_hub(callback: CallbackQuery):
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(
                 text, parse_mode="HTML",
-                reply_markup=_hub_keyboard(state.autotrade_enabled),
+                reply_markup=await _hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
             pass
@@ -1044,7 +1056,47 @@ async def cb_hub(callback: CallbackQuery):
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(
                 text, parse_mode="HTML",
-                reply_markup=_hub_keyboard(state.autotrade_enabled),
+                reply_markup=await _hub_keyboard(state.autotrade_enabled),
+            )
+        except Exception:
+            pass
+
+    elif action.startswith("close_trade:"):
+        trade_id = int(action.split(":")[1])
+        await callback.answer("Closing trade...")
+        try:
+            from database.models import close_paper_trade, AsyncSessionLocal, PaperTrade
+            # Get trade for PnL calc
+            async with AsyncSessionLocal() as session:
+                pt = await session.get(PaperTrade, trade_id)
+            if pt and pt.status == "open":
+                entry_mc = pt.entry_mc or 0
+                current_mc = 0
+                try:
+                    live_mc = await fetch_current_market_cap(pt.token_address)
+                    if live_mc:
+                        current_mc = live_mc
+                except Exception:
+                    pass
+                mult = current_mc / entry_mc if entry_mc > 0 and current_mc > 0 else 1.0
+                remaining = float(getattr(pt, "remaining_pct", 100) or 100)
+                realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
+                remaining_sol = (pt.paper_sol_spent or 0) * (remaining / 100.0)
+                pnl = round(realized + remaining_sol * (mult - 1), 4)
+                await close_paper_trade(pt.id, "manual_close", pnl, pt.peak_mc, pt.peak_multiple)
+                emoji = "🟢" if pnl >= 0 else "🔴"
+                name = (pt.token_name or "?")[:20]
+                await callback.message.reply(f"{emoji} Closed {name} | {mult:.2f}x | {pnl:+.4f} SOL")
+            else:
+                await callback.message.reply("Trade already closed.")
+        except Exception as exc:
+            await callback.message.reply(f"Close failed: {exc}")
+        # Refresh hub
+        try:
+            text = await _build_hub_text(state.autotrade_enabled)
+            await callback.message.edit_text(
+                text, parse_mode="HTML",
+                reply_markup=await _hub_keyboard(state.autotrade_enabled),
             )
         except Exception:
             pass
