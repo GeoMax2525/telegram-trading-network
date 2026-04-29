@@ -235,7 +235,9 @@ async def _check_open_trades(bot) -> None:
                 time_exit_reason = "stale"
 
             if time_exit_reason:
-                pnl = round(sol * (current_mult - 1), 4)
+                remaining_sol = sol * (remaining / 100.0)
+                realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
+                pnl = round(realized + remaining_sol * (current_mult - 1), 4)
                 await close_paper_trade(pt.id, time_exit_reason, pnl, peak_mc, peak_mult)
                 bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_balance = bal
