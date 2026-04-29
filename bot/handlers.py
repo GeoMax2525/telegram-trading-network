@@ -1313,6 +1313,56 @@ async def cmd_nukepaper(message: Message):
 
 # ── /forcenuke — Immediate paper trade wipe, no confirmation ──────────────
 
+# ── /close <number> — Close individual paper trade ───────────────────────────
+
+@router.message(Command("close"))
+async def cmd_close_paper_trade(message: Message):
+    """Close a specific paper trade by its position number from /hub."""
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Usage: /close <number>\nGet the number from /hub open trades list.")
+        return
+
+    try:
+        idx = int(args[1]) - 1  # hub shows 1-indexed
+    except ValueError:
+        await message.reply("Invalid number. Use /close 1, /close 2, etc.")
+        return
+
+    open_trades = await get_open_paper_trades()
+    if not open_trades or idx < 0 or idx >= len(open_trades):
+        await message.reply(f"No open trade at position {idx + 1}. You have {len(open_trades)} open trades.")
+        return
+
+    pt = open_trades[idx]
+    entry_mc = pt.entry_mc or 0
+    current_mc = 0
+
+    # Get live MC for PnL calculation
+    try:
+        live_mc = await fetch_current_market_cap(pt.token_address)
+        if live_mc:
+            current_mc = live_mc
+    except Exception:
+        pass
+
+    mult = current_mc / entry_mc if entry_mc > 0 and current_mc > 0 else 1.0
+    remaining = float(getattr(pt, "remaining_pct", 100) or 100)
+    realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
+    remaining_sol = (pt.paper_sol_spent or 0) * (remaining / 100.0)
+    pnl = round(realized + remaining_sol * (mult - 1), 4)
+
+    from database.models import close_paper_trade
+    await close_paper_trade(pt.id, "manual_close", pnl, pt.peak_mc, pt.peak_multiple)
+
+    emoji = "🟢" if pnl >= 0 else "🔴"
+    name = (pt.token_name or "?")[:20]
+    await message.reply(
+        f"{emoji} Closed #{idx + 1} — {name}\n"
+        f"PnL: {pnl:+.4f} SOL | {mult:.2f}x"
+    )
+
+
 @router.message(Command("forcenuke"))
 async def cmd_forcenuke(message: Message):
     """
