@@ -2872,7 +2872,7 @@ AGENT_PARAM_DEFAULTS = {
 
     # Paper trading risk caps
     "max_open_paper_trades": 3.0,    # hard max concurrent open positions
-    "close_cooldown_hours":  2.0,    # re-entry cooldown after ANY close
+    "close_cooldown_hours":  24.0,   # re-entry cooldown after ANY close (don't rebuy losers)
 
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
     # before AI scoring. Non-learning: do not reference from learning_loop.
