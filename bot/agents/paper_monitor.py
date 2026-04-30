@@ -178,6 +178,32 @@ async def _check_open_trades(bot) -> None:
 
             current_mc = live.get("market_cap") or 0
 
+            # Dead trade cleanup: if MC collapsed below $5K, the token is
+            # dead (rug pulled, liquidity gone). Close immediately to free
+            # the slot for real trades. Don't let dead tokens block entries.
+            if current_mc < 5000 and current_mc > 0:
+                sol = pt.paper_sol_spent or 0
+                remaining = float(getattr(pt, "remaining_pct", 100) or 100)
+                realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
+                remaining_sol = sol * (remaining / 100.0)
+                mult = current_mc / (pt.entry_mc or 1)
+                pnl = round(realized + remaining_sol * (mult - 1), 4)
+                await _close_and_track(pt.id, "dead_token", pnl, pt.peak_mc, pt.peak_multiple)
+                bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+                state.paper_balance = bal
+                name = (pt.token_name or "?")[:18]
+                logger.info("Paper: DEAD TOKEN %s — MC=$%.0f, closing to free slot | pnl=%+.4f",
+                            name, current_mc, pnl)
+                try:
+                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                        f"💀 PAPER TRADE — DEAD TOKEN",
+                        f"🪙 {name} | MC collapsed to ${current_mc:.0f}",
+                        f"Balance: {bal:.2f} SOL",
+                    ]), message_thread_id=SCAN_TOPIC_ID)
+                except Exception:
+                    pass
+                continue
+
             entry_mc = pt.entry_mc or 0
             if entry_mc <= 0:
                 logger.warning(

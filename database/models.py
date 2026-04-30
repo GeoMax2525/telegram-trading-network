@@ -2871,7 +2871,7 @@ AGENT_PARAM_DEFAULTS = {
     "force_reset_v5_done":  0.0,   # v5: wrapped in defensive try/except
 
     # Paper trading risk caps
-    "max_open_paper_trades": 8.0,    # hard max concurrent open positions
+    "max_open_paper_trades": 5.0,    # hard max concurrent open positions
     "close_cooldown_hours":  24.0,   # re-entry cooldown after ANY close (don't rebuy losers)
 
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
@@ -3466,7 +3466,7 @@ async def init_agent_params() -> int:
     # 56 trades/day at 19% WR = churning. Need to be much more selective.
     _tighten = {
         "conf_paper_threshold": 45.0,  # low threshold OK with 0.1 SOL probes (max loss 0.02)
-        "max_open_paper_trades": 8.0,
+        "max_open_paper_trades": 5.0,
         # Widen scanner range to catch both fresh launches AND established runners
         "scanner_min_mc": 5000.0,        # was 10K — catch earlier
         "scanner_max_mc": 15000000.0,    # was 5M — catch mid-cap runners too
