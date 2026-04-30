@@ -85,8 +85,8 @@ WEEKLY_HOUR      = 9
 # When effective WR tanks, Agent 6 switches into "aggressive" mode: smaller
 # micro batches (tune faster) and a larger weight-shift cap (tune harder).
 # Hysteresis prevents flapping between modes on every cycle.
-AGGRESSIVE_WR_ENTER      = 0.40   # effective_wr below this → go aggressive
-AGGRESSIVE_WR_EXIT       = 0.50   # effective_wr at/above this → back to normal
+AGGRESSIVE_WR_ENTER      = 0.15   # effective_wr below this → go aggressive (probe strategy expects 20% WR)
+AGGRESSIVE_WR_EXIT       = 0.20   # effective_wr at/above this → back to normal
 AGGRESSIVE_MICRO_BATCH   = 5      # vs normal MICRO_BATCH=10 (was 2 — too noisy)
 AGGRESSIVE_MAX_SHIFT     = 0.30   # vs normal MAX_WEIGHT_SHIFT=0.15
 NORMAL_MICRO_SHIFT_RATIO = 0.20   # micro-level shift = this * max_shift
@@ -162,10 +162,10 @@ async def _detect_market_regime() -> str:
     # Check recent trade win rate (last 20)
     recent_wr = await _recent_win_rate(20)
 
-    # Determine regime
-    if sol_change <= -8 or recent_wr < 0.30:
+    # Determine regime — calibrated for probe strategy (20% WR is profitable)
+    if sol_change <= -8 or recent_wr < 0.10:
         regime = "BAD"
-    elif sol_change <= -4 or recent_wr < 0.45:
+    elif sol_change <= -4 or recent_wr < 0.15:
         regime = "NEUTRAL"
     else:
         regime = "GOOD"
