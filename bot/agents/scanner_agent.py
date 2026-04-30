@@ -1099,6 +1099,14 @@ async def run_once() -> tuple[int, int]:
         if await has_open_paper_trade(mint):
             continue
 
+        # Re-entry cooldown — don't rebuy a token we already traded today
+        try:
+            if await has_recent_close(mint, within_hours=24.0):
+                logger.info("Scanner: TG skip %s — already traded in last 24h", mint[:12])
+                continue
+        except Exception:
+            pass
+
         # Get fresh MC for entry price
         pair = await fetch_token_data(mint, allow_any_dex=True)
         if pair is None:
@@ -1228,7 +1236,7 @@ async def run_once() -> tuple[int, int]:
             # sl / tp / trail / dead / manual) within the cooldown window,
             # don't reopen immediately. Prevents the DexScreener trending
             # loop from churning the same handful of tokens repeatedly.
-            close_cooldown = float(risk_cfg.get("close_cooldown_hours") or 2.0)
+            close_cooldown = max(float(risk_cfg.get("close_cooldown_hours") or 24.0), 24.0)
             if close_cooldown > 0 and mint_addr:
                 try:
                     if await has_recent_close(mint_addr, within_hours=close_cooldown):
