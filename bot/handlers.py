@@ -1363,6 +1363,179 @@ async def cmd_nukepaper(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
+# ── /report — What Agent 6 has learned ───────────────────────────────────────
+
+@router.message(Command("report"))
+async def cmd_report(message: Message):
+    """Full learning report: what the system has learned from trading."""
+    from database.models import (
+        AsyncSessionLocal, PaperTrade, AITradeParams,
+        get_all_trade_params,
+    )
+    from sqlalchemy import select, func
+
+    try:
+        async with AsyncSessionLocal() as session:
+            # Total stats
+            total = (await session.execute(
+                select(func.count(PaperTrade.id)).where(PaperTrade.status == "closed")
+            )).scalar() or 0
+
+            wins = (await session.execute(
+                select(func.count(PaperTrade.id)).where(
+                    PaperTrade.status == "closed",
+                    PaperTrade.paper_pnl_sol > 0,
+                )
+            )).scalar() or 0
+
+            total_pnl = (await session.execute(
+                select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0)).where(
+                    PaperTrade.status == "closed",
+                    PaperTrade.paper_pnl_sol.isnot(None),
+                )
+            )).scalar() or 0
+
+            # By source
+            source_rows = (await session.execute(
+                select(
+                    PaperTrade.pattern_type,
+                    func.count(PaperTrade.id).label("cnt"),
+                    func.sum(func.cast(PaperTrade.paper_pnl_sol > 0, Integer)).label("wins"),
+                    func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0).label("pnl"),
+                    func.coalesce(func.avg(PaperTrade.peak_multiple), 1).label("avg_peak"),
+                ).where(
+                    PaperTrade.status == "closed",
+                    PaperTrade.paper_pnl_sol.isnot(None),
+                ).group_by(PaperTrade.pattern_type)
+                .order_by(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0).desc())
+                .limit(15)
+            )).all()
+
+            # Best trades
+            best_trades = (await session.execute(
+                select(PaperTrade.token_name, PaperTrade.peak_multiple, PaperTrade.paper_pnl_sol)
+                .where(PaperTrade.status == "closed", PaperTrade.paper_pnl_sol > 0)
+                .order_by(PaperTrade.paper_pnl_sol.desc())
+                .limit(5)
+            )).all()
+
+            # Worst trades
+            worst_trades = (await session.execute(
+                select(PaperTrade.token_name, PaperTrade.peak_multiple, PaperTrade.paper_pnl_sol)
+                .where(PaperTrade.status == "closed", PaperTrade.paper_pnl_sol < 0)
+                .order_by(PaperTrade.paper_pnl_sol.asc())
+                .limit(5)
+            )).all()
+
+            # Close reasons
+            reason_rows = (await session.execute(
+                select(
+                    PaperTrade.close_reason,
+                    func.count(PaperTrade.id).label("cnt"),
+                    func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0).label("pnl"),
+                ).where(
+                    PaperTrade.status == "closed",
+                    PaperTrade.close_reason.isnot(None),
+                ).group_by(PaperTrade.close_reason)
+                .order_by(func.count(PaperTrade.id).desc())
+            )).all()
+
+            # Avg hold time for wins vs losses
+            avg_win_hold = (await session.execute(
+                select(func.avg(
+                    func.extract('epoch', PaperTrade.closed_at) - func.extract('epoch', PaperTrade.opened_at)
+                )).where(
+                    PaperTrade.status == "closed",
+                    PaperTrade.paper_pnl_sol > 0,
+                    PaperTrade.closed_at.isnot(None),
+                )
+            )).scalar() or 0
+
+            avg_loss_hold = (await session.execute(
+                select(func.avg(
+                    func.extract('epoch', PaperTrade.closed_at) - func.extract('epoch', PaperTrade.opened_at)
+                )).where(
+                    PaperTrade.status == "closed",
+                    PaperTrade.paper_pnl_sol <= 0,
+                    PaperTrade.closed_at.isnot(None),
+                )
+            )).scalar() or 0
+
+        # Get learned TP/SL params
+        trade_params = await get_all_trade_params()
+
+        wr = (wins / total * 100) if total > 0 else 0
+
+        lines = [
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "<b>🧠 AGENT 6 LEARNING REPORT</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            f"<b>OVERVIEW</b>",
+            f"Trades: {total}  |  Wins: {wins}  |  WR: {wr:.0f}%",
+            f"Total PnL: {float(total_pnl):+.2f} SOL",
+            f"Avg win hold: {avg_win_hold / 60:.0f} min  |  Avg loss hold: {avg_loss_hold / 60:.0f} min",
+        ]
+
+        # Source performance
+        if source_rows:
+            lines += ["", "<b>BY SOURCE</b>"]
+            for row in source_rows:
+                tags = (row.pattern_type or "unknown")[:25]
+                cnt = row.cnt
+                w = row.wins or 0
+                pnl = float(row.pnl)
+                avg_pk = float(row.avg_peak)
+                src_wr = (w / cnt * 100) if cnt > 0 else 0
+                emoji = "🟢" if pnl > 0 else "🔴"
+                lines.append(
+                    f"{emoji} {tags}: {cnt} trades | {src_wr:.0f}% WR | {pnl:+.2f} SOL | avg peak {avg_pk:.1f}x"
+                )
+
+        # Close reasons
+        if reason_rows:
+            lines += ["", "<b>CLOSE REASONS</b>"]
+            for row in reason_rows:
+                reason = row.close_reason or "?"
+                pnl = float(row.pnl)
+                emoji = "🟢" if pnl > 0 else "🔴"
+                lines.append(f"{emoji} {reason}: {row.cnt}x | {pnl:+.2f} SOL")
+
+        # Best trades
+        if best_trades:
+            lines += ["", "<b>TOP 5 WINNERS</b>"]
+            for t in best_trades:
+                name = (t.token_name or "?")[:18]
+                lines.append(f"🏆 {name} | {t.peak_multiple:.1f}x peak | +{t.paper_pnl_sol:.2f} SOL")
+
+        # Worst trades
+        if worst_trades:
+            lines += ["", "<b>TOP 5 LOSSES</b>"]
+            for t in worst_trades:
+                name = (t.token_name or "?")[:18]
+                lines.append(f"💀 {name} | {t.peak_multiple:.1f}x peak | {t.paper_pnl_sol:.2f} SOL")
+
+        # Learned TP/SL per pattern
+        if trade_params:
+            trained = [p for p in trade_params if (p.sample_size or 0) >= 3]
+            if trained:
+                lines += ["", "<b>LEARNED PARAMS (3+ samples)</b>"]
+                trained.sort(key=lambda p: p.sample_size or 0, reverse=True)
+                for p in trained[:10]:
+                    lines.append(
+                        f"  {p.pattern_type}: TP={p.optimal_tp_x:.1f}x SL={p.optimal_sl_pct:.0f}% "
+                        f"WR={p.win_rate * 100:.0f}% n={p.sample_size}"
+                    )
+
+        lines += ["", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+
+        await message.reply("\n".join(lines), parse_mode="HTML")
+
+    except Exception as exc:
+        logger.error("Report command failed: %s", exc)
+        await message.reply(f"Report failed: {exc}")
+
+
 # ── /forcenuke — Immediate paper trade wipe, no confirmation ──────────────
 
 # ── /close <number> — Close individual paper trade ───────────────────────────
