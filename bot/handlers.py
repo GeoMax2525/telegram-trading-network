@@ -3411,6 +3411,58 @@ async def cmd_start(message: Message):
             )
 
 
+@router.message(Command("mywallet"))
+async def cmd_mywallet(message: Message):
+    """Show subscriber's wallet info."""
+    from database.models import get_subscriber
+    sub = await get_subscriber(message.from_user.id)
+    if not sub:
+        await message.reply("Not registered. Send /start first.")
+        return
+
+    balance_str = f"{sub.paper_balance:.2f} SOL (paper)"
+    if sub.trade_mode == "live" and sub.wallet_address:
+        try:
+            from bot.wallet import get_sol_balance
+            real_bal = await get_sol_balance(sub.wallet_address)
+            if real_bal is not None:
+                balance_str = f"{real_bal:.4f} SOL (live)"
+        except Exception:
+            pass
+
+    await message.reply(
+        f"Wallet: {sub.wallet_address}\n"
+        f"Balance: {balance_str}\n"
+        f"Mode: {sub.trade_mode}\n"
+        f"Tier: {sub.tier}\n"
+        f"Status: {sub.status}"
+    )
+
+
+@router.message(Command("myperformance"))
+async def cmd_myperformance(message: Message):
+    """Show subscriber's trading performance."""
+    from database.models import get_subscriber
+    sub = await get_subscriber(message.from_user.id)
+    if not sub:
+        await message.reply("Not registered. Send /start first.")
+        return
+
+    pnl = sub.paper_pnl or 0
+    balance = sub.paper_balance or 20.0
+    starting = 20.0
+    pnl_pct = ((balance - starting) / starting * 100) if starting > 0 else 0
+
+    emoji = "🟢" if pnl >= 0 else "🔴"
+    await message.reply(
+        f"Your Performance\n\n"
+        f"Mode: {sub.trade_mode}\n"
+        f"Balance: {balance:.2f} SOL\n"
+        f"{emoji} PnL: {pnl:+.2f} SOL ({pnl_pct:+.1f}%)\n"
+        f"Starting: {starting:.2f} SOL"
+    )
+
+
 @router.message(Command("adduser"))
 async def cmd_adduser_direct(message: Message):
     """Add a subscriber directly."""
