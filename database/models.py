@@ -3653,6 +3653,34 @@ async def init_agent_params() -> int:
     except Exception as exc:
         logger.warning("Paper tightening migration failed: %s", exc)
 
+    # One-shot: force max_open_paper_trades down to 5. The tighten block above
+    # only raises values, so it can't lower a previous override (was set to 8
+    # in commit f5b139a). Selectivity > volume on memecoins.
+    try:
+        async with AsyncSessionLocal() as session:
+            cap_flag = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "max_open_5_v2_done")
+            )).scalar_one_or_none()
+            if cap_flag is None or cap_flag.param_value < 1.0:
+                row = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == "max_open_paper_trades")
+                )).scalar_one_or_none()
+                if row and row.param_value > 5.0:
+                    logger.info(
+                        "Lowering max_open_paper_trades: %.0f -> 5", row.param_value,
+                    )
+                    row.param_value = 5.0
+                    row.updated_at = datetime.utcnow()
+                    added += 1
+                if cap_flag is None:
+                    session.add(AgentParam(param_name="max_open_5_v2_done", param_value=1.0))
+                else:
+                    cap_flag.param_value = 1.0
+                    cap_flag.updated_at = datetime.utcnow()
+                await session.commit()
+    except Exception as exc:
+        logger.warning("max_open_paper_trades lowering migration failed: %s", exc)
+
     # One-shot: nuke all wallet data and let the new pipeline rebuild.
     # The old 530 "gmgn_smart" wallets have zero trade history and zero
     # classification. The new top-coin buyer extraction directly tags
