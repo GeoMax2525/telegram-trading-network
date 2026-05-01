@@ -1494,7 +1494,10 @@ async def _send_weekly_report(bot) -> None:
             )).scalar() or 0
 
             paper_week = (await session.execute(
-                select(func.count(PaperTrade.id)).where(PaperTrade.opened_at >= cutoff)
+                select(func.count(PaperTrade.id)).where(
+                    PaperTrade.opened_at >= cutoff,
+                    PaperTrade.subscriber_id.is_(None),
+                )
             )).scalar() or 0
 
             wallets_week = (await session.execute(

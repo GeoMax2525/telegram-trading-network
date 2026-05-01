@@ -45,17 +45,95 @@ MAX_FETCH_FAILS    = 5     # consecutive failures before auto-close
 _fetch_fail_counts: dict[int, int] = {}
 
 
-async def _close_and_track(trade_id, reason, pnl, peak_mc, peak_mult):
-    """Close a paper trade AND update session context in one call."""
+async def _close_and_track(trade_id, reason, pnl, peak_mc, peak_mult, is_admin: bool = True):
+    """Close a paper trade AND update session context in one call.
+    Session context only tracks admin (HQ) outcomes — subscriber relay
+    closes don't influence HQ session streaks."""
     await close_paper_trade(trade_id, reason, pnl, peak_mc, peak_mult)
-    # Determine outcome from reason
+    if not is_admin:
+        return
     if reason in ("tp_hit", "trail_hit", "profit_trail"):
         _update_session_context("win")
     elif reason in ("breakeven_stop",):
         _update_session_context("be")
     elif reason in ("sl_hit", "dead_api", "dead_token"):
         _update_session_context("loss")
-    # stale, expired, reset = meta, don't track
+
+
+async def _refund_subscriber_balance(sub_id: int, locked_sol: float, pnl: float) -> float:
+    """Return locked SOL + realized PnL to subscriber's paper_balance and
+    update their paper_pnl. Returns the new paper_balance."""
+    from sqlalchemy import select as _select
+    from database.models import Subscriber as _Sub
+    async with AsyncSessionLocal() as session:
+        sub = (await session.execute(
+            _select(_Sub).where(_Sub.telegram_id == sub_id)
+        )).scalar_one_or_none()
+        if sub is None:
+            return 0.0
+        sub.paper_balance = round((sub.paper_balance or 0.0) + (locked_sol or 0.0) + (pnl or 0.0), 4)
+        sub.paper_pnl = round((sub.paper_pnl or 0.0) + (pnl or 0.0), 4)
+        await session.commit()
+        return float(sub.paper_balance)
+
+
+async def _finalize_paper_close(
+    bot, pt, reason, pnl, peak_mc, peak_mult, lines, only_admin_session: bool = True,
+):
+    """
+    Close trade, refresh balance for the right party, route notification.
+
+    `lines` is a list of strings; any "{bal:.2f}" placeholder gets formatted
+    with the owner's balance (admin state.paper_balance for HQ trades, or
+    the subscriber's refreshed paper_balance for relay rows).
+
+    HQ trade (subscriber_id IS NULL): posts to CALLER_GROUP_ID scan topic
+    and updates HQ session streak.
+    Relay trade: refunds subscriber balance and DMs only that subscriber;
+    HQ feed is NOT touched and HQ session streak is NOT influenced.
+    """
+    is_admin = pt.subscriber_id is None
+    await _close_and_track(pt.id, reason, pnl, peak_mc, peak_mult, is_admin=is_admin)
+
+    if is_admin:
+        bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+        state.paper_balance = bal
+        try:
+            text = "\n".join(line.format(bal=bal) for line in lines)
+            await bot.send_message(
+                CALLER_GROUP_ID, text,
+                message_thread_id=SCAN_TOPIC_ID,
+            )
+        except Exception:
+            pass
+        return bal
+    else:
+        bal = await _refund_subscriber_balance(
+            pt.subscriber_id, pt.paper_sol_spent or 0.0, pnl,
+        )
+        try:
+            text = "\n".join(line.format(bal=bal) for line in lines)
+            await bot.send_message(pt.subscriber_id, text)
+        except Exception:
+            pass
+        return bal
+
+
+async def _finalize_silent_close(pt, reason, pnl, peak_mc, peak_mult):
+    """Close trade without posting any notification — used for time-based
+    cleanups (stale/expired) and dead_api closes that intentionally stay
+    quiet. Still refunds balance for the correct owner."""
+    await _close_and_track(pt.id, reason, pnl, peak_mc, peak_mult)
+    if pt.subscriber_id is None:
+        if reason in ("sl_hit", "dead_api", "dead_token"):
+            _update_session_context("loss")
+        bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+        state.paper_balance = bal
+        return bal
+    else:
+        return await _refund_subscriber_balance(
+            pt.subscriber_id, pt.paper_sol_spent or 0.0, pnl,
+        )
 
 
 def _update_session_context(outcome: str) -> None:
@@ -108,7 +186,9 @@ _parse_pattern_tags = parse_pattern_tags
 
 
 async def _check_open_trades(bot) -> None:
-    trades = await get_open_paper_trades()
+    # include_subscribers=True so the monitor manages TP/SL on subscriber
+    # relay rows too (they're real paper trades that need exits).
+    trades = await get_open_paper_trades(include_subscribers=True)
     # Always refresh the in-memory balance snapshot, even if there are
     # no open trades to iterate. Keeps state.paper_balance close to DB
     # reality between scanner ticks and /hub renders.
@@ -126,8 +206,8 @@ async def _check_open_trades(bot) -> None:
     if evicted_trades:
         for pt in evicted_trades:
             try:
-                await close_paper_trade(
-                    pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple,
+                await _finalize_silent_close(
+                    pt, "reset", 0.0, pt.peak_mc, pt.peak_multiple,
                 )
                 logger.info(
                     "Paper: EVICTED %s (%s) — mint suffix filter failed",
@@ -163,9 +243,9 @@ async def _check_open_trades(bot) -> None:
                 )
                 if fails >= MAX_FETCH_FAILS:
                     pnl = round(-pt.paper_sol_spent * 0.5, 4)
-                    await _close_and_track(pt.id, "dead_api", pnl, pt.peak_mc, pt.peak_multiple)
-                    bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-                    state.paper_balance = bal
+                    bal = await _finalize_silent_close(
+                        pt, "dead_api", pnl, pt.peak_mc, pt.peak_multiple,
+                    )
                     logger.warning(
                         "Paper: DEAD API %s — %d consecutive fetch failures, closing. pnl=%+.4f bal=%.4f",
                         (pt.token_name or "?")[:18], fails, pnl, bal,
@@ -188,20 +268,16 @@ async def _check_open_trades(bot) -> None:
                 remaining_sol = sol * (remaining / 100.0)
                 mult = current_mc / (pt.entry_mc or 1)
                 pnl = round(realized + remaining_sol * (mult - 1), 4)
-                await _close_and_track(pt.id, "dead_token", pnl, pt.peak_mc, pt.peak_multiple)
-                bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-                state.paper_balance = bal
                 name = (pt.token_name or "?")[:18]
                 logger.info("Paper: DEAD TOKEN %s — MC=$%.0f, closing to free slot | pnl=%+.4f",
                             name, current_mc, pnl)
-                try:
-                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                await _finalize_paper_close(
+                    bot, pt, "dead_token", pnl, pt.peak_mc, pt.peak_multiple, [
                         f"💀 PAPER TRADE — DEAD TOKEN",
                         f"🪙 {name} | MC collapsed to ${current_mc:.0f}",
-                        f"Balance: {bal:.2f} SOL",
-                    ]), message_thread_id=SCAN_TOPIC_ID)
-                except Exception:
-                    pass
+                        "Balance: {bal:.2f} SOL",
+                    ],
+                )
                 continue
 
             entry_mc = pt.entry_mc or 0
@@ -210,7 +286,9 @@ async def _check_open_trades(bot) -> None:
                     "Paper id=%s %s: entry_mc=0/None — closing as reset (BUG #1 row)",
                     pt.id, (pt.token_name or "?")[:18],
                 )
-                await close_paper_trade(pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple)
+                await _finalize_silent_close(
+                    pt, "reset", 0.0, pt.peak_mc, pt.peak_multiple,
+                )
                 continue
             current_mult = current_mc / entry_mc
             is_tg_signal = "tg_signal" in (pt.pattern_type or "")
@@ -265,9 +343,9 @@ async def _check_open_trades(bot) -> None:
                 remaining_sol = sol * (remaining / 100.0)
                 realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
                 pnl = round(realized + remaining_sol * (current_mult - 1), 4)
-                await close_paper_trade(pt.id, time_exit_reason, pnl, peak_mc, peak_mult)
-                bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-                state.paper_balance = bal
+                bal = await _finalize_silent_close(
+                    pt, time_exit_reason, pnl, peak_mc, peak_mult,
+                )
                 logger.info(
                     "Paper: %s %s — age=%.1fh mult=%.2fx pnl=%+.4f bal=%.4f tags=%s",
                     time_exit_reason.upper(), name, age_hours, current_mult, pnl, bal,
@@ -284,22 +362,18 @@ async def _check_open_trades(bot) -> None:
             if peak_mult >= be_trigger and current_mult <= 1.0:
                 remaining_sol = sol * (remaining / 100.0)
                 pnl = round(realized + remaining_sol * (current_mult - 1), 4)
-                await _close_and_track(pt.id, "breakeven_stop", pnl, peak_mc, peak_mult)
-                bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-                state.paper_balance = bal
                 logger.info(
-                    "Paper: BREAKEVEN %s — peak=%.2fx now=%.2fx pnl=%+.4f bal=%.4f tags=%s",
-                    name, peak_mult, current_mult, pnl, bal, ",".join(tags) or "-",
+                    "Paper: BREAKEVEN %s — peak=%.2fx now=%.2fx pnl=%+.4f tags=%s",
+                    name, peak_mult, current_mult, pnl, ",".join(tags) or "-",
                 )
-                try:
-                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                await _finalize_paper_close(
+                    bot, pt, "breakeven_stop", pnl, peak_mc, peak_mult, [
                         f"🛡️ PAPER TRADE — BREAK EVEN STOP",
                         f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
                         f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                        f"Balance: {bal:.2f} SOL",
-                    ]), message_thread_id=SCAN_TOPIC_ID)
-                except Exception:
-                    pass
+                        "Balance: {bal:.2f} SOL",
+                    ],
+                )
                 continue
 
             # Profit trailing stop: once peak crosses the profit trail
@@ -315,29 +389,28 @@ async def _check_open_trades(bot) -> None:
                 trail_stop_mult = peak_mult * (1.0 - pt_pct)
                 if current_mult <= trail_stop_mult:
                     pnl = round(sol * (current_mult - 1), 4)
-                    await _close_and_track(pt.id, "profit_trail", pnl, peak_mc, peak_mult)
-                    bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-                    state.paper_balance = bal
                     logger.info(
-                        "Paper: PROFIT-TRAIL %s — peak=%.2fx now=%.2fx pnl=%+.4f bal=%.4f tags=%s",
-                        name, peak_mult, current_mult, pnl, bal, ",".join(tags) or "-",
+                        "Paper: PROFIT-TRAIL %s — peak=%.2fx now=%.2fx pnl=%+.4f tags=%s",
+                        name, peak_mult, current_mult, pnl, ",".join(tags) or "-",
                     )
-                    try:
-                        await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                    await _finalize_paper_close(
+                        bot, pt, "profit_trail", pnl, peak_mc, peak_mult, [
                             f"💰 PAPER TRADE — PROFIT TRAIL",
                             f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
                             f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                            f"Balance: {bal:.2f} SOL",
-                        ]), message_thread_id=SCAN_TOPIC_ID)
-                    except Exception:
-                        pass
+                            "Balance: {bal:.2f} SOL",
+                        ],
+                    )
                     continue
 
             # ── Scale IN: add size when token proves itself ────────────────
             # Probe with 0.1 SOL, then scale up if the token pumps.
             # This is how real traders work — don't risk big until it proves.
+            # HQ-only: subscriber relay rows have a fixed 0.1 SOL probe and
+            # don't scale; scaling them would also drain admin paper_balance.
             age_min = age_hours * 60
-            if (current_mult >= 1.5 and age_min >= 2 and age_min <= 10
+            if (pt.subscriber_id is None
+                    and current_mult >= 1.5 and age_min >= 2 and age_min <= 10
                     and sol < 0.25 and remaining >= 100):
                 # Token pumped 50%+ in first 2-10 min — add more size
                 add_sol = 0.2
@@ -370,8 +443,13 @@ async def _check_open_trades(bot) -> None:
             remaining = float(getattr(pt, "remaining_pct", 100) or 100)
             realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
 
+            # Scale-out partial sells are HQ-only — subscriber relay rows
+            # ride the full position to TP/SL/trail. Realized PnL on relay
+            # rows would also bypass _refund_subscriber_balance.
             scale_out_done = False
-            if remaining > 70 and current_mult >= 2.0:
+            if pt.subscriber_id is not None:
+                pass  # skip scale-out for subscribers
+            elif remaining > 70 and current_mult >= 2.0:
                 # First scale: sell 30% at 2x — recover initial + profit
                 sell_pct = 30.0
                 sell_sol = sol * (sell_pct / 100.0) * (current_mult - 1)
@@ -400,7 +478,7 @@ async def _check_open_trades(bot) -> None:
                     pass
                 scale_out_done = True
 
-            elif remaining > 40 and remaining <= 70 and current_mult >= 5.0:
+            elif pt.subscriber_id is None and remaining > 40 and remaining <= 70 and current_mult >= 5.0:
                 # Second scale: sell 25% at 5x — let runners actually run
                 sell_pct = 25.0
                 sell_sol = sol * (sell_pct / 100.0) * (current_mult - 1)
@@ -434,22 +512,18 @@ async def _check_open_trades(bot) -> None:
                 # Close remaining position at TP
                 remaining_sol = sol * (remaining / 100.0)
                 pnl = round(realized + remaining_sol * (current_mult - 1), 4)
-                await _close_and_track(pt.id, "tp_hit", pnl, peak_mc, peak_mult)
-                bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-                state.paper_balance = bal
                 logger.info(
-                    "Paper: TP hit %s — %.1fx +%.4f SOL bal=%.4f tags=%s",
-                    name, current_mult, pnl, bal, ",".join(tags) or "-",
+                    "Paper: TP hit %s — %.1fx +%.4f SOL tags=%s",
+                    name, current_mult, pnl, ",".join(tags) or "-",
                 )
-                try:
-                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                await _finalize_paper_close(
+                    bot, pt, "tp_hit", pnl, peak_mc, peak_mult, [
                         f"✅ PAPER TRADE WIN",
                         f"🪙 {name} | {current_mult:.1f}x | +{pnl:.4f} SOL",
                         f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                        f"Balance: {bal:.2f} SOL",
-                    ]), message_thread_id=SCAN_TOPIC_ID)
-                except Exception:
-                    pass
+                        "Balance: {bal:.2f} SOL",
+                    ],
+                )
                 continue
 
             # Trailing stop — 4am signals get wider trail + later activation
@@ -467,23 +541,19 @@ async def _check_open_trades(bot) -> None:
                     if current_mult <= trail_stop_mult:
                         remaining_sol = sol * (remaining / 100.0)
                         pnl = round(realized + remaining_sol * (current_mult - 1), 4)
-                        await _close_and_track(pt.id, "trail_hit", pnl, peak_mc, peak_mult)
-                        bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-                        state.paper_balance = bal
                         logger.info(
-                            "Paper: TRAIL hit %s — peak=%.2fx now=%.2fx pnl=%+.4f bal=%.4f tags=%s",
-                            name, peak_mult, current_mult, pnl, bal, ",".join(tags) or "-",
+                            "Paper: TRAIL hit %s — peak=%.2fx now=%.2fx pnl=%+.4f tags=%s",
+                            name, peak_mult, current_mult, pnl, ",".join(tags) or "-",
                         )
-                        try:
-                            msg_icon = "✅" if pnl > 0 else "❌"
-                            await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                        msg_icon = "✅" if pnl > 0 else "❌"
+                        await _finalize_paper_close(
+                            bot, pt, "trail_hit", pnl, peak_mc, peak_mult, [
                                 f"{msg_icon} PAPER TRADE — TRAIL STOP",
                                 f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
                                 f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                                f"Balance: {bal:.2f} SOL",
-                            ]), message_thread_id=SCAN_TOPIC_ID)
-                        except Exception:
-                            pass
+                                "Balance: {bal:.2f} SOL",
+                            ],
+                        )
                         continue
 
             # Phase-based SL — tight SL with brief grace period.
@@ -509,22 +579,18 @@ async def _check_open_trades(bot) -> None:
                 remaining_sol = sol * (remaining / 100.0)
                 loss_on_remaining = round(-remaining_sol * (1.0 - current_mult), 4)
                 pnl = round(realized + loss_on_remaining, 4)
-                await _close_and_track(pt.id, "sl_hit", pnl, peak_mc, peak_mult)
-                bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-                state.paper_balance = bal
                 logger.info(
-                    "Paper: SL hit %s — %.2fx %.4f SOL bal=%.4f tags=%s",
-                    name, current_mult, pnl, bal, ",".join(tags) or "-",
+                    "Paper: SL hit %s — %.2fx %.4f SOL tags=%s",
+                    name, current_mult, pnl, ",".join(tags) or "-",
                 )
-                try:
-                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
+                await _finalize_paper_close(
+                    bot, pt, "sl_hit", pnl, peak_mc, peak_mult, [
                         f"❌ PAPER TRADE LOSS",
                         f"🪙 {name} | SL hit | {pnl:.4f} SOL",
                         f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                        f"Balance: {bal:.2f} SOL",
-                    ]), message_thread_id=SCAN_TOPIC_ID)
-                except Exception:
-                    pass
+                        "Balance: {bal:.2f} SOL",
+                    ],
+                )
 
         except Exception as exc:
             logger.error("Paper monitor error for %s: %s", pt.token_address[:12], exc)

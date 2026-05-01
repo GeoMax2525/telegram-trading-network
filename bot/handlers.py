@@ -3441,25 +3441,29 @@ async def cmd_mywallet(message: Message):
 
 @router.message(Command("myperformance"))
 async def cmd_myperformance(message: Message):
-    """Show subscriber's trading performance."""
-    from database.models import get_subscriber
+    """Show subscriber's trading performance — pulls per-subscriber numbers
+    from paper_trades WHERE subscriber_id = telegram_id, separate from HQ."""
+    from database.models import get_subscriber, get_subscriber_paper_trade_stats
     sub = await get_subscriber(message.from_user.id)
     if not sub:
         await message.reply("Not registered. Send /start first.")
         return
 
-    pnl = sub.paper_pnl or 0
+    stats = await get_subscriber_paper_trade_stats(message.from_user.id)
     balance = sub.paper_balance or 20.0
     starting = 20.0
+    pnl_total = float(stats["total_pnl"])
     pnl_pct = ((balance - starting) / starting * 100) if starting > 0 else 0
+    emoji = "🟢" if pnl_total >= 0 else "🔴"
 
-    emoji = "🟢" if pnl >= 0 else "🔴"
     await message.reply(
         f"Your Performance\n\n"
         f"Mode: {sub.trade_mode}\n"
         f"Balance: {balance:.2f} SOL\n"
-        f"{emoji} PnL: {pnl:+.2f} SOL ({pnl_pct:+.1f}%)\n"
-        f"Starting: {starting:.2f} SOL"
+        f"{emoji} PnL: {pnl_total:+.4f} SOL ({pnl_pct:+.1f}%)\n"
+        f"Starting: {starting:.2f} SOL\n\n"
+        f"Trades: {stats['closed']} closed, {stats['open_count']} open\n"
+        f"Wins: {stats['wins']} ({stats['win_rate']}% WR)"
     )
 
 

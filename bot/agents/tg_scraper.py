@@ -263,10 +263,13 @@ async def _handle_message(event, channel_name: str) -> None:
             return
 
         async with AsyncSessionLocal() as session:
+            # Admin (HQ) only — orphan subscriber relay rows must not block
+            # HQ re-entry or 4am tg_signal upgrades.
             open_trade = (await session.execute(
                 select(PaperTrade).where(
                     PaperTrade.token_address == mint,
                     PaperTrade.status == "open",
+                    PaperTrade.subscriber_id.is_(None),
                 )
             )).scalar_one_or_none()
 

@@ -15,6 +15,7 @@ from aiogram import Bot
 
 from database.models import (
     get_all_active_subscribers,
+    has_open_paper_trade_for_subscriber,
     AsyncSessionLocal, Subscriber, PaperTrade,
 )
 
@@ -121,24 +122,14 @@ async def _relay_delayed(
             if sub.paper_balance < 0.15:
                 continue
 
-            # Check if subscriber already has this token open
-            async with AsyncSessionLocal() as session:
-                from sqlalchemy import select
-                existing = (await session.execute(
-                    select(PaperTrade).where(
-                        PaperTrade.token_address == token_address,
-                        PaperTrade.status == "open",
-                    )
-                )).scalars().all()
-                # Check if any belong to this subscriber
-                sub_has_open = any(
-                    getattr(t, "subscriber_id", None) == sub.telegram_id
-                    for t in existing
-                )
-                if sub_has_open:
-                    continue
+            # Skip if this subscriber already has the token open
+            if await has_open_paper_trade_for_subscriber(
+                sub.telegram_id, token_address,
+            ):
+                continue
 
-            # Open paper trade for subscriber
+            # Open paper trade for subscriber, tagged with their telegram_id
+            # so HQ stats / learning queries / scanner slot count exclude it.
             async with AsyncSessionLocal() as session:
                 pt = PaperTrade(
                     token_address=token_address,
@@ -154,6 +145,7 @@ async def _relay_delayed(
                     peak_mc=fresh_mc,
                     peak_multiple=1.0,
                     trade_reasoning=f"[RELAY] {trade_reasoning or ''}",
+                    subscriber_id=sub.telegram_id,
                 )
                 session.add(pt)
                 await session.commit()

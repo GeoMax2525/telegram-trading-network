@@ -366,6 +366,9 @@ class PaperTrade(Base):
     zero_volume_since = Column(DateTime,    nullable=True)  # first tick volume hit 0/null
     last_move_at      = Column(DateTime,    nullable=True)  # last tick with >=2% price move
     last_move_mc      = Column(Float,       nullable=True)  # MC at last_move_at (reference)
+    # Owner: NULL = admin (HQ), telegram_id = subscriber relay copy.
+    # Admin-only stats/learning queries filter WHERE subscriber_id IS NULL.
+    subscriber_id     = Column(BigInteger,  nullable=True, index=True)
 
     # Aliases so PaperTrade instances can be consumed by code written against Position
     # (Agent 6 learning loop treats paper trades as first-class learning signal).
@@ -529,6 +532,7 @@ _NEW_PAPER_TRADE_COLS = [
     ("zero_volume_since", "TIMESTAMP"),
     ("last_move_at",      "TIMESTAMP"),
     ("last_move_mc",      "REAL"),
+    ("subscriber_id",     "BIGINT"),
     ("remaining_pct",     "REAL DEFAULT 100"),
     ("realized_pnl_sol",  "REAL DEFAULT 0"),
     ("trade_reasoning",   "TEXT"),
@@ -1648,11 +1652,14 @@ async def get_winning_scans(since: "datetime | None" = None) -> list:
             results.append(s)
             seen_mints.add(s.contract_address)
 
-        # Source 2: Paper trade winners with peak >= 2x
+        # Source 2: Paper trade winners with peak >= 2x (admin/HQ only —
+        # subscriber relay rows are duplicates of HQ trades and would
+        # double-count winners in the learning corpus)
         pq = select(PaperTrade).where(
             PaperTrade.peak_multiple >= 2,
             PaperTrade.entry_mc.is_not(None),
             PaperTrade.token_address.is_not(None),
+            PaperTrade.subscriber_id.is_(None),
         )
         if since is not None:
             pq = pq.where(PaperTrade.opened_at > since)
@@ -1767,10 +1774,10 @@ async def get_closed_scans_for_analysis() -> list["Scan"]:
 
 async def get_closed_paper_trades_for_analysis() -> list["PaperTrade"]:
     """
-    Returns closed paper trades (status='closed') with entry + peak data.
-    Used by Pattern Engine as its learning corpus — the previous scans
-    table was fed by manual caller pastes and had no connection to what
-    the bot actually trades.
+    Returns closed admin (HQ) paper trades with entry + peak data.
+    Used by Pattern Engine as its learning corpus. Subscriber relay
+    copies are excluded — they're duplicates of HQ trades at smaller
+    size and would skew pattern statistics.
     """
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -1778,6 +1785,7 @@ async def get_closed_paper_trades_for_analysis() -> list["PaperTrade"]:
                 PaperTrade.status == "closed",
                 PaperTrade.entry_mc.is_not(None),
                 PaperTrade.peak_multiple.is_not(None),
+                PaperTrade.subscriber_id.is_(None),
             ).order_by(PaperTrade.opened_at.asc())
         )
         return list(result.scalars().all())
@@ -2054,10 +2062,12 @@ async def save_weights(
 
 async def get_closed_positions_since(since_id: int, limit: int = 200) -> list:
     """
-    Returns a combined list of closed PaperTrades + closed Positions, oldest first.
-    Paper trades are the primary learning substrate; real Positions are included as
-    a fallback/augmentation when they exist. `since_id` is retained for signature
-    compatibility but is ignored — the caller slices from `last_analyzed`.
+    Returns a combined list of closed admin (HQ) PaperTrades + closed Positions,
+    oldest first. Paper trades are the primary learning substrate; real Positions
+    are included as a fallback/augmentation when they exist. Subscriber relay
+    copies are excluded so the learning loop only studies HQ outcomes.
+    `since_id` is retained for signature compatibility but is ignored — the caller
+    slices from `last_analyzed`.
     """
     async with AsyncSessionLocal() as session:
         paper_rows = (await session.execute(
@@ -2065,6 +2075,7 @@ async def get_closed_positions_since(since_id: int, limit: int = 200) -> list:
             .where(
                 PaperTrade.status == "closed",
                 PaperTrade.paper_pnl_sol.is_not(None),
+                PaperTrade.subscriber_id.is_(None),
             )
             .order_by(PaperTrade.closed_at.asc())
             .limit(limit)
@@ -2086,12 +2097,15 @@ async def get_closed_positions_since(since_id: int, limit: int = 200) -> list:
 
 
 async def get_total_closed_count() -> int:
-    """Returns total number of closed trades (paper + real positions with PnL)."""
+    """Returns total number of closed admin (HQ) trades (paper + real positions
+    with PnL). Subscriber relay rows are excluded — learning loop sample-size
+    gates depend on this count being HQ-only."""
     async with AsyncSessionLocal() as session:
         paper_count = (await session.execute(
             select(func.count(PaperTrade.id)).where(
                 PaperTrade.status == "closed",
                 PaperTrade.paper_pnl_sol.is_not(None),
+                PaperTrade.subscriber_id.is_(None),
             )
         )).scalar() or 0
 
@@ -2406,40 +2420,125 @@ async def open_paper_trade(
         return pt
 
 
-async def get_open_paper_trades() -> list["PaperTrade"]:
+async def get_open_paper_trades(include_subscribers: bool = False) -> list["PaperTrade"]:
+    """Open paper trades. Defaults to admin (HQ) only — every /hub view, every
+    admin command, the scanner slot counter all want HQ rows. The paper monitor
+    is the one caller that must see subscriber relay rows too (it manages
+    their TP/SL), so it explicitly passes include_subscribers=True."""
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(PaperTrade).where(PaperTrade.status == "open")
-        )
+        q = select(PaperTrade).where(PaperTrade.status == "open")
+        if not include_subscribers:
+            q = q.where(PaperTrade.subscriber_id.is_(None))
+        result = await session.execute(q)
         return list(result.scalars().all())
 
 
 async def has_open_paper_trade(token_address: str) -> bool:
-    """Returns True if there's already an open paper trade for this mint."""
+    """Returns True if admin (HQ) has an open paper trade for this mint.
+    Subscriber relay copies are excluded — they have non-null subscriber_id."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(func.count(PaperTrade.id)).where(
                 PaperTrade.token_address == token_address,
                 PaperTrade.status == "open",
+                PaperTrade.subscriber_id.is_(None),
             )
         )
         return (result.scalar() or 0) > 0
 
 
 async def count_open_paper_trades() -> int:
-    """Total number of paper trades currently in status='open'."""
+    """Number of admin (HQ) paper trades currently in status='open'.
+    Subscriber relay copies are excluded so they don't burn HQ slot budget."""
     async with AsyncSessionLocal() as session:
         return (await session.execute(
-            select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.status == "open",
+                PaperTrade.subscriber_id.is_(None),
+            )
         )).scalar() or 0
+
+
+# ── Subscriber-scoped paper trade helpers ───────────────────────────────────
+
+async def has_open_paper_trade_for_subscriber(
+    subscriber_id: int, token_address: str,
+) -> bool:
+    """Returns True if this subscriber already has the token open."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.token_address == token_address,
+                PaperTrade.status == "open",
+                PaperTrade.subscriber_id == subscriber_id,
+            )
+        )
+        return (result.scalar() or 0) > 0
+
+
+async def get_subscriber_paper_trades(
+    subscriber_id: int, limit: int = 50,
+) -> list["PaperTrade"]:
+    """All paper trades (open + closed) for a subscriber, newest first."""
+    async with AsyncSessionLocal() as session:
+        return list((await session.execute(
+            select(PaperTrade)
+            .where(PaperTrade.subscriber_id == subscriber_id)
+            .order_by(PaperTrade.id.desc())
+            .limit(limit)
+        )).scalars().all())
+
+
+async def get_subscriber_paper_trade_stats(subscriber_id: int) -> dict:
+    """Per-subscriber stats for /myperformance: closed count, wins, win rate,
+    realized PnL, open count."""
+    async with AsyncSessionLocal() as session:
+        closed = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.subscriber_id == subscriber_id,
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0
+
+        wins = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.subscriber_id == subscriber_id,
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol > 0,
+            )
+        )).scalar() or 0
+
+        total_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                PaperTrade.subscriber_id == subscriber_id,
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0.0
+
+        open_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.subscriber_id == subscriber_id,
+                PaperTrade.status == "open",
+            )
+        )).scalar() or 0
+
+    win_rate = round(wins / closed * 100) if closed > 0 else 0
+    return {
+        "closed": int(closed),
+        "wins": int(wins),
+        "win_rate": int(win_rate),
+        "total_pnl": float(total_pnl),
+        "open_count": int(open_count),
+    }
 
 
 async def has_recent_close(token_address: str, within_hours: float = 2.0) -> bool:
     """
-    Returns True if this mint has ANY closed paper trade (any reason)
-    within the last `within_hours`. Used as a re-entry cooldown so the
-    scanner doesn't immediately reopen a token that just hit SL / TP /
-    dead / manual / etc.
+    Returns True if this mint has an admin (HQ) closed paper trade in the
+    last `within_hours`. Used as a re-entry cooldown so the scanner doesn't
+    immediately reopen a token HQ just exited. Subscriber relay closes
+    are ignored.
     """
     if not token_address:
         return False
@@ -2450,6 +2549,7 @@ async def has_recent_close(token_address: str, within_hours: float = 2.0) -> boo
                 PaperTrade.token_address == token_address,
                 PaperTrade.status == "closed",
                 PaperTrade.closed_at >= cutoff,
+                PaperTrade.subscriber_id.is_(None),
             )
         )
         return (result.scalar() or 0) > 0
@@ -2473,6 +2573,7 @@ async def has_open_paper_trade_by_name(token_name: str | None) -> bool:
             select(func.count(PaperTrade.id)).where(
                 PaperTrade.token_name == token_name,
                 PaperTrade.status == "open",
+                PaperTrade.subscriber_id.is_(None),
             )
         )
         return (result.scalar() or 0) > 0
@@ -2480,10 +2581,9 @@ async def has_open_paper_trade_by_name(token_name: str | None) -> bool:
 
 async def has_recent_manual_close(token_address: str, within_hours: float = 24.0) -> bool:
     """
-    Returns True if this token was manually closed (via /hub Close All
-    or similar) in the last `within_hours`. Used by the scanner to
-    prevent "rage quit" tokens from being reopened on the next tick
-    just because DexScreener still lists them as trending.
+    Returns True if admin (HQ) manually closed this token in the last
+    `within_hours`. Used by the scanner to prevent "rage quit" tokens from
+    being reopened on the next tick. Subscriber rows are excluded.
     """
     cutoff = datetime.utcnow() - timedelta(hours=within_hours)
     async with AsyncSessionLocal() as session:
@@ -2492,16 +2592,19 @@ async def has_recent_manual_close(token_address: str, within_hours: float = 24.0
                 PaperTrade.token_address == token_address,
                 PaperTrade.close_reason == "manual_close",
                 PaperTrade.closed_at >= cutoff,
+                PaperTrade.subscriber_id.is_(None),
             )
         )
         return (result.scalar() or 0) > 0
 
 
 async def get_recent_paper_trades(limit: int = 10) -> list["PaperTrade"]:
-    """Returns the last N paper trades regardless of status, newest first."""
+    """Returns the last N admin (HQ) paper trades, newest first.
+    Subscriber relay copies are excluded so /hub recent list stays HQ-only."""
     async with AsyncSessionLocal() as session:
         return list((await session.execute(
             select(PaperTrade)
+            .where(PaperTrade.subscriber_id.is_(None))
             .order_by(PaperTrade.id.desc())
             .limit(limit)
         )).scalars().all())
@@ -2643,7 +2746,11 @@ async def update_paper_dead_tracking(
 
 async def get_paper_trade_stats() -> dict:
     """
-    Returns paper trade aggregates, split into STRATEGY and META buckets.
+    Returns paper trade aggregates for admin (HQ) only — every query
+    filters subscriber_id IS NULL so subscriber relay copies don't
+    inflate HQ stats.
+
+    Split into STRATEGY and META buckets:
 
     `strategy_*` counts only trades that closed via a bot decision
     (tp_hit / sl_hit / trail_hit / dead_token / expired). These are the
@@ -2659,26 +2766,30 @@ async def get_paper_trade_stats() -> dict:
     """
     strategy_reasons = list(STRATEGY_CLOSE_REASONS)
     meta_reasons = list(META_CLOSE_REASONS)
+    admin_only = PaperTrade.subscriber_id.is_(None)
 
     async with AsyncSessionLocal() as session:
         total = (await session.execute(
-            select(func.count(PaperTrade.id))
+            select(func.count(PaperTrade.id)).where(admin_only)
         )).scalar() or 0
 
         closed = (await session.execute(
             select(func.count(PaperTrade.id)).where(
+                admin_only,
                 PaperTrade.status == "closed", PaperTrade.paper_pnl_sol.is_not(None),
             )
         )).scalar() or 0
 
         wins = (await session.execute(
             select(func.count(PaperTrade.id)).where(
+                admin_only,
                 PaperTrade.status == "closed", PaperTrade.paper_pnl_sol > 0,
             )
         )).scalar() or 0
 
         total_pnl = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                admin_only,
                 PaperTrade.paper_pnl_sol.is_not(None),
             )
         )).scalar() or 0.0
@@ -2686,6 +2797,7 @@ async def get_paper_trade_stats() -> dict:
         # Strategy-only aggregates (what Agent 6 learns from)
         strategy_closed = (await session.execute(
             select(func.count(PaperTrade.id)).where(
+                admin_only,
                 PaperTrade.status == "closed",
                 PaperTrade.paper_pnl_sol.is_not(None),
                 PaperTrade.close_reason.in_(strategy_reasons),
@@ -2694,6 +2806,7 @@ async def get_paper_trade_stats() -> dict:
 
         strategy_wins = (await session.execute(
             select(func.count(PaperTrade.id)).where(
+                admin_only,
                 PaperTrade.status == "closed",
                 PaperTrade.paper_pnl_sol > 0,
                 PaperTrade.close_reason.in_(strategy_reasons),
@@ -2702,6 +2815,7 @@ async def get_paper_trade_stats() -> dict:
 
         strategy_pnl = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                admin_only,
                 PaperTrade.paper_pnl_sol.is_not(None),
                 PaperTrade.close_reason.in_(strategy_reasons),
             )
@@ -2709,6 +2823,7 @@ async def get_paper_trade_stats() -> dict:
 
         meta_pnl = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                admin_only,
                 PaperTrade.paper_pnl_sol.is_not(None),
                 PaperTrade.close_reason.in_(meta_reasons),
             )
@@ -2716,17 +2831,21 @@ async def get_paper_trade_stats() -> dict:
 
         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         today_count = (await session.execute(
-            select(func.count(PaperTrade.id)).where(PaperTrade.opened_at >= today)
+            select(func.count(PaperTrade.id)).where(
+                admin_only, PaperTrade.opened_at >= today,
+            )
         )).scalar() or 0
 
         today_pnl = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                admin_only,
                 PaperTrade.closed_at >= today, PaperTrade.paper_pnl_sol.is_not(None),
             )
         )).scalar() or 0.0
 
         today_strategy_pnl = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                admin_only,
                 PaperTrade.closed_at >= today,
                 PaperTrade.paper_pnl_sol.is_not(None),
                 PaperTrade.close_reason.in_(strategy_reasons),
@@ -2735,6 +2854,7 @@ async def get_paper_trade_stats() -> dict:
 
         today_meta_pnl = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                admin_only,
                 PaperTrade.closed_at >= today,
                 PaperTrade.paper_pnl_sol.is_not(None),
                 PaperTrade.close_reason.in_(meta_reasons),
@@ -2743,6 +2863,7 @@ async def get_paper_trade_stats() -> dict:
 
         today_strategy_closed = (await session.execute(
             select(func.count(PaperTrade.id)).where(
+                admin_only,
                 PaperTrade.closed_at >= today,
                 PaperTrade.paper_pnl_sol.is_not(None),
                 PaperTrade.close_reason.in_(strategy_reasons),
@@ -2751,6 +2872,7 @@ async def get_paper_trade_stats() -> dict:
 
         today_strategy_wins = (await session.execute(
             select(func.count(PaperTrade.id)).where(
+                admin_only,
                 PaperTrade.closed_at >= today,
                 PaperTrade.paper_pnl_sol > 0,
                 PaperTrade.close_reason.in_(strategy_reasons),
@@ -2758,12 +2880,15 @@ async def get_paper_trade_stats() -> dict:
         )).scalar() or 0
 
         open_count = (await session.execute(
-            select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+            select(func.count(PaperTrade.id)).where(
+                admin_only, PaperTrade.status == "open",
+            )
         )).scalar() or 0
 
         recent = list((await session.execute(
-            select(PaperTrade).where(PaperTrade.status == "closed")
-            .order_by(PaperTrade.closed_at.desc()).limit(5)
+            select(PaperTrade).where(
+                admin_only, PaperTrade.status == "closed",
+            ).order_by(PaperTrade.closed_at.desc()).limit(5)
         )).scalars().all())
 
     win_rate = round(wins / closed * 100) if closed > 0 else 0
@@ -2794,9 +2919,9 @@ async def get_paper_trade_stats() -> dict:
 
 async def reclassify_strategy_history_as_reset() -> int:
     """
-    Flip every closed paper trade whose close_reason is in STRATEGY_CLOSE_REASONS
-    to "reset" so strategy aggregates (strategy_pnl, strategy_win_rate,
-    today_strategy_pnl, etc.) fall back to zero on the next /hub render.
+    Flip every closed admin (HQ) paper trade whose close_reason is in
+    STRATEGY_CLOSE_REASONS to "reset" so strategy aggregates fall back
+    to zero on the next /hub render. Subscriber relay rows are left alone.
 
     Used by the /hub Reset Balance button to wipe stats that were inflated
     by early liquidity-trap bugs — rows stay for audit but stop contributing
@@ -2810,6 +2935,7 @@ async def reclassify_strategy_history_as_reset() -> int:
             .where(
                 PaperTrade.status == "closed",
                 PaperTrade.close_reason.in_(list(STRATEGY_CLOSE_REASONS)),
+                PaperTrade.subscriber_id.is_(None),
             )
             .values(close_reason="reset")
         )
@@ -2819,21 +2945,28 @@ async def reclassify_strategy_history_as_reset() -> int:
 
 async def compute_paper_balance(starting: float = 20.0) -> float:
     """
-    Compute true paper balance from DB:
+    Compute true admin (HQ) paper balance from DB:
     starting - sum(open positions) + sum(closed PnL) + paper_balance_offset
+
+    Subscriber relay rows (subscriber_id NOT NULL) are excluded — each
+    subscriber tracks their own balance on the Subscriber row.
 
     The offset is applied here (single source of truth) so every caller
     sees the same number without manually re-adding it.
     """
+    admin_only = PaperTrade.subscriber_id.is_(None)
     async with AsyncSessionLocal() as session:
         open_locked = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_sol_spent), 0.0))
-            .where(PaperTrade.status == "open")
+            .where(admin_only, PaperTrade.status == "open")
         )).scalar() or 0.0
 
         closed_pnl = (await session.execute(
             select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0))
-            .where(PaperTrade.status == "closed", PaperTrade.paper_pnl_sol.is_not(None))
+            .where(
+                admin_only,
+                PaperTrade.status == "closed", PaperTrade.paper_pnl_sol.is_not(None),
+            )
         )).scalar() or 0.0
 
         offset_row = (await session.execute(
@@ -3632,14 +3765,17 @@ async def get_recent_param_changes(limit: int = 10) -> list["ParamChange"]:
 # ── Post-close tracking helpers ──────────────────────────────────────────────
 
 async def get_recently_closed_paper_trades(hours: int = 25) -> list["PaperTrade"]:
-    """Returns paper trades closed within last N hours that still need post-close tracking."""
+    """Admin (HQ) paper trades closed within last N hours still needing
+    post-close tracking. Subscriber relay rows skip post-close tracking
+    so they don't pollute Agent 6 learning."""
     cutoff = datetime.utcnow() - timedelta(hours=hours)
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(PaperTrade).where(
                 PaperTrade.status == "closed",
                 PaperTrade.closed_at >= cutoff,
-                PaperTrade.mc_24h_after.is_(None),  # not yet fully tracked
+                PaperTrade.mc_24h_after.is_(None),
+                PaperTrade.subscriber_id.is_(None),
             )
         )
         return list(result.scalars().all())
@@ -3674,22 +3810,27 @@ async def update_paper_post_close(
 
 
 async def get_post_close_stats() -> dict:
-    """Returns aggregate post-close stats for learning."""
+    """Admin-only aggregate post-close stats for learning. Subscriber relay
+    rows are excluded so duplicate post-close samples don't double-count."""
+    admin_only = PaperTrade.subscriber_id.is_(None)
     async with AsyncSessionLocal() as session:
         total = (await session.execute(
             select(func.count(PaperTrade.id)).where(
+                admin_only,
                 PaperTrade.status == "closed", PaperTrade.mc_24h_after.is_not(None),
             )
         )).scalar() or 0
 
         too_early = (await session.execute(
             select(func.count(PaperTrade.id)).where(
+                admin_only,
                 PaperTrade.sold_too_early == True,
             )
         )).scalar() or 0
 
         too_late = (await session.execute(
             select(func.count(PaperTrade.id)).where(
+                admin_only,
                 PaperTrade.sold_too_late == True,
             )
         )).scalar() or 0
