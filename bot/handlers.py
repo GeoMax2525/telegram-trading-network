@@ -3365,7 +3365,9 @@ async def cmd_testgmgn(message: Message):
 
 # ── /start ────────────────────────────────────────────────────────────────────
 
-# /start handled by subscriber.py
+@router.message(Command("test"))
+async def cmd_test(message: Message):
+    await message.reply(f"Bot works. Your ID: {message.from_user.id}")
 
 
 @router.message(Command("adduser"))
