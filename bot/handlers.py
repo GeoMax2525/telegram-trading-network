@@ -3365,9 +3365,7 @@ async def cmd_testgmgn(message: Message):
 
 # ── /start ────────────────────────────────────────────────────────────────────
 
-@router.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.reply("Bot is alive")
+# /start handled by subscriber.py
 
 
 # ── /scan <address> ───────────────────────────────────────────────────────────

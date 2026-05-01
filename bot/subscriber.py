@@ -137,10 +137,7 @@ async def cmd_subscribers(message: Message):
 
 @router.message(Command("start"))
 async def cmd_start_dm(message: Message):
-    """Register as a subscriber when DMing the bot."""
-    # Only handle in DMs
-    if message.chat.type != "private":
-        return
+    """Register or show status. Works in DMs and groups."""
 
     uid = message.from_user.id
     username = message.from_user.username
