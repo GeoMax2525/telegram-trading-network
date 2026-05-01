@@ -3371,22 +3371,75 @@ async def cmd_test(message: Message):
 
 
 @router.message(Command("adduser"))
-async def cmd_adduser_relay(message: Message):
-    """Relay to subscriber module."""
-    from bot.subscriber import cmd_adduser
-    await cmd_adduser(message)
+async def cmd_adduser_direct(message: Message):
+    """Add a subscriber directly."""
+    if message.from_user.id not in ADMIN_IDS:
+        await message.reply(f"Not admin. Your ID: {message.from_user.id}\nAdmin IDs: {ADMIN_IDS}")
+        return
+
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Usage: /adduser <telegram_id>")
+        return
+
+    try:
+        tid = int(args[1])
+    except ValueError:
+        await message.reply("Invalid ID.")
+        return
+
+    try:
+        from database.models import get_subscriber, set_subscriber_status, create_subscriber
+        sub = await get_subscriber(tid)
+        if sub:
+            await set_subscriber_status(tid, "active")
+            await message.reply(f"Reactivated subscriber {tid}.")
+        else:
+            from bot.subscriber import _generate_wallet
+            pub, priv = _generate_wallet()
+            await create_subscriber(
+                telegram_id=tid, username=None,
+                wallet_address=pub, wallet_key_hash=priv,
+            )
+            await message.reply(f"Subscriber {tid} added.\nWallet: {pub}\nMode: paper (20 SOL)")
+    except Exception as exc:
+        await message.reply(f"Error: {exc}")
 
 
 @router.message(Command("removeuser"))
-async def cmd_removeuser_relay(message: Message):
-    from bot.subscriber import cmd_removeuser
-    await cmd_removeuser(message)
+async def cmd_removeuser_direct(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Usage: /removeuser <telegram_id>")
+        return
+    try:
+        tid = int(args[1])
+        from database.models import set_subscriber_status
+        ok = await set_subscriber_status(tid, "suspended")
+        await message.reply(f"Subscriber {tid} {'suspended' if ok else 'not found'}.")
+    except Exception as exc:
+        await message.reply(f"Error: {exc}")
 
 
 @router.message(Command("subscribers"))
-async def cmd_subscribers_relay(message: Message):
-    from bot.subscriber import cmd_subscribers
-    await cmd_subscribers(message)
+async def cmd_subscribers_direct(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    try:
+        from database.models import get_all_active_subscribers
+        subs = await get_all_active_subscribers()
+        if not subs:
+            await message.reply("No active subscribers.")
+            return
+        lines = [f"Active Subscribers ({len(subs)})", ""]
+        for s in subs:
+            name = s.username or str(s.telegram_id)
+            lines.append(f"  {name} | {s.tier} | {s.trade_mode}")
+        await message.reply("\n".join(lines))
+    except Exception as exc:
+        await message.reply(f"Error: {exc}")
 
 
 # ── /scan <address> ───────────────────────────────────────────────────────────
