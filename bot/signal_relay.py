@@ -1,15 +1,11 @@
 """
-signal_relay.py — Copies trades to subscribers with delay.
+signal_relay.py — Copies trades to subscribers + posts CA to external group.
 
 When the main bot opens a trade, this module:
-1. Waits 30 seconds (your trade fills first)
-2. Opens the same trade for each active subscriber
-3. Notifies each subscriber via DM
-4. Tracks per-subscriber PnL separately
-
-The paper monitor handles exits for all trades (subscriber + admin)
-because subscriber trades are stored in the same PaperTrade table
-with a subscriber_id field to distinguish them.
+1. Posts the CA to the external group via Telethon (as your account)
+2. Waits 30 seconds (your trade fills first)
+3. Opens the same trade for each active subscriber
+4. Notifies each subscriber via DM
 """
 
 import asyncio
@@ -28,10 +24,45 @@ logger = logging.getLogger(__name__)
 _bot: Bot | None = None
 RELAY_DELAY = 30  # seconds after admin trade before subscriber trades
 
+# External group for CA posting via Telethon (your account)
+EXTERNAL_GROUP_ID = -1002170009255
+EXTERNAL_THREAD_ID = 496012
+
 
 def set_relay_bot(bot: Bot):
     global _bot
     _bot = bot
+
+
+async def post_ca_to_group(token_address: str, token_name: str):
+    """Post the CA to external group using Telethon (your user account).
+    Posts as YOU, not as a bot. Phanes picks up the CA automatically."""
+    try:
+        from bot.agents.tg_scraper import TG_API_ID, TG_API_HASH, TG_SESSION_STRING
+        if not TG_SESSION_STRING:
+            return
+
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        client = TelegramClient(
+            StringSession(TG_SESSION_STRING),
+            int(TG_API_ID),
+            TG_API_HASH,
+        )
+        await client.start()
+
+        # Post just the CA — Phanes picks it up
+        await client.send_message(
+            EXTERNAL_GROUP_ID,
+            token_address,
+            reply_to=EXTERNAL_THREAD_ID,
+        )
+        logger.info("Posted CA to external group: %s (%s)", token_name[:20], token_address[:12])
+
+        await client.disconnect()
+    except Exception as exc:
+        logger.warning("CA post to external group failed: %s", exc)
 
 
 async def relay_trade_to_subscribers(
@@ -48,7 +79,10 @@ async def relay_trade_to_subscribers(
     Called after the admin's trade opens. Waits 30s then opens
     the same trade for each active subscriber.
     """
-    # Run in background so it doesn't block the scanner
+    # Post CA to external group immediately (no delay)
+    asyncio.create_task(post_ca_to_group(token_address, token_name))
+
+    # Relay to subscribers with delay (runs in background)
     asyncio.create_task(_relay_delayed(
         token_address, token_name, entry_mc,
         tp_x, sl_pct, pattern_type, trade_reasoning, confidence,
