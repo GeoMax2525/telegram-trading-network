@@ -52,11 +52,10 @@ async def post_ca_to_group(token_address: str, token_name: str):
         )
         await client.start()
 
-        # Post just the CA — Phanes picks it up
+        # Post just the CA as a standalone message — no reply, no thread
         await client.send_message(
             EXTERNAL_GROUP_ID,
             token_address,
-            reply_to=EXTERNAL_THREAD_ID,
         )
         logger.info("Posted CA to external group: %s (%s)", token_name[:20], token_address[:12])
 
