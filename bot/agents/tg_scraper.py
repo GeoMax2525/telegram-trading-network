@@ -252,10 +252,16 @@ async def _handle_message(event, channel_name: str) -> None:
 
     # Check if we already have an open position on this token.
     # If yes, upgrade it to tg_signal rules (wider trail, longer grace).
-    # This means: bot bought early, 4am confirmed it → let it run harder.
+    # If recently closed, DON'T re-inject — 24h cooldown applies.
     try:
-        from database.models import AsyncSessionLocal, PaperTrade
+        from database.models import AsyncSessionLocal, PaperTrade, has_recent_close
         from sqlalchemy import select
+
+        # Don't re-inject if already traded in last 24h
+        if await has_recent_close(mint, within_hours=24.0):
+            logger.info("TG scraper: skip %s — already traded in last 24h", mint[:12])
+            return
+
         async with AsyncSessionLocal() as session:
             open_trade = (await session.execute(
                 select(PaperTrade).where(
@@ -264,14 +270,17 @@ async def _handle_message(event, channel_name: str) -> None:
                 )
             )).scalar_one_or_none()
 
-            if open_trade and "tg_signal" not in (open_trade.pattern_type or ""):
-                old_type = open_trade.pattern_type or ""
-                open_trade.pattern_type = f"tg_signal,{old_type}" if old_type else "tg_signal"
-                await session.commit()
-                logger.info(
-                    "TG scraper: UPGRADED open trade %s to tg_signal rules (wider trail, longer grace)",
-                    (open_trade.token_name or mint[:12]),
-                )
+            if open_trade:
+                if "tg_signal" not in (open_trade.pattern_type or ""):
+                    old_type = open_trade.pattern_type or ""
+                    open_trade.pattern_type = f"tg_signal,{old_type}" if old_type else "tg_signal"
+                    await session.commit()
+                    logger.info(
+                        "TG scraper: UPGRADED open trade %s to tg_signal rules",
+                        (open_trade.token_name or mint[:12]),
+                    )
+                # Already have it open — don't inject as new candidate
+                return
     except Exception as exc:
         logger.debug("TG scraper: upgrade check failed for %s: %s", mint[:12], exc)
 
