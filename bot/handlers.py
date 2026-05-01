@@ -3370,6 +3370,47 @@ async def cmd_test(message: Message):
     await message.reply(f"Bot works. Your ID: {message.from_user.id}")
 
 
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    """Handle /start in DMs — show subscriber info or welcome message."""
+    uid = message.from_user.id
+
+    from database.models import get_subscriber
+
+    sub = await get_subscriber(uid)
+    if sub:
+        if sub.status == "active":
+            await message.reply(
+                f"Welcome back!\n\n"
+                f"Wallet: {sub.wallet_address}\n"
+                f"Mode: {sub.trade_mode}\n"
+                f"Balance: {sub.paper_balance:.2f} SOL\n\n"
+                f"Commands:\n"
+                f"/mywallet — wallet info\n"
+                f"/myperformance — your stats\n"
+                f"/keybot — trading settings"
+            )
+        else:
+            await message.reply("Your account is suspended. Contact admin.")
+    else:
+        # Check if admin pre-approved this user
+        if uid in ADMIN_IDS:
+            await message.reply(
+                f"Welcome admin!\n"
+                f"Your ID: {uid}\n\n"
+                f"Use /hub for dashboard\n"
+                f"Use /adduser <id> to add subscribers"
+            )
+        else:
+            await message.reply(
+                "Welcome to Revolt AI Trading.\n\n"
+                "This bot requires a subscription.\n"
+                "Contact the admin to get access.\n\n"
+                f"Your ID: {uid}\n"
+                "Share this with the admin."
+            )
+
+
 @router.message(Command("adduser"))
 async def cmd_adduser_direct(message: Message):
     """Add a subscriber directly."""
