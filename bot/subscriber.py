@@ -46,7 +46,10 @@ def _generate_wallet() -> tuple[str, str]:
 
 @router.message(Command("adduser"))
 async def cmd_adduser(message: Message):
+    logger.info("ADDUSER called by user %s (admin check: %s in %s)",
+                message.from_user.id, message.from_user.id, ADMIN_IDS)
     if message.from_user.id not in ADMIN_IDS:
+        await message.reply("Not authorized.")
         return
 
     args = message.text.split()
