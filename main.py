@@ -156,6 +156,7 @@ async def main() -> None:
     )
 
     from bot.subscriber import router as subscriber_router
+    from bot.signal_relay import set_relay_bot
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(subscriber_router)  # subscriber routes first (handles /start in DMs)
@@ -189,6 +190,9 @@ async def main() -> None:
     logger.info("LaserStream: queued for startup")
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
+    # Set bot reference for signal relay
+    set_relay_bot(bot)
+
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)

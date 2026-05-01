@@ -1143,6 +1143,22 @@ async def run_once() -> tuple[int, int]:
                 "Scanner: TG AUTO-BUY %s at MC=%s | 0.1 SOL | bal=%.4f",
                 token_name[:20], entry_mc, state.paper_balance,
             )
+
+            # Relay to subscribers
+            try:
+                from bot.signal_relay import relay_trade_to_subscribers
+                await relay_trade_to_subscribers(
+                    token_address=mint,
+                    token_name=token_name,
+                    entry_mc=entry_mc,
+                    tp_x=8.0,
+                    sl_pct=20.0,
+                    pattern_type="tg_signal",
+                    trade_reasoning=f"AUTO-BUY from 4am channel",
+                    confidence=80.0,
+                )
+            except Exception:
+                pass
         except Exception as exc:
             logger.error("Scanner: TG auto-buy failed for %s: %s", mint[:12], exc)
 
@@ -1367,6 +1383,22 @@ async def run_once() -> tuple[int, int]:
                 state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_trades_today += 1
                 logger.info("Scanner: paper trade id=%s bal=%.4f SOL", pt.id, state.paper_balance)
+
+                # Relay trade to subscribers (30s delay, runs in background)
+                try:
+                    from bot.signal_relay import relay_trade_to_subscribers
+                    await relay_trade_to_subscribers(
+                        token_address=scored.get("mint", ""),
+                        token_name=scored.get("name", "?"),
+                        entry_mc=fresh_mc,
+                        tp_x=scored.get("trade_tp_x", 3.0),
+                        sl_pct=scored.get("trade_sl_pct", 30.0),
+                        pattern_type=scored.get("profile_tag") or scored.get("source"),
+                        trade_reasoning=scored.get("trade_reasoning"),
+                        confidence=scored.get("confidence_score", 0),
+                    )
+                except Exception as exc:
+                    logger.debug("Signal relay failed: %s", exc)
             except Exception as exc:
                 logger.error("Scanner: paper trade DB failed for %s: %s", scored.get("mint", "?")[:12], exc)
 
