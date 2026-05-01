@@ -303,9 +303,14 @@ async def _check_open_trades(bot) -> None:
                 continue
 
             # Profit trailing stop: once peak crosses the profit trail
-            # trigger (e.g. 2.0x), follow the peak down by profit_trail_pct.
-            pt_trigger = float(cfg.get("profit_trail_trigger", 2.0) or 2.0)
-            pt_pct     = float(cfg.get("profit_trail_pct",     0.15) or 0.15)
+            # trigger, follow the peak down by profit_trail_pct.
+            # 4am trades get wider settings to let runners run.
+            if is_tg_signal:
+                pt_trigger = 3.0   # 4am: don't trail until 3x
+                pt_pct = 0.30      # 4am: 30% below peak
+            else:
+                pt_trigger = float(cfg.get("profit_trail_trigger", 2.0) or 2.0)
+                pt_pct     = float(cfg.get("profit_trail_pct",     0.15) or 0.15)
             if peak_mult >= pt_trigger:
                 trail_stop_mult = peak_mult * (1.0 - pt_pct)
                 if current_mult <= trail_stop_mult:
@@ -451,7 +456,7 @@ async def _check_open_trades(bot) -> None:
             if resolved and resolved["trail_enabled"]:
                 if is_tg_signal:
                     # 4am trades: trail at 30% below peak, activate at 3x
-                    trigger_mult = 4.0   # don't trail until 3x (1.0 + 3.0)
+                    trigger_mult = 3.0   # activate at 3x peak
                     trail_pct = 0.30     # 30% below peak
                 else:
                     trigger_mult = 1.0 + float(resolved["trail_trigger"])
