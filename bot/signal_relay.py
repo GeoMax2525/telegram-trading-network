@@ -167,21 +167,44 @@ async def _relay_delayed(
                     s.paper_balance -= 0.1
                     await session.commit()
 
-            # Notify subscriber via DM
+            # Send full trade card to subscriber DM
             if _bot:
                 try:
+                    mc_str = f"${fresh_mc / 1_000_000:.2f}M" if fresh_mc >= 1_000_000 else f"${fresh_mc / 1000:.1f}K"
+                    tp_mc = fresh_mc * tp_x
+                    sl_mc = fresh_mc * (1 - sl_pct / 100)
+                    tp_mc_str = f"${tp_mc / 1_000_000:.2f}M" if tp_mc >= 1_000_000 else f"${tp_mc / 1000:.1f}K"
+                    sl_mc_str = f"${sl_mc / 1000:.1f}K"
+
+                    card = "\n".join([
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                        "⚡ <b>NEW TRADE — AI SIGNAL</b>",
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                        "",
+                        f"🪙 <b>{token_name}</b>",
+                        f"📋 <code>{token_address}</code>",
+                        "",
+                        f"📊 Market Cap: <b>{mc_str}</b>",
+                        f"💰 Size: 0.1 SOL",
+                        f"🎯 TP: {tp_x:.1f}x ({tp_mc_str})",
+                        f"🛑 SL: {sl_pct:.0f}% ({sl_mc_str})",
+                        f"📈 Confidence: {confidence:.0f}/100",
+                        "",
+                        f"📝 <i>{trade_reasoning or 'AI signal'}</i>",
+                        "",
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                        f"📊 <a href='https://dexscreener.com/solana/{token_address}'>Chart</a> | "
+                        f"<a href='https://solscan.io/token/{token_address}'>Solscan</a>",
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                    ])
+
                     await _bot.send_message(
-                        sub.telegram_id,
-                        f"⚡ <b>NEW TRADE OPENED</b>\n\n"
-                        f"🪙 {token_name}\n"
-                        f"MC: ${fresh_mc / 1000:.1f}K\n"
-                        f"Size: 0.1 SOL\n"
-                        f"TP: {tp_x:.1f}x | SL: {sl_pct:.0f}%\n\n"
-                        f"<i>{trade_reasoning or 'AI signal'}</i>",
+                        sub.telegram_id, card,
                         parse_mode="HTML",
+                        disable_web_page_preview=True,
                     )
                 except Exception:
-                    pass  # user may have blocked the bot
+                    pass
 
             opened += 1
 
@@ -195,25 +218,53 @@ async def _relay_delayed(
 
 async def notify_subscribers_close(
     token_name: str,
+    token_address: str,
     close_reason: str,
     pnl: float,
     multiplier: float,
+    peak_mult: float = 0,
 ):
-    """Notify all subscribers when a trade closes."""
+    """Notify all subscribers when a trade closes with full card."""
     if not _bot:
         return
 
     subs = await get_all_active_subscribers()
     emoji = "✅" if pnl >= 0 else "❌"
+    result_label = "WIN" if pnl >= 0 else "LOSS"
+
+    reason_labels = {
+        "tp_hit": "Take Profit Hit",
+        "sl_hit": "Stop Loss Hit",
+        "trail_hit": "Trailing Stop",
+        "breakeven_stop": "Break Even Stop",
+        "profit_trail": "Profit Trail",
+        "dead_token": "Token Died",
+        "dead_api": "Data Feed Lost",
+        "stale": "Stale (no movement)",
+        "expired": "Expired",
+        "manual_close": "Manual Close",
+    }
+    reason_str = reason_labels.get(close_reason, close_reason)
 
     for sub in subs:
         try:
+            card = "\n".join([
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"{emoji} <b>TRADE CLOSED — {result_label}</b>",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "",
+                f"🪙 <b>{token_name}</b>",
+                f"📋 <code>{token_address}</code>",
+                "",
+                f"📊 Result: <b>{multiplier:.1f}x</b>",
+                f"📈 Peak: {peak_mult:.1f}x",
+                f"💰 PnL: <b>{pnl:+.4f} SOL</b>",
+                f"📝 Reason: {reason_str}",
+                "",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            ])
             await _bot.send_message(
-                sub.telegram_id,
-                f"{emoji} <b>TRADE CLOSED</b>\n\n"
-                f"🪙 {token_name}\n"
-                f"Reason: {close_reason}\n"
-                f"Result: {multiplier:.1f}x | {pnl:+.4f} SOL",
+                sub.telegram_id, card,
                 parse_mode="HTML",
             )
         except Exception:
