@@ -84,6 +84,25 @@ class Base(DeclarativeBase):
     pass
 
 
+# ── Subscriber table — user accounts ────────────────────────────────────────
+
+class Subscriber(Base):
+    __tablename__ = "subscribers"
+
+    id              = Column(Integer,    primary_key=True, autoincrement=True)
+    telegram_id     = Column(BigInteger, nullable=False, unique=True, index=True)
+    username        = Column(String(64), nullable=True)
+    wallet_address  = Column(String(64), nullable=True)   # generated wallet public key
+    wallet_key_hash = Column(String(128), nullable=True)  # encrypted private key
+    status          = Column(String(16), nullable=False, default="active")  # active / suspended / expired
+    tier            = Column(String(16), nullable=False, default="basic")   # basic / pro / vip
+    paper_balance   = Column(Float,      nullable=False, default=20.0)
+    paper_pnl       = Column(Float,      nullable=False, default=0.0)
+    trade_mode      = Column(String(8),  nullable=False, default="paper")   # paper / live
+    created_at      = Column(DateTime,   default=datetime.utcnow, nullable=False)
+    expires_at      = Column(DateTime,   nullable=True)
+
+
 # ── Tokens table (Agent 1 — Harvester) ───────────────────────────────────────
 
 class Token(Base):
@@ -3766,3 +3785,66 @@ async def get_tg_channel_reliability(channel: str) -> float:
             select(TgChannelStats).where(TgChannelStats.channel == channel)
         )).scalar_one_or_none()
         return row.reliability if row else 50.0
+
+
+# ── Subscriber helpers ──────────────────────────────────────────────────────
+
+async def get_subscriber(telegram_id: int) -> "Subscriber | None":
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Subscriber).where(Subscriber.telegram_id == telegram_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def create_subscriber(
+    telegram_id: int,
+    username: str | None,
+    wallet_address: str,
+    wallet_key_hash: str,
+    tier: str = "basic",
+) -> "Subscriber":
+    async with AsyncSessionLocal() as session:
+        sub = Subscriber(
+            telegram_id=telegram_id,
+            username=username,
+            wallet_address=wallet_address,
+            wallet_key_hash=wallet_key_hash,
+            tier=tier,
+            status="active",
+            paper_balance=20.0,
+            trade_mode="paper",
+        )
+        session.add(sub)
+        await session.commit()
+        await session.refresh(sub)
+        return sub
+
+
+async def get_all_active_subscribers() -> list["Subscriber"]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Subscriber).where(Subscriber.status == "active")
+        )
+        return list(result.scalars().all())
+
+
+async def set_subscriber_status(telegram_id: int, status: str) -> bool:
+    async with AsyncSessionLocal() as session:
+        sub = (await session.execute(
+            select(Subscriber).where(Subscriber.telegram_id == telegram_id)
+        )).scalar_one_or_none()
+        if sub:
+            sub.status = status
+            await session.commit()
+            return True
+        return False
+
+
+async def is_authorized(telegram_id: int) -> bool:
+    """Check if a user is an active subscriber or admin."""
+    from bot.config import ADMIN_IDS
+    if telegram_id in ADMIN_IDS:
+        return True
+    sub = await get_subscriber(telegram_id)
+    return sub is not None and sub.status == "active"

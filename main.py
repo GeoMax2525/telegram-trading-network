@@ -155,7 +155,10 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
     )
 
+    from bot.subscriber import router as subscriber_router
+
     dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(subscriber_router)  # subscriber routes first (handles /start in DMs)
     dp.include_router(keybot_router)
     dp.include_router(router)
 
