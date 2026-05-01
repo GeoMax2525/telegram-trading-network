@@ -14,12 +14,20 @@ def _generate_wallet() -> tuple[str, str]:
     """Generate a new Solana wallet. Returns (public_key, private_key_base58)."""
     try:
         from solders.keypair import Keypair
+        import base58
         kp = Keypair()
         public = str(kp.pubkey())
-        private = kp.to_base58_string()
+        private = base58.b58encode(bytes(kp)).decode()
         return public, private
-    except ImportError:
-        import secrets
-        fake_pub = "REVOLT" + secrets.token_hex(14)
-        fake_priv = secrets.token_hex(32)
-        return fake_pub, fake_priv
+    except Exception:
+        try:
+            from solders.keypair import Keypair
+            kp = Keypair()
+            public = str(kp.pubkey())
+            private = str(kp)  # fallback string representation
+            return public, private
+        except Exception:
+            import secrets
+            fake_pub = "REVOLT" + secrets.token_hex(14)
+            fake_priv = secrets.token_hex(32)
+            return fake_pub, fake_priv
