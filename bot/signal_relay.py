@@ -78,8 +78,11 @@ async def relay_trade_to_subscribers(
     Called after the admin's trade opens. Waits 30s then opens
     the same trade for each active subscriber.
     """
-    # Post CA to external group immediately (no delay)
-    asyncio.create_task(post_ca_to_group(token_address, token_name))
+    # Post CA to external group after 10 second delay (your trade fills first)
+    async def _delayed_ca_post():
+        await asyncio.sleep(10)
+        await post_ca_to_group(token_address, token_name)
+    asyncio.create_task(_delayed_ca_post())
 
     # Relay to subscribers with delay (runs in background)
     asyncio.create_task(_relay_delayed(
