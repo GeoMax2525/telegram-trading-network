@@ -3368,6 +3368,25 @@ async def cmd_testgmgn(message: Message):
 # /start handled by subscriber.py
 
 
+@router.message(Command("adduser"))
+async def cmd_adduser_relay(message: Message):
+    """Relay to subscriber module."""
+    from bot.subscriber import cmd_adduser
+    await cmd_adduser(message)
+
+
+@router.message(Command("removeuser"))
+async def cmd_removeuser_relay(message: Message):
+    from bot.subscriber import cmd_removeuser
+    await cmd_removeuser(message)
+
+
+@router.message(Command("subscribers"))
+async def cmd_subscribers_relay(message: Message):
+    from bot.subscriber import cmd_subscribers
+    await cmd_subscribers(message)
+
+
 # ── /scan <address> ───────────────────────────────────────────────────────────
 
 @router.message(Command("scan"))
