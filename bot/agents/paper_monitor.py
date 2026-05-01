@@ -213,6 +213,7 @@ async def _check_open_trades(bot) -> None:
                 await close_paper_trade(pt.id, "reset", 0.0, pt.peak_mc, pt.peak_multiple)
                 continue
             current_mult = current_mc / entry_mc
+            is_tg_signal = "tg_signal" in (pt.pattern_type or "")
             peak_mc = max(pt.peak_mc or 0, current_mc)
             peak_mult = max(pt.peak_multiple or 1.0, current_mult)
 
@@ -446,12 +447,18 @@ async def _check_open_trades(bot) -> None:
                     pass
                 continue
 
-            # Trailing stop: once peak_mult crosses (1 + trail_trigger),
-            # abandon the fixed SL and follow the peak down by trail_pct.
+            # Trailing stop — 4am signals get wider trail + later activation
             if resolved and resolved["trail_enabled"]:
-                trigger_mult = 1.0 + float(resolved["trail_trigger"])
+                if is_tg_signal:
+                    # 4am trades: trail at 30% below peak, activate at 3x
+                    trigger_mult = 4.0   # don't trail until 3x (1.0 + 3.0)
+                    trail_pct = 0.30     # 30% below peak
+                else:
+                    trigger_mult = 1.0 + float(resolved["trail_trigger"])
+                    trail_pct = float(resolved["trail_pct"])
+
                 if peak_mult >= trigger_mult:
-                    trail_stop_mult = peak_mult * (1.0 - float(resolved["trail_pct"]))
+                    trail_stop_mult = peak_mult * (1.0 - trail_pct)
                     if current_mult <= trail_stop_mult:
                         remaining_sol = sol * (remaining / 100.0)
                         pnl = round(realized + remaining_sol * (current_mult - 1), 4)
@@ -482,11 +489,14 @@ async def _check_open_trades(bot) -> None:
             sl_threshold = 1.0 - (pt.stop_loss_pct / 100.0)
             catastrophic_threshold = 0.50  # 50% drop = rug, always exit
 
-            if age_hours < (5.0 / 60.0):
-                # Phase 1: first 5 min — only exit on catastrophic rug
+            # 4am signals get 10 min grace, regular get 5 min
+            grace_min = 10.0 if is_tg_signal else 5.0
+
+            if age_hours < (grace_min / 60.0):
+                # Phase 1: grace period — only exit on catastrophic rug
                 should_sl = current_mult <= catastrophic_threshold
             else:
-                # Phase 2: after 5 min — full tight SL (15-20%)
+                # Phase 2: after grace — full tight SL
                 should_sl = current_mult <= sl_threshold
 
             if should_sl:
