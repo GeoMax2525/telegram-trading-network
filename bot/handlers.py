@@ -1090,6 +1090,13 @@ async def _subscriber_hub_keyboard(sub) -> InlineKeyboardMarkup:
             callback_data=f"subhub:close:{pt.id}",
         ))
 
+    # One-tap exit-everything button (only when there ARE open trades)
+    if open_trades:
+        builder.row(InlineKeyboardButton(
+            text=f"🗑️ Close All ({len(open_trades)})",
+            callback_data="subhub:close_all",
+        ))
+
     builder.row(
         InlineKeyboardButton(text="📊 My Stats", callback_data="subhub:stats"),
         InlineKeyboardButton(text="👛 My Wallet", callback_data="subhub:wallet"),
@@ -1163,6 +1170,58 @@ async def cb_subhub(callback: CallbackQuery):
                 await session.commit()
                 sub = s
         await callback.answer(f"Closed at {mult:.2f}x: {pnl:+.4f} SOL")
+        try:
+            text = await _build_subscriber_hub_text(sub)
+            await callback.message.edit_text(
+                text, parse_mode="HTML",
+                reply_markup=await _subscriber_hub_keyboard(sub),
+            )
+        except Exception:
+            pass
+        return
+
+    if action == "close_all":
+        from database.models import (
+            AsyncSessionLocal, PaperTrade, select as _select, close_paper_trade,
+            Subscriber as _Sub, get_subscriber_paper_trades,
+        )
+        from bot.scanner import fetch_current_market_cap
+        open_trades = [
+            t for t in await get_subscriber_paper_trades(sub.telegram_id, limit=50)
+            if t.status == "open"
+        ]
+        if not open_trades:
+            await callback.answer("No open trades to close.")
+            return
+        closed = 0
+        total_pnl = 0.0
+        for pt in open_trades:
+            try:
+                cur_mc = await fetch_current_market_cap(pt.token_address) or (pt.entry_mc or 0)
+            except Exception:
+                cur_mc = pt.entry_mc or 0
+            entry_mc = pt.entry_mc or 0
+            mult = (cur_mc / entry_mc) if entry_mc > 0 else 1.0
+            sol = pt.paper_sol_spent or 0
+            pnl = round(sol * (mult - 1), 4)
+            total_pnl += pnl
+            await close_paper_trade(
+                pt.id, "manual_close", pnl, pt.peak_mc, pt.peak_multiple,
+            )
+            async with AsyncSessionLocal() as session:
+                s = (await session.execute(
+                    _select(_Sub).where(_Sub.telegram_id == sub.telegram_id)
+                )).scalar_one_or_none()
+                if s:
+                    s.paper_balance = round((s.paper_balance or 0) + sol + pnl, 4)
+                    s.paper_pnl = round((s.paper_pnl or 0) + pnl, 4)
+                    await session.commit()
+                    sub = s
+            closed += 1
+        await callback.answer(
+            f"Closed {closed} trade(s). Net PnL: {total_pnl:+.4f} SOL",
+            show_alert=True,
+        )
         try:
             text = await _build_subscriber_hub_text(sub)
             await callback.message.edit_text(
