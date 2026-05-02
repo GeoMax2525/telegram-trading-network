@@ -959,97 +959,88 @@ async def _build_hub_text(autotrade: bool) -> str:
 # scanner internals, or admin controls.
 
 async def _build_subscriber_hub_text(sub) -> str:
-    import html as _html
+    """Minimal subscriber /hub. Plain text only — no parse_mode, no live MC
+    fetches. Anything that's failed before is gone. Add features back once
+    we confirm this lands."""
     from database.models import (
         get_subscriber_paper_trade_stats, get_subscriber_paper_trades,
+        get_keybot_settings as _kb,
     )
-    from bot.scanner import fetch_current_market_cap
 
-    DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    DIVIDER = "━" * 30
 
     stats = await get_subscriber_paper_trade_stats(sub.telegram_id)
-    trades = await get_subscriber_paper_trades(sub.telegram_id, limit=50)
-
+    trades = await get_subscriber_paper_trades(sub.telegram_id, limit=20)
     open_trades = [t for t in trades if t.status == "open"]
     closed_trades = [t for t in trades if t.status == "closed"][:5]
 
-    balance = float(sub.paper_balance or 20.0)
+    balance = float(sub.paper_balance or 0.0)
+    pnl_total = float(stats.get("total_pnl") or 0)
     starting = 20.0
-    pnl_total = float(stats["total_pnl"])
     pnl_pct = ((balance - starting) / starting * 100) if starting > 0 else 0
     pnl_emoji = "🟢" if pnl_total >= 0 else "🔴"
 
-    mode_label = "📋 PAPER SIM" if sub.trade_mode == "paper" else "🟢 LIVE"
+    mode_label = "PAPER" if (sub.trade_mode or "paper") == "paper" else "LIVE"
 
-    from database.models import get_keybot_settings as _kb
     sub_kb = await _kb(sub.telegram_id)
-    sub_dec_mode = (sub_kb.decision_mode if sub_kb and sub_kb.decision_mode else "ai").lower()
-    sub_dec_badge = "🤖 AI" if sub_dec_mode == "ai" else "✋ Manual"
+    dec = (sub_kb.decision_mode if sub_kb and sub_kb.decision_mode else "ai").lower()
+    dec_label = "🤖 AI" if dec == "ai" else "✋ Manual"
 
     lines = [
-        "<b>YOUR TRADING HUB</b>",
-        f"Mode: {mode_label}  |  Decision: {sub_dec_badge}",
-        f"Balance: <b>{balance:.2f}</b> / {starting:.0f} SOL  |  "
-        f"P&amp;L: {pnl_emoji} {pnl_total:+.4f} SOL ({pnl_pct:+.1f}%)",
+        DIVIDER,
+        "YOUR TRADING HUB",
+        f"Mode: {mode_label}  |  Decision: {dec_label}",
+        f"Balance: {balance:.2f} / {starting:.0f} SOL",
+        f"PnL: {pnl_emoji} {pnl_total:+.4f} SOL ({pnl_pct:+.1f}%)",
         DIVIDER,
         "",
-        "📊 <b>YOUR PERFORMANCE</b>",
-        f"Wins: {stats['wins']} / {stats['closed']} closed  |  "
-        f"Win Rate: {stats['win_rate']}%",
-        f"Open: {stats['open_count']}  |  Total PnL: {pnl_total:+.4f} SOL",
+        "PERFORMANCE",
+        f"Wins: {stats.get('wins', 0)} / {stats.get('closed', 0)} closed",
+        f"Win Rate: {stats.get('win_rate', 0)}%",
+        f"Open: {stats.get('open_count', 0)}",
         DIVIDER,
         "",
     ]
 
     if open_trades:
-        unrealized = 0.0
-        lines.append(f"📂 <b>OPEN TRADES ({len(open_trades)})</b>")
+        lines.append(f"OPEN TRADES ({len(open_trades)})")
         lines.append("")
         for idx, pt in enumerate(open_trades, 1):
             entry_mc = pt.entry_mc or 0
-            try:
-                cur_mc = await fetch_current_market_cap(pt.token_address) or entry_mc
-            except Exception:
-                cur_mc = entry_mc
-            mult = (cur_mc / entry_mc) if entry_mc > 0 else 1.0
             sol = pt.paper_sol_spent or 0
-            unr = sol * (mult - 1)
-            unrealized += unr
-            emoji = "🟢" if mult >= 1.0 else "🔴"
-            name = _html.escape((pt.token_name or "?")[:24])
+            name = (pt.token_name or "?")[:24]
             mc_str = (
-                f"${cur_mc/1_000_000:.2f}M" if cur_mc >= 1_000_000
-                else f"${cur_mc/1000:.1f}K"
+                f"${entry_mc/1_000_000:.2f}M" if entry_mc >= 1_000_000
+                else f"${entry_mc/1000:.1f}K"
             )
-            lines.append(f"{idx}. ${name}  {mult:.2f}x {emoji}")
-            lines.append(f"   MC: {mc_str}  |  Size: {sol:.2f} SOL  |  Unr: {unr:+.4f} SOL")
-            lines.append(f"   <code>{pt.token_address}</code>")
+            lines.append(f"{idx}. ${name}")
+            lines.append(f"   Entry MC: {mc_str}  |  Size: {sol:.2f} SOL")
+            lines.append(f"   {pt.token_address or ''}")
             lines.append("")
-        lines.append(f"Unrealized total: <b>{unrealized:+.4f} SOL</b>")
         lines.append(DIVIDER)
         lines.append("")
     else:
-        lines.append("📂 <b>OPEN TRADES</b>")
+        lines.append("OPEN TRADES")
         lines.append("None — waiting for next signal")
         lines.append(DIVIDER)
         lines.append("")
 
     if closed_trades:
-        lines.append("📋 <b>RECENT TRADES</b>")
+        lines.append("RECENT TRADES")
         for pt in closed_trades:
-            name = _html.escape((pt.token_name or "?")[:20])
+            name = (pt.token_name or "?")[:20]
             pnl = pt.paper_pnl_sol or 0
             mult = pt.peak_multiple or 0
             if pnl > 0:
-                lines.append(f"✅ {name}  {mult:.1f}x peak  {pnl:+.4f} SOL")
+                lines.append(f"WIN  {name}  {mult:.1f}x  {pnl:+.4f} SOL")
             else:
                 reason = (pt.close_reason or "?").replace("_", " ")
-                lines.append(f"❌ {name}  {reason}  {pnl:+.4f} SOL")
+                lines.append(f"LOSS {name}  {reason}  {pnl:+.4f} SOL")
         lines.append(DIVIDER)
         lines.append("")
 
-    lines.append("👛 <b>YOUR WALLET</b>")
-    lines.append(f"<code>{sub.wallet_address or '(none)'}</code>")
+    lines.append("WALLET")
+    lines.append(sub.wallet_address or "(none)")
     lines.append(DIVIDER)
 
     return "\n".join(lines)
@@ -1184,25 +1175,26 @@ async def cmd_hub(message: Message):
         if sub is None or sub.status != "active":
             await message.reply("⛔ Not an active subscriber. Send /start.")
             return
+        # Plain text — no parse_mode. Bot's default Markdown can choke on
+        # token names containing _ * ` etc. Plain text always renders.
         try:
             text = await _build_subscriber_hub_text(sub)
-            await message.reply(
-                text, parse_mode="HTML",
-                reply_markup=await _subscriber_hub_keyboard(sub),
-            )
+            try:
+                kb = await _subscriber_hub_keyboard(sub)
+            except Exception as kb_exc:
+                logger.error(
+                    "Subscriber hub keyboard failed for %s: %s",
+                    sub.telegram_id, kb_exc, exc_info=True,
+                )
+                kb = None
+            await message.reply(text, parse_mode="", reply_markup=kb)
         except Exception as exc:
             logger.error(
                 "Subscriber hub render failed for %s: %s",
                 sub.telegram_id, exc, exc_info=True,
             )
-            # parse_mode="HTML" with escaped text — bot's default is Markdown
-            # which chokes on exception text containing _ * etc.
             try:
-                import html as _h
-                await message.reply(
-                    f"⛔ Hub error: {_h.escape(str(exc))}",
-                    parse_mode="HTML",
-                )
+                await message.reply(f"Hub error: {exc}", parse_mode="")
             except Exception:
                 pass
         return
