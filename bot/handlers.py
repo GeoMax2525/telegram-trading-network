@@ -1171,6 +1171,7 @@ async def cmd_hub(message: Message):
 
     # Subscriber DM: render their own scoped dashboard, never HQ data
     if message.chat.type == "private" and message.from_user.id not in ADMIN_IDS:
+        from database.models import get_subscriber
         sub = await get_subscriber(message.from_user.id)
         if sub is None or sub.status != "active":
             await message.reply("⛔ Not an active subscriber. Send /start.")
