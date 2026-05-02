@@ -943,11 +943,240 @@ async def _build_hub_text(autotrade: bool) -> str:
     return "\n".join(lines)
 
 
+# ── Subscriber-scoped /hub view ─────────────────────────────────────────────
+# Renders only the subscriber's own ledger — their balance, their open trades,
+# their recent closes, their win rate. Never shows HQ stats, agent status,
+# scanner internals, or admin controls.
+
+async def _build_subscriber_hub_text(sub) -> str:
+    from database.models import (
+        get_subscriber_paper_trade_stats, get_subscriber_paper_trades,
+    )
+    from bot.scanner import fetch_current_market_cap
+
+    stats = await get_subscriber_paper_trade_stats(sub.telegram_id)
+    trades = await get_subscriber_paper_trades(sub.telegram_id, limit=50)
+
+    open_trades = [t for t in trades if t.status == "open"]
+    closed_trades = [t for t in trades if t.status == "closed"][:5]
+
+    balance = float(sub.paper_balance or 20.0)
+    starting = 20.0
+    pnl_total = float(stats["total_pnl"])
+    pnl_pct = ((balance - starting) / starting * 100) if starting > 0 else 0
+    pnl_emoji = "🟢" if pnl_total >= 0 else "🔴"
+
+    mode_label = "📋 PAPER SIM" if sub.trade_mode == "paper" else "🟢 LIVE"
+
+    lines = [
+        "<b>YOUR TRADING HUB</b>",
+        f"Mode: {mode_label}",
+        f"Balance: <b>{balance:.2f}</b> / {starting:.0f} SOL  |  "
+        f"P&amp;L: {pnl_emoji} {pnl_total:+.4f} SOL ({pnl_pct:+.1f}%)",
+        DIVIDER,
+        "",
+        "📊 <b>YOUR PERFORMANCE</b>",
+        f"Wins: {stats['wins']} / {stats['closed']} closed  |  "
+        f"Win Rate: {stats['win_rate']}%",
+        f"Open: {stats['open_count']}  |  Total PnL: {pnl_total:+.4f} SOL",
+        DIVIDER,
+        "",
+    ]
+
+    if open_trades:
+        unrealized = 0.0
+        lines.append(f"📂 <b>OPEN TRADES ({len(open_trades)})</b>")
+        lines.append("")
+        for idx, pt in enumerate(open_trades, 1):
+            entry_mc = pt.entry_mc or 0
+            try:
+                cur_mc = await fetch_current_market_cap(pt.token_address) or entry_mc
+            except Exception:
+                cur_mc = entry_mc
+            mult = (cur_mc / entry_mc) if entry_mc > 0 else 1.0
+            sol = pt.paper_sol_spent or 0
+            unr = sol * (mult - 1)
+            unrealized += unr
+            emoji = "🟢" if mult >= 1.0 else "🔴"
+            name = (pt.token_name or "?")[:24]
+            mc_str = (
+                f"${cur_mc/1_000_000:.2f}M" if cur_mc >= 1_000_000
+                else f"${cur_mc/1000:.1f}K"
+            )
+            lines.append(f"{idx}. ${name}  {mult:.2f}x {emoji}")
+            lines.append(f"   MC: {mc_str}  |  Size: {sol:.2f} SOL  |  Unr: {unr:+.4f} SOL")
+            lines.append(f"   <code>{pt.token_address}</code>")
+            lines.append("")
+        lines.append(f"Unrealized total: <b>{unrealized:+.4f} SOL</b>")
+        lines.append(DIVIDER)
+        lines.append("")
+    else:
+        lines.append("📂 <b>OPEN TRADES</b>")
+        lines.append("None — waiting for next signal")
+        lines.append(DIVIDER)
+        lines.append("")
+
+    if closed_trades:
+        lines.append("📋 <b>RECENT TRADES</b>")
+        for pt in closed_trades:
+            name = (pt.token_name or "?")[:20]
+            pnl = pt.paper_pnl_sol or 0
+            mult = pt.peak_multiple or 0
+            if pnl > 0:
+                lines.append(f"✅ {name}  {mult:.1f}x peak  {pnl:+.4f} SOL")
+            else:
+                reason = (pt.close_reason or "?").replace("_", " ")
+                lines.append(f"❌ {name}  {reason}  {pnl:+.4f} SOL")
+        lines.append(DIVIDER)
+        lines.append("")
+
+    lines.append("👛 <b>YOUR WALLET</b>")
+    lines.append(f"<code>{sub.wallet_address or '(none)'}</code>")
+    lines.append(DIVIDER)
+
+    return "\n".join(lines)
+
+
+async def _subscriber_hub_keyboard(sub) -> InlineKeyboardMarkup:
+    from database.models import get_subscriber_paper_trades
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🔄 Refresh", callback_data="subhub:refresh"))
+
+    open_trades = [
+        t for t in await get_subscriber_paper_trades(sub.telegram_id, limit=20)
+        if t.status == "open"
+    ]
+    for idx, pt in enumerate(open_trades[:5], 1):
+        name = (pt.token_name or "?")[:15]
+        builder.row(InlineKeyboardButton(
+            text=f"❌ Close #{idx} — {name}",
+            callback_data=f"subhub:close:{pt.id}",
+        ))
+
+    builder.row(
+        InlineKeyboardButton(text="📊 My Stats", callback_data="subhub:stats"),
+        InlineKeyboardButton(text="👛 My Wallet", callback_data="subhub:wallet"),
+    )
+    return builder.as_markup()
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("subhub:"))
+async def cb_subhub(callback: CallbackQuery):
+    """Subscriber hub callbacks. Each action enforces ownership: a subscriber
+    can only close their own trades, never anyone else's."""
+    sub = await get_subscriber(callback.from_user.id)
+    if sub is None or sub.status != "active":
+        await callback.answer("⛔ Not an active subscriber.", show_alert=True)
+        return
+
+    action = callback.data.split(":", 1)[1]
+
+    if action == "refresh":
+        await callback.answer("🔄 Refreshing…")
+        try:
+            text = await _build_subscriber_hub_text(sub)
+            await callback.message.edit_text(
+                text, parse_mode="HTML",
+                reply_markup=await _subscriber_hub_keyboard(sub),
+            )
+        except Exception:
+            pass
+        return
+
+    if action.startswith("close:"):
+        try:
+            pt_id = int(action.split(":", 1)[1])
+        except ValueError:
+            await callback.answer("⚠️ Bad trade id")
+            return
+        from database.models import (
+            AsyncSessionLocal, PaperTrade, select as _select, close_paper_trade,
+            Subscriber as _Sub,
+        )
+        async with AsyncSessionLocal() as session:
+            pt = (await session.execute(
+                _select(PaperTrade).where(PaperTrade.id == pt_id)
+            )).scalar_one_or_none()
+        if pt is None or pt.subscriber_id != sub.telegram_id:
+            await callback.answer("⛔ Not your trade.", show_alert=True)
+            return
+        if pt.status != "open":
+            await callback.answer("Trade already closed.")
+            return
+        # Close at current MC
+        from bot.scanner import fetch_current_market_cap
+        try:
+            cur_mc = await fetch_current_market_cap(pt.token_address) or (pt.entry_mc or 0)
+        except Exception:
+            cur_mc = pt.entry_mc or 0
+        entry_mc = pt.entry_mc or 0
+        mult = (cur_mc / entry_mc) if entry_mc > 0 else 1.0
+        sol = pt.paper_sol_spent or 0
+        pnl = round(sol * (mult - 1), 4)
+        await close_paper_trade(pt.id, "manual_close", pnl, pt.peak_mc, pt.peak_multiple)
+        # Refund subscriber balance
+        async with AsyncSessionLocal() as session:
+            s = (await session.execute(
+                _select(_Sub).where(_Sub.telegram_id == sub.telegram_id)
+            )).scalar_one_or_none()
+            if s:
+                s.paper_balance = round((s.paper_balance or 0) + sol + pnl, 4)
+                s.paper_pnl = round((s.paper_pnl or 0) + pnl, 4)
+                await session.commit()
+                sub = s
+        await callback.answer(f"Closed at {mult:.2f}x: {pnl:+.4f} SOL")
+        try:
+            text = await _build_subscriber_hub_text(sub)
+            await callback.message.edit_text(
+                text, parse_mode="HTML",
+                reply_markup=await _subscriber_hub_keyboard(sub),
+            )
+        except Exception:
+            pass
+        return
+
+    if action == "stats":
+        from database.models import get_subscriber_paper_trade_stats
+        stats = await get_subscriber_paper_trade_stats(sub.telegram_id)
+        await callback.answer(
+            f"Closed: {stats['closed']}  |  Wins: {stats['wins']} ({stats['win_rate']}% WR)\n"
+            f"PnL: {stats['total_pnl']:+.4f} SOL  |  Open: {stats['open_count']}",
+            show_alert=True,
+        )
+        return
+
+    if action == "wallet":
+        await callback.answer(
+            f"Wallet: {sub.wallet_address}\n"
+            f"Balance: {sub.paper_balance:.2f} SOL ({sub.trade_mode})",
+            show_alert=True,
+        )
+        return
+
+
 @router.message(Command("hub"))
 async def cmd_hub(message: Message):
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         await message.reply("⛔ /hub is only available in Callers HQ.")
         return
+
+    # Subscriber DM: render their own scoped dashboard, never HQ data
+    if message.chat.type == "private" and message.from_user.id not in ADMIN_IDS:
+        sub = await get_subscriber(message.from_user.id)
+        if sub is None or sub.status != "active":
+            await message.reply("⛔ Not an active subscriber. Send /start.")
+            return
+        try:
+            text = await _build_subscriber_hub_text(sub)
+            await message.reply(
+                text, parse_mode="HTML",
+                reply_markup=await _subscriber_hub_keyboard(sub),
+            )
+        except Exception as exc:
+            logger.error("Subscriber hub render failed for %s: %s", sub.telegram_id, exc)
+            await message.reply(f"⛔ Hub error: {exc}", parse_mode=None)
+        return
+
     try:
         text = await _build_hub_text(state.autotrade_enabled)
         await message.reply(
