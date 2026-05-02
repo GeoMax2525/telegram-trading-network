@@ -354,19 +354,33 @@ async def _build_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     - First open: creates a row with defaults (buy=0.5 SOL, tp=3x, sl=30%).
     - Subsequent opens: always reads saved values.
     - Open positions are shown inline with live MC fetched in parallel.
+
+    Subscriber users get their auto-generated Solana wallet (from their
+    Subscriber row) wired in as the KeyBot wallet, NOT the HQ env wallet.
+    Otherwise every subscriber would see the admin's wallet in /keybot.
     """
     s = await get_keybot_settings(user_id)
 
+    # Determine the wallet that belongs to THIS user. For subscribers it's
+    # the wallet auto-generated at /start (Subscriber.wallet_address). For
+    # admin (or any non-subscriber) it falls back to the HQ env wallet.
+    from database.models import get_subscriber
+    sub_row = await get_subscriber(user_id)
+    if sub_row and sub_row.wallet_address:
+        owner_wallet = sub_row.wallet_address
+    else:
+        owner_wallet = get_wallet_address()
+
     if s is None:
-        env_wallet = get_wallet_address()
         kwargs = {}
-        if env_wallet:
-            kwargs["wallet_address"] = env_wallet
+        if owner_wallet:
+            kwargs["wallet_address"] = owner_wallet
         s = await upsert_keybot_settings(user_id, **kwargs)
-    elif not s.wallet_address:
-        env_wallet = get_wallet_address()
-        if env_wallet:
-            s = await upsert_keybot_settings(user_id, wallet_address=env_wallet)
+    elif not s.wallet_address or (sub_row and s.wallet_address != owner_wallet):
+        # Heal stale wallet: subscribers who got the env wallet pre-fix
+        # need it overwritten with their own auto-generated wallet.
+        if owner_wallet:
+            s = await upsert_keybot_settings(user_id, wallet_address=owner_wallet)
 
     # Fetch SOL balance + open positions concurrently
     gathered = await asyncio.gather(

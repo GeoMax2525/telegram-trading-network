@@ -1101,6 +1101,7 @@ async def _subscriber_hub_keyboard(sub) -> InlineKeyboardMarkup:
 async def cb_subhub(callback: CallbackQuery):
     """Subscriber hub callbacks. Each action enforces ownership: a subscriber
     can only close their own trades, never anyone else's."""
+    from database.models import get_subscriber
     sub = await get_subscriber(callback.from_user.id)
     if sub is None or sub.status != "active":
         await callback.answer("⛔ Not an active subscriber.", show_alert=True)
@@ -3701,7 +3702,8 @@ async def cmd_start(message: Message):
                 f"/hub — your dashboard (open trades, PnL, win rate)\n"
                 f"/mywallet — wallet info\n"
                 f"/myperformance — your stats\n"
-                f"/keybot — trading settings (AI/Manual mode)"
+                f"/keybot — trading settings (AI/Manual mode)\n"
+                f"/exportkey — get your private key (to send SOL via Phantom)"
             )
         else:
             await message.reply("Your account is suspended. Contact admin.")
@@ -3995,6 +3997,36 @@ async def cmd_setparam(message: Message):
 
 
 # ── /sharetoggle — flip external CA broadcast on/off ────────────────────────
+
+@router.message(Command("exportkey"))
+async def cmd_exportkey(message: Message):
+    """Re-show the subscriber's private key so they can import it into
+    Phantom / another wallet. DM only — refuses to respond in groups.
+    Sends as a Telegram spoiler so it doesn't render in the timeline."""
+    if message.chat.type != "private":
+        await message.reply("⛔ Use /exportkey in a private chat with the bot.")
+        return
+    from database.models import get_subscriber
+    sub = await get_subscriber(message.from_user.id)
+    if sub is None or sub.status != "active":
+        await message.reply("⛔ Not an active subscriber.")
+        return
+    if not sub.wallet_key_hash:
+        await message.reply("⛔ No private key on file. Contact admin.")
+        return
+    await message.reply(
+        "🔐 <b>Your Private Key</b>\n\n"
+        f"Wallet: <code>{sub.wallet_address}</code>\n\n"
+        f"Private key (tap to reveal):\n"
+        f"<tg-spoiler><code>{sub.wallet_key_hash}</code></tg-spoiler>\n\n"
+        f"⚠️ <b>NEVER share this with anyone.</b> Anyone with this key "
+        f"controls your wallet and can drain it.\n\n"
+        f"To withdraw or send SOL: import this key into Phantom or another "
+        f"Solana wallet, then send normally from there. Delete this message "
+        f"after saving the key.",
+        parse_mode="HTML",
+    )
+
 
 @router.message(Command("aimode"))
 async def cmd_aimode(message: Message):
