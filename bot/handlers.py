@@ -440,6 +440,16 @@ async def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
     # Row 2: Live trading — locked
     builder.row(InlineKeyboardButton(text="🟢 Live Trading: LOCKED 🔒", callback_data="hub:live_locked"))
 
+    # Row 2b: External CA broadcast toggle (Phanes group)
+    try:
+        from database.models import get_param as _get_param
+        ext_v = await _get_param("external_ca_post_enabled")
+        ext_on = ext_v is None or ext_v >= 0.5
+    except Exception:
+        ext_on = True
+    ext_label = "📤 Share to Group: ✅ ON" if ext_on else "📤 Share to Group: ❌ OFF"
+    builder.row(InlineKeyboardButton(text=ext_label, callback_data="hub:toggle_extpost"))
+
     # Individual close buttons for each open paper trade
     try:
         open_trades = await get_open_paper_trades()
@@ -990,6 +1000,27 @@ async def cb_hub(callback: CallbackQuery):
             "Use /autotrade live when ready.",
             show_alert=True,
         )
+
+    elif action == "toggle_extpost":
+        from database.models import get_param as _get_param
+        cur = await _get_param("external_ca_post_enabled")
+        cur_on = cur is None or cur >= 0.5
+        new_val = 0.0 if cur_on else 1.0
+        await set_param(
+            "external_ca_post_enabled", new_val,
+            f"Toggled via /hub by admin {callback.from_user.id}",
+        )
+        await callback.answer(
+            "📤 Share to external group: OFF" if cur_on else "📤 Share to external group: ON ✅"
+        )
+        try:
+            text = await _build_hub_text(state.autotrade_enabled)
+            await callback.message.edit_text(
+                text, parse_mode="HTML",
+                reply_markup=await _hub_keyboard(state.autotrade_enabled),
+            )
+        except Exception:
+            pass
 
     elif action == "reset_confirm":
         await callback.answer()
@@ -3679,6 +3710,29 @@ async def cmd_setparam(message: Message):
     await message.reply(f"✅ {name}: {old_str} → {value}")
     logger.info("setparam: %s %s -> %s by admin %d",
                 name, old_value, value, message.from_user.id)
+
+
+# ── /sharetoggle — flip external CA broadcast on/off ────────────────────────
+
+@router.message(Command("sharetoggle"))
+async def cmd_sharetoggle(message: Message):
+    """Toggle whether each new trade's CA is auto-posted to the external
+    Phanes group via Telethon. Admin-only."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from database.models import get_param as _get_param
+    cur = await _get_param("external_ca_post_enabled")
+    cur_on = cur is None or cur >= 0.5
+    new_val = 0.0 if cur_on else 1.0
+    await set_param(
+        "external_ca_post_enabled", new_val,
+        f"Toggled via /sharetoggle by admin {message.from_user.id}",
+    )
+    state_str = "ON ✅" if not cur_on else "OFF"
+    await message.reply(
+        f"📤 External CA broadcast: {state_str}\n"
+        f"({'New trades will post to external group' if not cur_on else 'CAs stay private to HQ + subscribers'})"
+    )
 
 
 # ── /agent6force ──────────────────────────────────────────────────────────────

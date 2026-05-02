@@ -3026,6 +3026,11 @@ AGENT_PARAM_DEFAULTS = {
     "max_open_paper_trades": 5.0,    # hard max concurrent open positions
     "close_cooldown_hours":  24.0,   # re-entry cooldown after ANY close (don't rebuy losers)
 
+    # External CA broadcast toggle: when 1.0 the relay posts each new CA to the
+    # external Phanes group via Telethon (10s after admin trade). Set to 0.0
+    # to keep CAs private to HQ + subscribers. Toggle from /hub or /sharetoggle.
+    "external_ca_post_enabled": 1.0,
+
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
     # before AI scoring. Non-learning: do not reference from learning_loop.
     # LP burn/lock gate was removed — rugcheck data proved too unreliable.
