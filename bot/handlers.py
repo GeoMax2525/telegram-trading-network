@@ -959,6 +959,7 @@ async def _build_hub_text(autotrade: bool) -> str:
 # scanner internals, or admin controls.
 
 async def _build_subscriber_hub_text(sub) -> str:
+    import html as _html
     from database.models import (
         get_subscriber_paper_trade_stats, get_subscriber_paper_trades,
     )
@@ -1013,7 +1014,7 @@ async def _build_subscriber_hub_text(sub) -> str:
             unr = sol * (mult - 1)
             unrealized += unr
             emoji = "🟢" if mult >= 1.0 else "🔴"
-            name = (pt.token_name or "?")[:24]
+            name = _html.escape((pt.token_name or "?")[:24])
             mc_str = (
                 f"${cur_mc/1_000_000:.2f}M" if cur_mc >= 1_000_000
                 else f"${cur_mc/1000:.1f}K"
@@ -1034,7 +1035,7 @@ async def _build_subscriber_hub_text(sub) -> str:
     if closed_trades:
         lines.append("📋 <b>RECENT TRADES</b>")
         for pt in closed_trades:
-            name = (pt.token_name or "?")[:20]
+            name = _html.escape((pt.token_name or "?")[:20])
             pnl = pt.paper_pnl_sol or 0
             mult = pt.peak_multiple or 0
             if pnl > 0:
@@ -3661,9 +3662,10 @@ async def cmd_start(message: Message):
                 f"Mode: {sub.trade_mode}\n"
                 f"Balance: {sub.paper_balance:.2f} SOL\n\n"
                 f"Commands:\n"
+                f"/hub — your dashboard (open trades, PnL, win rate)\n"
                 f"/mywallet — wallet info\n"
                 f"/myperformance — your stats\n"
-                f"/keybot — trading settings"
+                f"/keybot — trading settings (AI/Manual mode)"
             )
         else:
             await message.reply("Your account is suspended. Contact admin.")
