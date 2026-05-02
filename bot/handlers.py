@@ -965,6 +965,8 @@ async def _build_subscriber_hub_text(sub) -> str:
     )
     from bot.scanner import fetch_current_market_cap
 
+    DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
     stats = await get_subscriber_paper_trade_stats(sub.telegram_id)
     trades = await get_subscriber_paper_trades(sub.telegram_id, limit=50)
 
@@ -1189,8 +1191,20 @@ async def cmd_hub(message: Message):
                 reply_markup=await _subscriber_hub_keyboard(sub),
             )
         except Exception as exc:
-            logger.error("Subscriber hub render failed for %s: %s", sub.telegram_id, exc)
-            await message.reply(f"⛔ Hub error: {exc}", parse_mode=None)
+            logger.error(
+                "Subscriber hub render failed for %s: %s",
+                sub.telegram_id, exc, exc_info=True,
+            )
+            # parse_mode="HTML" with escaped text — bot's default is Markdown
+            # which chokes on exception text containing _ * etc.
+            try:
+                import html as _h
+                await message.reply(
+                    f"⛔ Hub error: {_h.escape(str(exc))}",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
         return
 
     try:
