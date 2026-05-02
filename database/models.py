@@ -447,6 +447,11 @@ class KeyBotSettings(Base):
     cooldown_minutes      = Column(Integer,  nullable=False, default=0)
     trail_stop_pct        = Column(Float,    nullable=False, default=20.0)   # trailing stop distance %
     last_trade_at         = Column(DateTime, nullable=True)
+    # 'ai' (default) — confidence engine + Agent 6 control TP/SL/size per trade.
+    # 'manual' — KeyBot static buy_amount_sol / take_profit_x / stop_loss_pct
+    # override AI at trade-open. Trail / breakeven / profit-trail still AI in
+    # both modes (mid-flight runtime decisions).
+    decision_mode  = Column(String(8),  nullable=False, default="ai", server_default="ai")
     wallet_address = Column(String(64), nullable=True)
     created_at     = Column(DateTime,   default=datetime.utcnow, nullable=False)
     updated_at     = Column(DateTime,   default=datetime.utcnow, nullable=False)
@@ -514,6 +519,7 @@ _NEW_KEYBOT_COLS = [
     ("cooldown_minutes",     "INTEGER DEFAULT 0"),
     ("last_trade_at",        "TIMESTAMP"),
     ("trail_stop_pct",       "REAL DEFAULT 20"),
+    ("decision_mode",        "VARCHAR(8) DEFAULT 'ai'"),
 ]
 
 _NEW_CANDIDATE_COLS = [
@@ -964,6 +970,41 @@ async def get_keybot_settings(admin_id: int) -> "KeyBotSettings | None":
             select(KeyBotSettings).where(KeyBotSettings.admin_id == admin_id)
         )
         return result.scalar_one_or_none()
+
+
+async def resolve_owner_trade_params(
+    owner_id: int,
+    ai_size: float, ai_tp: float, ai_sl: float,
+    available_sol: float,
+) -> "dict | None":
+    """
+    Returns the actual (size, tp_x, sl_pct, mode) the bot should use to open
+    a trade for `owner_id`, based on their KeyBot decision_mode.
+
+    AI mode (default): returns the AI-blended values unchanged.
+    Manual mode: returns KeyBot's static buy_amount_sol / take_profit_x /
+    stop_loss_pct. If KeyBot.buy_amount_sol > available_sol, returns None
+    (caller should skip the trade and notify "not enough SOL").
+    """
+    s = await get_keybot_settings(owner_id)
+    mode = (s.decision_mode if s and s.decision_mode else "ai").lower()
+    if mode != "manual":
+        return {
+            "size": float(ai_size),
+            "tp_x": float(ai_tp),
+            "sl_pct": float(ai_sl),
+            "mode": "ai",
+        }
+    # Manual mode — use KeyBot static config
+    kb_size = float(s.buy_amount_sol or 0.5)
+    if kb_size > float(available_sol):
+        return None
+    return {
+        "size": kb_size,
+        "tp_x": float(s.take_profit_x or 3.0),
+        "sl_pct": float(s.stop_loss_pct or 30.0),
+        "mode": "manual",
+    }
 
 
 async def upsert_keybot_settings(admin_id: int, **kwargs) -> "KeyBotSettings":

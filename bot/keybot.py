@@ -103,7 +103,12 @@ def _main_keyboard(s, positions: list = None) -> InlineKeyboardMarkup:
     ts      = getattr(s, "trail_stop_pct", 20.0) or 20.0
     ts_label = f"📐 Trail Stop: {ts:.0f}%"
 
+    mode    = (getattr(s, "decision_mode", "ai") or "ai").lower()
+    mode_label = "🤖 Decision: AI" if mode == "ai" else "✋ Decision: Manual"
+
     builder = InlineKeyboardBuilder()
+    # Row 0: Decision mode toggle (AI vs Manual)
+    builder.row(InlineKeyboardButton(text=mode_label, callback_data="kb:toggle_mode"))
     # Row 1
     builder.row(
         InlineKeyboardButton(text=f"💰 Buy Amount: {sol} SOL", callback_data="kb:buy_amount"),
@@ -439,6 +444,21 @@ async def cb_keybot(callback: CallbackQuery, state: FSMContext):
         text, keyboard = await _build_menu(user_id)
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer()
+
+    elif action == "toggle_mode":
+        s = await get_keybot_settings(user_id)
+        cur = (s.decision_mode if s and s.decision_mode else "ai").lower()
+        new_mode = "manual" if cur == "ai" else "ai"
+        await upsert_keybot_settings(user_id, decision_mode=new_mode)
+        text, keyboard = await _build_menu(user_id)
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except Exception:
+            pass
+        await callback.answer(
+            "🤖 AI mode — agents control TP/SL/size" if new_mode == "ai"
+            else "✋ Manual mode — KeyBot values override AI"
+        )
 
     elif action == "buy_amount":
         await callback.message.edit_text(

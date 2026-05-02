@@ -16,6 +16,7 @@ from aiogram import Bot
 from database.models import (
     get_all_active_subscribers,
     has_open_paper_trade_for_subscriber,
+    resolve_owner_trade_params, get_keybot_settings,
     AsyncSessionLocal, Subscriber, PaperTrade,
 )
 
@@ -123,14 +124,48 @@ async def _relay_delayed(
     opened = 0
     for sub in subs:
         try:
-            # Check subscriber balance
-            if sub.paper_balance < 0.15:
-                continue
-
             # Skip if this subscriber already has the token open
             if await has_open_paper_trade_for_subscriber(
                 sub.telegram_id, token_address,
             ):
+                continue
+
+            # Resolve trade params per subscriber's KeyBot decision_mode.
+            # AI mode (default): use HQ's AI-blended TP/SL with 0.1 SOL probe.
+            # Manual mode: use subscriber's KeyBot buy size + TP + SL.
+            # Returns None if manual mode and balance < KeyBot.buy_amount_sol.
+            ai_size_for_sub = 0.1
+            resolved = await resolve_owner_trade_params(
+                sub.telegram_id, ai_size_for_sub, tp_x, sl_pct, sub.paper_balance,
+            )
+            if resolved is None:
+                # Manual mode + not enough SOL — DM the subscriber
+                kb = await get_keybot_settings(sub.telegram_id)
+                need = (kb.buy_amount_sol if kb else 0) or 0
+                logger.info(
+                    "Relay skip %s for sub %s — manual mode, need %.2f have %.2f",
+                    token_name[:20], sub.telegram_id, need, sub.paper_balance,
+                )
+                if _bot:
+                    try:
+                        await _bot.send_message(
+                            sub.telegram_id,
+                            f"⚠️ Skipped <b>{token_name[:24]}</b> — Manual mode, not enough SOL.\n"
+                            f"Need: {need:.2f} SOL  |  Balance: {sub.paper_balance:.2f} SOL\n"
+                            f"Lower buy size in /keybot or add SOL to your wallet.",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+                continue
+
+            sub_size = resolved["size"]
+            sub_tp = resolved["tp_x"]
+            sub_sl = resolved["sl_pct"]
+            sub_mode = resolved["mode"]
+
+            # In AI mode the floor stays — need at least the probe size + buffer
+            if sub_mode == "ai" and sub.paper_balance < (sub_size + 0.05):
                 continue
 
             # Open paper trade for subscriber, tagged with their telegram_id
@@ -141,50 +176,53 @@ async def _relay_delayed(
                     token_name=token_name,
                     entry_mc=fresh_mc,
                     entry_price=fresh_mc,
-                    paper_sol_spent=0.1,  # probe size
+                    paper_sol_spent=sub_size,
                     confidence_score=confidence,
                     pattern_type=pattern_type,
-                    take_profit_x=tp_x,
-                    stop_loss_pct=sl_pct,
+                    take_profit_x=sub_tp,
+                    stop_loss_pct=sub_sl,
                     status="open",
                     peak_mc=fresh_mc,
                     peak_multiple=1.0,
-                    trade_reasoning=f"[RELAY] {trade_reasoning or ''}",
+                    trade_reasoning=f"[RELAY {sub_mode.upper()}] {trade_reasoning or ''}",
                     subscriber_id=sub.telegram_id,
                 )
                 session.add(pt)
                 await session.commit()
 
-            # Update subscriber balance
+            # Update subscriber balance — debit the actual size used
             async with AsyncSessionLocal() as session:
                 s = (await session.execute(
                     select(Subscriber).where(Subscriber.telegram_id == sub.telegram_id)
                 )).scalar_one_or_none()
                 if s:
-                    s.paper_balance -= 0.1
+                    s.paper_balance = round((s.paper_balance or 0) - sub_size, 4)
                     await session.commit()
 
-            # Send full trade card to subscriber DM
+            # Send full trade card to subscriber DM — values shown reflect
+            # THIS subscriber's actual trade (their size + their TP/SL),
+            # not HQ's. Mode badge shows if AI or Manual decided the params.
             if _bot:
                 try:
                     mc_str = f"${fresh_mc / 1_000_000:.2f}M" if fresh_mc >= 1_000_000 else f"${fresh_mc / 1000:.1f}K"
-                    tp_mc = fresh_mc * tp_x
-                    sl_mc = fresh_mc * (1 - sl_pct / 100)
+                    tp_mc = fresh_mc * sub_tp
+                    sl_mc = fresh_mc * (1 - sub_sl / 100)
                     tp_mc_str = f"${tp_mc / 1_000_000:.2f}M" if tp_mc >= 1_000_000 else f"${tp_mc / 1000:.1f}K"
                     sl_mc_str = f"${sl_mc / 1000:.1f}K"
+                    mode_badge = "🤖 AI" if sub_mode == "ai" else "✋ Manual"
 
                     card = "\n".join([
                         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                        "⚡ <b>NEW TRADE — AI SIGNAL</b>",
+                        f"⚡ <b>NEW TRADE</b> — {mode_badge}",
                         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
                         "",
                         f"🪙 <b>{token_name}</b>",
                         f"📋 <code>{token_address}</code>",
                         "",
                         f"📊 Market Cap: <b>{mc_str}</b>",
-                        f"💰 Size: 0.1 SOL",
-                        f"🎯 TP: {tp_x:.1f}x ({tp_mc_str})",
-                        f"🛑 SL: {sl_pct:.0f}% ({sl_mc_str})",
+                        f"💰 Size: {sub_size:.2f} SOL",
+                        f"🎯 TP: {sub_tp:.1f}x ({tp_mc_str})",
+                        f"🛑 SL: {sub_sl:.0f}% ({sl_mc_str})",
                         f"📈 Confidence: {confidence:.0f}/100",
                         "",
                         f"📝 <i>{trade_reasoning or 'AI signal'}</i>",

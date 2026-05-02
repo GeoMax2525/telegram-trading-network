@@ -667,10 +667,20 @@ async def _build_hub_text(autotrade: bool) -> str:
     pnl_val = real_balance - starting
     pnl_pct = ((real_balance / starting) - 1) * 100
 
+    # Decision mode badge (HQ admin's KeyBot decision_mode)
+    try:
+        from database.models import get_keybot_settings as _kb
+        hq_owner = ADMIN_IDS[0] if ADMIN_IDS else None
+        kb = await _kb(hq_owner) if hq_owner is not None else None
+        dec_mode = (kb.decision_mode if kb and kb.decision_mode else "ai").lower()
+        dec_badge = "🤖 AI" if dec_mode == "ai" else "✋ Manual"
+    except Exception:
+        dec_badge = "🤖 AI"
+
     lines = [
         DIVIDER,
         "🔑 REVOLT AGENT HUB",
-        f"Trade Mode: {mode_word}",
+        f"Trade Mode: {mode_word}  |  Decision: {dec_badge}",
         f"Balance: {real_balance:.2f} / {starting:.2f} SOL  |  P&amp;L: {pnl_val:+.2f} SOL ({pnl_pct:+.1f}%)",
         DIVIDER,
         "",
@@ -968,9 +978,14 @@ async def _build_subscriber_hub_text(sub) -> str:
 
     mode_label = "📋 PAPER SIM" if sub.trade_mode == "paper" else "🟢 LIVE"
 
+    from database.models import get_keybot_settings as _kb
+    sub_kb = await _kb(sub.telegram_id)
+    sub_dec_mode = (sub_kb.decision_mode if sub_kb and sub_kb.decision_mode else "ai").lower()
+    sub_dec_badge = "🤖 AI" if sub_dec_mode == "ai" else "✋ Manual"
+
     lines = [
         "<b>YOUR TRADING HUB</b>",
-        f"Mode: {mode_label}",
+        f"Mode: {mode_label}  |  Decision: {sub_dec_badge}",
         f"Balance: <b>{balance:.2f}</b> / {starting:.0f} SOL  |  "
         f"P&amp;L: {pnl_emoji} {pnl_total:+.4f} SOL ({pnl_pct:+.1f}%)",
         DIVIDER,
@@ -3942,6 +3957,42 @@ async def cmd_setparam(message: Message):
 
 
 # ── /sharetoggle — flip external CA broadcast on/off ────────────────────────
+
+@router.message(Command("aimode"))
+async def cmd_aimode(message: Message):
+    """Flip the caller's KeyBot decision_mode to 'ai' — confidence engine
+    + Agent 6 control TP/SL/size per trade. Default mode."""
+    from database.models import upsert_keybot_settings
+    await upsert_keybot_settings(message.from_user.id, decision_mode="ai")
+    await message.reply(
+        "🤖 <b>AI Mode</b>\nAgents control TP, SL, and trade size based on "
+        "learned patterns. Open trades keep their original rules.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("manualmode"))
+async def cmd_manualmode(message: Message):
+    """Flip the caller's KeyBot decision_mode to 'manual' — KeyBot static
+    values override AI for new trades."""
+    from database.models import upsert_keybot_settings, get_keybot_settings
+    s = await get_keybot_settings(message.from_user.id)
+    if s is None:
+        s = await upsert_keybot_settings(message.from_user.id, decision_mode="manual")
+    else:
+        await upsert_keybot_settings(message.from_user.id, decision_mode="manual")
+        s = await get_keybot_settings(message.from_user.id)
+    await message.reply(
+        f"✋ <b>Manual Mode</b>\n"
+        f"New trades will use YOUR KeyBot values:\n"
+        f"  Buy: {s.buy_amount_sol:.2f} SOL\n"
+        f"  TP: {s.take_profit_x:.1f}x\n"
+        f"  SL: {s.stop_loss_pct:.0f}%\n"
+        f"Trail / breakeven still AI-managed mid-flight.\n"
+        f"Open trades keep their original rules.",
+        parse_mode="HTML",
+    )
+
 
 @router.message(Command("sharetoggle"))
 async def cmd_sharetoggle(message: Message):

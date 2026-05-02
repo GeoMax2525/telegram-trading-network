@@ -1361,6 +1361,50 @@ async def run_once() -> tuple[int, int]:
                 state.paper_balance,
             )
             try:
+                # Resolve trade-open params per HQ admin's KeyBot decision_mode:
+                # AI mode → use confidence-engine blended values (default).
+                # Manual mode → use admin's KeyBot static buy size + TP + SL.
+                # If manual + insufficient SOL, helper returns None → skip + notify.
+                from bot.config import ADMIN_IDS
+                from database.models import resolve_owner_trade_params, get_keybot_settings
+                hq_owner = ADMIN_IDS[0] if ADMIN_IDS else None
+                ai_tp = scored.get("trade_tp_x", 3.0)
+                ai_sl = scored.get("trade_sl_pct", 30.0)
+                resolved_params = None
+                if hq_owner is not None:
+                    resolved_params = await resolve_owner_trade_params(
+                        hq_owner, paper_sol, ai_tp, ai_sl, state.paper_balance,
+                    )
+                if hq_owner is not None and resolved_params is None:
+                    # Manual mode + insufficient SOL — skip + notify HQ
+                    kb = await get_keybot_settings(hq_owner)
+                    need = (kb.buy_amount_sol if kb else 0) or 0
+                    logger.info(
+                        "Scanner: skip %s — HQ MANUAL mode, need %.2f SOL, have %.2f",
+                        scored.get("name", "?")[:20], need, state.paper_balance,
+                    )
+                    try:
+                        bot_ref = getattr(state, "bot", None)
+                        if bot_ref is not None:
+                            from bot.config import CALLER_GROUP_ID, SCAN_TOPIC_ID
+                            await bot_ref.send_message(
+                                CALLER_GROUP_ID,
+                                f"⚠️ Skipped {scored.get('name','?')[:20]} — "
+                                f"Manual mode, not enough SOL "
+                                f"(need {need:.2f}, have {state.paper_balance:.2f})",
+                                message_thread_id=SCAN_TOPIC_ID,
+                            )
+                    except Exception:
+                        pass
+                    continue
+                if resolved_params is not None:
+                    paper_sol = resolved_params["size"]
+                    tp_for_open = resolved_params["tp_x"]
+                    sl_for_open = resolved_params["sl_pct"]
+                else:
+                    tp_for_open = ai_tp
+                    sl_for_open = ai_sl
+
                 # pattern_type now stores the COMMA-SEPARATED list of matched
                 # ai_trade_params keys so Agent 6 can learn per-bucket from a
                 # single PaperTrade row. See trade_profiles.match_pattern_types.
@@ -1375,8 +1419,8 @@ async def run_once() -> tuple[int, int]:
                     paper_sol=paper_sol,
                     confidence=scored.get("confidence_score", 0),
                     pattern_type=scored.get("profile_tag") or scored.get("source"),
-                    tp_x=scored.get("trade_tp_x", 3.0),
-                    sl_pct=scored.get("trade_sl_pct", 30.0),
+                    tp_x=tp_for_open,
+                    sl_pct=sl_for_open,
                     trade_reasoning=scored.get("trade_reasoning"),
                 )
                 # Recompute balance from DB (trade deducted via open_paper_trade)
