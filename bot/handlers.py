@@ -959,13 +959,15 @@ async def _build_hub_text(autotrade: bool) -> str:
 # scanner internals, or admin controls.
 
 async def _build_subscriber_hub_text(sub) -> str:
-    """Minimal subscriber /hub. Plain text only — no parse_mode, no live MC
-    fetches. Anything that's failed before is gone. Add features back once
-    we confirm this lands."""
+    """Subscriber /hub — mirrors the HQ dashboard look but scoped to their
+    own ledger only. HTML formatted with token names escaped so any
+    pump.fun name with &, <, >, _, * renders cleanly."""
+    import html as _html
     from database.models import (
         get_subscriber_paper_trade_stats, get_subscriber_paper_trades,
         get_keybot_settings as _kb,
     )
+    from bot.scanner import fetch_current_market_cap
 
     DIVIDER = "━" * 30
 
@@ -980,67 +982,93 @@ async def _build_subscriber_hub_text(sub) -> str:
     pnl_pct = ((balance - starting) / starting * 100) if starting > 0 else 0
     pnl_emoji = "🟢" if pnl_total >= 0 else "🔴"
 
-    mode_label = "PAPER" if (sub.trade_mode or "paper") == "paper" else "LIVE"
+    mode_word = "PAPER SIM" if (sub.trade_mode or "paper") == "paper" else "LIVE"
 
     sub_kb = await _kb(sub.telegram_id)
     dec = (sub_kb.decision_mode if sub_kb and sub_kb.decision_mode else "ai").lower()
-    dec_label = "🤖 AI" if dec == "ai" else "✋ Manual"
+    dec_badge = "🤖 AI" if dec == "ai" else "✋ Manual"
 
     lines = [
         DIVIDER,
-        "YOUR TRADING HUB",
-        f"Mode: {mode_label}  |  Decision: {dec_label}",
-        f"Balance: {balance:.2f} / {starting:.0f} SOL",
-        f"PnL: {pnl_emoji} {pnl_total:+.4f} SOL ({pnl_pct:+.1f}%)",
+        "🔑 <b>YOUR TRADING HUB</b>",
+        f"Trade Mode: {mode_word}  |  Decision: {dec_badge}",
+        f"Balance: <b>{balance:.2f}</b> / {starting:.0f} SOL  |  "
+        f"P&amp;L: {pnl_emoji} {pnl_total:+.4f} SOL ({pnl_pct:+.1f}%)",
         DIVIDER,
         "",
-        "PERFORMANCE",
+        "📊 <b>PERFORMANCE</b>",
+        f"Today / All Time: {pnl_total:+.4f} SOL",
+        f"Win Rate: <b>{stats.get('win_rate', 0)}%</b>  |  "
         f"Wins: {stats.get('wins', 0)} / {stats.get('closed', 0)} closed",
-        f"Win Rate: {stats.get('win_rate', 0)}%",
-        f"Open: {stats.get('open_count', 0)}",
         DIVIDER,
         "",
     ]
 
     if open_trades:
-        lines.append(f"OPEN TRADES ({len(open_trades)})")
+        unrealized = 0.0
+        # Live MC fetch per trade for accurate unrealized PnL — same as HQ
+        lines.append(f"📂 <b>OPEN TRADES ({len(open_trades)})</b>")
         lines.append("")
         for idx, pt in enumerate(open_trades, 1):
             entry_mc = pt.entry_mc or 0
+            try:
+                cur_mc = await fetch_current_market_cap(pt.token_address) or entry_mc
+            except Exception:
+                cur_mc = entry_mc
+            mult = (cur_mc / entry_mc) if entry_mc > 0 else 1.0
             sol = pt.paper_sol_spent or 0
-            name = (pt.token_name or "?")[:24]
-            mc_str = (
+            unr = sol * (mult - 1)
+            unrealized += unr
+            emoji = "🟢" if mult >= 1.0 else ("🟡" if mult >= 0.95 else "🔴")
+            name = _html.escape((pt.token_name or "?")[:24])
+            entry_mc_str = (
                 f"${entry_mc/1_000_000:.2f}M" if entry_mc >= 1_000_000
                 else f"${entry_mc/1000:.1f}K"
             )
-            lines.append(f"{idx}. ${name}")
-            lines.append(f"   Entry MC: {mc_str}  |  Size: {sol:.2f} SOL")
-            lines.append(f"   {pt.token_address or ''}")
+            cur_mc_str = (
+                f"${cur_mc/1_000_000:.2f}M" if cur_mc >= 1_000_000
+                else f"${cur_mc/1000:.1f}K"
+            )
+            tp_x = pt.take_profit_x or 0
+            sl_pct = pt.stop_loss_pct or 0
+            tp_mc = entry_mc * tp_x if entry_mc and tp_x else 0
+            sl_mc = entry_mc * (1 - sl_pct / 100) if entry_mc else 0
+            tp_mc_str = (
+                f"${tp_mc/1_000_000:.2f}M" if tp_mc >= 1_000_000
+                else f"${tp_mc/1000:.1f}K"
+            )
+            sl_mc_str = f"${sl_mc/1000:.1f}K"
+            lines.append(f"{idx}. <b>${name}</b>  {mult:.2f}x {emoji}")
+            lines.append(f"   MC: {entry_mc_str} → {cur_mc_str}")
+            lines.append(f"   Size: {sol:.2f} SOL  |  Unr: {unr:+.4f} SOL")
+            lines.append(f"   TP: {tp_x:.1f}x ({tp_mc_str})  SL: {sl_pct:.0f}% ({sl_mc_str})")
+            lines.append(f"   <code>{pt.token_address or ''}</code>")
             lines.append("")
+        lines.append(f"Unrealized total: <b>{unrealized:+.4f} SOL</b>")
         lines.append(DIVIDER)
         lines.append("")
     else:
-        lines.append("OPEN TRADES")
+        lines.append("📂 <b>OPEN TRADES</b>")
         lines.append("None — waiting for next signal")
         lines.append(DIVIDER)
         lines.append("")
 
     if closed_trades:
-        lines.append("RECENT TRADES")
+        lines.append("📋 <b>RECENT TRADES</b>")
         for pt in closed_trades:
-            name = (pt.token_name or "?")[:20]
+            name = _html.escape((pt.token_name or "?")[:20])
             pnl = pt.paper_pnl_sol or 0
             mult = pt.peak_multiple or 0
             if pnl > 0:
-                lines.append(f"WIN  {name}  {mult:.1f}x  {pnl:+.4f} SOL")
+                lines.append(f"✅ {name}  {mult:.1f}x peak  <b>{pnl:+.4f} SOL</b>")
             else:
                 reason = (pt.close_reason or "?").replace("_", " ")
-                lines.append(f"LOSS {name}  {reason}  {pnl:+.4f} SOL")
+                lines.append(f"❌ {name}  {reason}  {pnl:+.4f} SOL")
         lines.append(DIVIDER)
         lines.append("")
 
-    lines.append("WALLET")
-    lines.append(sub.wallet_address or "(none)")
+    lines.append("👛 <b>YOUR WALLET</b>")
+    lines.append(f"<code>{sub.wallet_address or '(none)'}</code>")
     lines.append(DIVIDER)
 
     return "\n".join(lines)
@@ -1176,8 +1204,6 @@ async def cmd_hub(message: Message):
         if sub is None or sub.status != "active":
             await message.reply("⛔ Not an active subscriber. Send /start.")
             return
-        # Plain text — no parse_mode. Bot's default Markdown can choke on
-        # token names containing _ * ` etc. Plain text always renders.
         try:
             text = await _build_subscriber_hub_text(sub)
             try:
@@ -1188,14 +1214,17 @@ async def cmd_hub(message: Message):
                     sub.telegram_id, kb_exc, exc_info=True,
                 )
                 kb = None
-            await message.reply(text, parse_mode="", reply_markup=kb)
+            await message.reply(text, parse_mode="HTML", reply_markup=kb)
         except Exception as exc:
             logger.error(
                 "Subscriber hub render failed for %s: %s",
                 sub.telegram_id, exc, exc_info=True,
             )
             try:
-                await message.reply(f"Hub error: {exc}", parse_mode="")
+                import html as _h
+                await message.reply(
+                    f"Hub error: {_h.escape(str(exc))}", parse_mode="HTML",
+                )
             except Exception:
                 pass
         return
