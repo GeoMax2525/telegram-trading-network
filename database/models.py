@@ -42,20 +42,21 @@ STRATEGY_CLOSE_REASONS = frozenset({
     "tp_hit",          # take-profit auto-close
     "sl_hit",          # stop-loss auto-close
     "trail_hit",       # trailing-stop auto-close
-    "dead_token",      # dead-position auto-close
     "breakeven_stop",  # profit-protection break-even SL fired after 1.5x
     "profit_trail",    # profit-protection trailing stop fired after 2.0x
 })
 
 # Reasons that are NOT strategy decisions — human actions OR time-based
-# cleanup (stale/expired). Kept out of win/loss math so Agent 6 doesn't
-# learn to chase them. The 7-day scans-table expiration also lives here.
+# cleanup (stale/expired) OR backup-SL (dead_token / dead_api). Kept out
+# of win/loss math so Agent 6 doesn't learn to chase them and the WR
+# isn't dragged down by rugs that escaped the primary SL window.
 META_CLOSE_REASONS = frozenset({
     "manual_close",
     "reset",
-    "stale",      # open >2h and <1.05x
-    "expired",    # open >4h and <1.20x  (also used by scans 7-day close)
-    "dead_api",   # 5 consecutive fetch_live_data failures — pair delisted or API down
+    "stale",       # open >2h and <1.05x
+    "expired",     # open >4h and <1.20x  (also used by scans 7-day close)
+    "dead_api",    # 5 consecutive fetch_live_data failures — pair delisted or API down
+    "dead_token",  # MC collapsed below $5K — backup SL when grace/gap missed primary SL
 })
 
 

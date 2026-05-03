@@ -56,8 +56,11 @@ async def _close_and_track(trade_id, reason, pnl, peak_mc, peak_mult, is_admin: 
         _update_session_context("win")
     elif reason in ("breakeven_stop",):
         _update_session_context("be")
-    elif reason in ("sl_hit", "dead_api", "dead_token"):
+    elif reason == "sl_hit":
         _update_session_context("loss")
+    # dead_api / dead_token are backup-SL meta closes — not counted as
+    # strategy losses for streak/regime detection (they bypassed the
+    # primary SL window via grace period or fetch failure).
 
 
 async def _refund_subscriber_balance(sub_id: int, locked_sol: float, pnl: float) -> float:
@@ -125,8 +128,9 @@ async def _finalize_silent_close(pt, reason, pnl, peak_mc, peak_mult):
     quiet. Still refunds balance for the correct owner."""
     await _close_and_track(pt.id, reason, pnl, peak_mc, peak_mult)
     if pt.subscriber_id is None:
-        if reason in ("sl_hit", "dead_api", "dead_token"):
+        if reason == "sl_hit":
             _update_session_context("loss")
+        # dead_api / dead_token excluded from session streak — meta closes
         bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
         state.paper_balance = bal
         return bal
