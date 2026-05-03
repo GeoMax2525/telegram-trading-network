@@ -30,6 +30,45 @@ WALLET_POLL = 3600    # 1 hour
 TRADE_POLL = 600      # 10 minutes (was 5 — rate limit protection)
 STARTUP_DELAY = 90
 
+# ── Circuit breaker (rate-limit ban backoff) ────────────────────────────────
+# When GMGN returns 429 / RATE_LIMIT_BANNED, every retry punishes us further
+# (their message literally says "repeated rate limit violations"). Hold all
+# CLI calls for BAN_BACKOFF_SECONDS after the first ban hit, then probe with
+# one call. If that probe is also banned, double the backoff (cap 1h). On
+# first success, reset to zero — we're back online.
+
+BAN_BACKOFF_INITIAL = 900      # 15 min on first ban
+BAN_BACKOFF_MAX = 3600         # cap at 1 hour
+_ban_until_ts: float = 0.0     # UTC seconds — block all CLI calls until this
+_ban_current_backoff: float = BAN_BACKOFF_INITIAL
+
+
+def _is_banned() -> bool:
+    """True if we're inside the no-call window after a recent ban hit."""
+    import time as _t
+    return _t.time() < _ban_until_ts
+
+
+def _trip_breaker(reason: str, cmd_label: str) -> None:
+    """Record a ban hit and extend the backoff window (capped)."""
+    global _ban_until_ts, _ban_current_backoff
+    import time as _t
+    _ban_until_ts = _t.time() + _ban_current_backoff
+    logger.warning(
+        "GMGN circuit breaker tripped (%s) on %s — sleeping %.0fs before any retries",
+        reason, cmd_label, _ban_current_backoff,
+    )
+    _ban_current_backoff = min(_ban_current_backoff * 2, BAN_BACKOFF_MAX)
+
+
+def _reset_breaker() -> None:
+    """Successful call — clear backoff state."""
+    global _ban_until_ts, _ban_current_backoff
+    if _ban_until_ts != 0.0 or _ban_current_backoff != BAN_BACKOFF_INITIAL:
+        logger.info("GMGN circuit breaker reset — calls succeeding again")
+    _ban_until_ts = 0.0
+    _ban_current_backoff = BAN_BACKOFF_INITIAL
+
 
 # ── gmgn-cli subprocess wrapper ─────────────────────────────────────────────
 
@@ -40,9 +79,16 @@ async def _run_cli(*args: str, timeout: int = 30) -> dict | list | None:
     CLI flag / schema mismatches surface in Railway logs immediately
     instead of silently returning None. Rate-limit and auth errors
     stay at WARNING to avoid flooding.
+
+    Circuit-breaker: if a recent call returned RATE_LIMIT_BANNED, we
+    short-circuit and return None without spawning a subprocess until
+    the backoff window expires.
     """
-    cmd = ["npx", "gmgn-cli", *args, "--raw"]
     cmd_label = " ".join(args[:4])
+    if _is_banned():
+        return None
+
+    cmd = ["npx", "gmgn-cli", *args, "--raw"]
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -55,8 +101,9 @@ async def _run_cli(*args: str, timeout: int = 30) -> dict | list | None:
         if not output:
             err = stderr.decode().strip() if stderr else ""
             err_lower = err.lower()
-            if "rate limit" in err_lower or "429" in err:
+            if "rate_limit_banned" in err_lower or "rate limit" in err_lower or "429" in err:
                 logger.warning("GMGN CLI rate limited (%s): %s", cmd_label, err[:150])
+                _trip_breaker("HTTP 429 / RATE_LIMIT_BANNED", cmd_label)
             elif "401" in err or "403" in err or "unauthorized" in err_lower:
                 logger.warning("GMGN CLI auth error (%s): %s", cmd_label, err[:150])
             else:
@@ -65,6 +112,7 @@ async def _run_cli(*args: str, timeout: int = 30) -> dict | list | None:
                             cmd_label, err[:200] if err else "<empty>")
             return None
 
+        _reset_breaker()
         return json.loads(output)
     except asyncio.TimeoutError:
         logger.info("GMGN CLI timeout (%s)", cmd_label)
