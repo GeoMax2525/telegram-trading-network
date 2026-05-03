@@ -300,6 +300,13 @@ async def _check_open_trades(bot) -> None:
             name = (pt.token_name or "Unknown").replace("_", " ")
             sol = pt.paper_sol_spent
 
+            # Hoisted from later: time-exit / breakeven / profit-trail /
+            # scale-in checks all reference these. Without the hoist,
+            # `remaining` is undefined for any tick that doesn't hit the
+            # dead-token branch first → "cannot access local variable" crash.
+            remaining = float(getattr(pt, "remaining_pct", 100) or 100)
+            realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
+
             # Full per-tick diagnostic so "SL not hitting" can be
             # verified at a glance. Shows the exact comparison
             # values for every trade on every tick.
@@ -440,6 +447,9 @@ async def _check_open_trades(bot) -> None:
 
             # ── Scale OUT: sell partial at milestones ────────────────────
             # 30% at 2x, 25% at 5x, trail the remaining 45%
+            # remaining + realized hoisted earlier — re-read in case scale-in
+            # mutated paper_sol_spent (it doesn't touch remaining_pct, but
+            # safer to refresh against the row state).
             remaining = float(getattr(pt, "remaining_pct", 100) or 100)
             realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
 
