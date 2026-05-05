@@ -4057,6 +4057,72 @@ async def cmd_setparam(message: Message):
 
 # ── /sharetoggle — flip external CA broadcast on/off ────────────────────────
 
+@router.message(Command("subreconcile"))
+async def cmd_subreconcile(message: Message):
+    """Force-correct a subscriber's paper_balance to match the trade ledger.
+    Recomputes balance as starting (20) - open_locked + closed_pnl_sum and
+    overwrites Subscriber.paper_balance + paper_pnl. Use after the
+    inflate-on-loss bug is fixed in signal_relay to clean stale state.
+
+    Admin-only. Usage: /subreconcile <telegram_id>"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.reply("Usage: /subreconcile <telegram_id>", parse_mode="")
+        return
+    try:
+        sub_id = int(parts[1])
+    except ValueError:
+        await message.reply("Invalid telegram_id.", parse_mode="")
+        return
+
+    from sqlalchemy import select, func
+    from database.models import (
+        AsyncSessionLocal, PaperTrade, Subscriber,
+    )
+
+    async with AsyncSessionLocal() as session:
+        sub = (await session.execute(
+            select(Subscriber).where(Subscriber.telegram_id == sub_id)
+        )).scalar_one_or_none()
+        if sub is None:
+            await message.reply(f"No subscriber row for {sub_id}.", parse_mode="")
+            return
+
+        closed_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                PaperTrade.subscriber_id == sub_id,
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0.0
+
+        open_locked = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_sol_spent), 0.0)).where(
+                PaperTrade.subscriber_id == sub_id,
+                PaperTrade.status == "open",
+            )
+        )).scalar() or 0.0
+
+        old_balance = float(sub.paper_balance or 0.0)
+        old_pnl = float(sub.paper_pnl or 0.0)
+        new_balance = round(20.0 - float(open_locked) + float(closed_pnl), 4)
+        new_pnl = round(float(closed_pnl), 4)
+
+        sub.paper_balance = new_balance
+        sub.paper_pnl = new_pnl
+        await session.commit()
+
+    await message.reply(
+        f"✅ Reconciled subscriber {sub_id}\n"
+        f"Balance: {old_balance:.4f} → {new_balance:.4f} SOL\n"
+        f"PnL:     {old_pnl:+.4f} → {new_pnl:+.4f} SOL\n"
+        f"(closed_pnl_sum={closed_pnl:+.4f}, open_locked={open_locked:.4f})",
+        parse_mode="",
+    )
+
+
 @router.message(Command("subcheck"))
 async def cmd_subcheck(message: Message):
     """Diagnostic: show a subscriber's actual balance vs computed-from-trades.
