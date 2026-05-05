@@ -4057,6 +4057,121 @@ async def cmd_setparam(message: Message):
 
 # ── /sharetoggle — flip external CA broadcast on/off ────────────────────────
 
+@router.message(Command("commands"))
+async def cmd_commands(message: Message):
+    """Show every implemented command, scoped by who can run them.
+    Subscribers see only their commands; admins see everything."""
+    is_admin = message.from_user.id in ADMIN_IDS
+    is_dm = message.chat.type == "private"
+
+    sub_lines = [
+        "👤 SUBSCRIBER COMMANDS (DM)",
+        "/start          — register + view wallet",
+        "/hub            — your dashboard (open trades, PnL, WR)",
+        "/mywallet       — wallet info + balance",
+        "/myperformance  — your trading stats",
+        "/keybot         — your settings (AI/Manual mode, TP/SL/size)",
+        "/exportkey      — get your private key (for Phantom import)",
+        "/commands       — this list",
+    ]
+
+    admin_dashboard = [
+        "📊 DASHBOARD & REPORTS",
+        "/hub            — full HQ dashboard",
+        "/keybot         — KeyBot settings + open positions",
+        "/weeklyreport   — last 7 days HQ snapshot",
+        "/4amreport      — 4am call hit rates (peak ≥ 2x/3x/5x/10x)",
+        "/report         — all-time learning report",
+        "/papertrades    — recent paper trades list",
+        "/wallets        — top wallet leaderboard",
+        "/sl             — signal leaders leaderboard",
+        "/lb             — top calls leaderboard",
+        "/pnl <ca>       — check PnL for a contract",
+        "/scan <ca>      — scan a token",
+        "/analyze <ca>   — deep token analysis",
+        "/deepanalyze <ca> — full agent breakdown",
+    ]
+
+    admin_control = [
+        "⚙️ CONTROLS & TOGGLES",
+        "/autotrade <on|off|live|paper>  — switch trade mode",
+        "/aimode         — AI controls TP/SL/size (default)",
+        "/manualmode     — KeyBot static values override AI",
+        "/sharetoggle    — toggle external CA broadcast (Phanes)",
+        "/setparam <name> <value>        — global agent_param override",
+        "/settradeparam <pat> <field> <v> — per-pattern ai_trade_params",
+        "/params         — list all current agent_params",
+        "/tradeparams    — list ai_trade_params per pattern",
+    ]
+
+    admin_subs = [
+        "👥 SUBSCRIBERS",
+        "/adduser <id>     — approve a subscriber",
+        "/removeuser <id>  — suspend a subscriber",
+        "/subscribers      — list all active subs",
+    ]
+
+    admin_callers = [
+        "📣 CALLERS (HQ scan group)",
+        "/addcaller <user>   — whitelist a caller",
+        "/leaderboard        — caller stats",
+    ]
+
+    admin_diag = [
+        "🔍 DIAGNOSTICS",
+        "/healthcheck    — agents + DB + wallet status",
+        "/agent_status   — per-agent latency / heartbeat",
+        "/dbcheck        — DB row counts + integrity",
+        "/balancecheck   — paper balance reconciliation",
+        "/closedcheck    — last 10 closed trades raw",
+        "/forcecheck <ca>— manual scanner check on a mint",
+        "/scannerwhy <ca>— why scanner skipped a token",
+        "/whyloss <ca>   — full close-reason trace",
+        "/mccheck <ca>   — current vs entry MC for an open trade",
+        "/testgmgn       — GMGN CLI smoke test",
+        "/whoami         — your Telegram ID + admin status",
+        "/test           — basic connectivity test",
+    ]
+
+    admin_destructive = [
+        "💀 DESTRUCTIVE (use with care)",
+        "/resetbalance   — reset paper balance (preserves rows)",
+        "/nukepaper confirm — wipe all paper_trades rows",
+        "/forcenuke      — full nuke + reset balance + zero AI samples",
+        "/close <id>     — manually close one paper trade",
+        "/agent6force    — force learning loop major adjustment",
+        "/backfill       — backfill missing post-close MC data",
+        "/backfill_status — backfill progress",
+        "/patterns       — pattern engine current fingerprints",
+    ]
+
+    if not is_admin:
+        # Subscriber view
+        if is_dm:
+            text = "\n".join(sub_lines)
+        else:
+            text = "Open a DM with the bot for /commands."
+        await message.reply(text, parse_mode="")
+        return
+
+    # Admin view — full list
+    sections = [
+        admin_dashboard,
+        admin_control,
+        admin_subs,
+        admin_callers,
+        admin_diag,
+        admin_destructive,
+        sub_lines,
+    ]
+    text = "\n\n".join("\n".join(s) for s in sections)
+    if len(text) <= 4000:
+        await message.reply(text, parse_mode="")
+    else:
+        for chunk_start in range(0, len(text), 3800):
+            await message.reply(text[chunk_start:chunk_start + 3800], parse_mode="")
+
+
 @router.message(Command("4amreport"))
 async def cmd_4amreport(message: Message):
     """Hit-rate report for 4am calls — every TG signal in the last 7d, what
