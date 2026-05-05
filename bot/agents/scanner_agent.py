@@ -1099,10 +1099,17 @@ async def run_once() -> tuple[int, int]:
         if await has_open_paper_trade(mint):
             continue
 
-        # Re-entry cooldown — don't rebuy a token we already traded today
+        # Re-entry cooldown — tg_signal uses its own (shorter) window so
+        # 4am re-calls of recent winners aren't blocked. /setparam
+        # tg_signal_cooldown_hours to tune.
         try:
-            if await has_recent_close(mint, within_hours=24.0):
-                logger.info("Scanner: TG skip %s — already traded in last 24h", mint[:12])
+            tg_cd_cfg = await get_params("tg_signal_cooldown_hours")
+            tg_cd_hours = float(tg_cd_cfg.get("tg_signal_cooldown_hours") or 4.0)
+            if await has_recent_close(mint, within_hours=tg_cd_hours):
+                logger.info(
+                    "Scanner: TG skip %s — already traded in last %.1fh",
+                    mint[:12], tg_cd_hours,
+                )
                 continue
         except Exception:
             pass

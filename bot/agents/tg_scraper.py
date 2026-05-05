@@ -254,12 +254,19 @@ async def _handle_message(event, channel_name: str) -> None:
     # If yes, upgrade it to tg_signal rules (wider trail, longer grace).
     # If recently closed, DON'T re-inject — 24h cooldown applies.
     try:
-        from database.models import AsyncSessionLocal, PaperTrade, has_recent_close
+        from database.models import (
+            AsyncSessionLocal, PaperTrade, has_recent_close, get_param,
+        )
         from sqlalchemy import select
 
-        # Don't re-inject if already traded in last 24h
-        if await has_recent_close(mint, within_hours=24.0):
-            logger.info("TG scraper: skip %s — already traded in last 24h", mint[:12])
+        # tg_signal-specific re-entry cooldown — shorter than the 24h global
+        # because 4am sometimes re-calls a winner. /setparam tg_signal_cooldown_hours.
+        try:
+            tg_cd = float(await get_param("tg_signal_cooldown_hours") or 4.0)
+        except Exception:
+            tg_cd = 4.0
+        if await has_recent_close(mint, within_hours=tg_cd):
+            logger.info("TG scraper: skip %s — already traded in last %.1fh", mint[:12], tg_cd)
             return
 
         async with AsyncSessionLocal() as session:
