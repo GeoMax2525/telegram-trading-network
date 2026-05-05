@@ -4057,6 +4057,122 @@ async def cmd_setparam(message: Message):
 
 # ── /sharetoggle — flip external CA broadcast on/off ────────────────────────
 
+@router.message(Command("subcheck"))
+async def cmd_subcheck(message: Message):
+    """Diagnostic: show a subscriber's actual balance vs computed-from-trades.
+    Reveals whether their balance is the correct accumulation of wins/losses
+    or if something has leaked / failed to debit. Admin-only.
+    Usage: /subcheck <telegram_id>"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.reply("Usage: /subcheck <telegram_id>", parse_mode="")
+        return
+    try:
+        sub_id = int(parts[1])
+    except ValueError:
+        await message.reply("Invalid telegram_id.", parse_mode="")
+        return
+
+    from sqlalchemy import select, func
+    from database.models import (
+        AsyncSessionLocal, PaperTrade, Subscriber, get_subscriber,
+    )
+
+    sub = await get_subscriber(sub_id)
+    if sub is None:
+        await message.reply(f"No subscriber row for {sub_id}.", parse_mode="")
+        return
+
+    async with AsyncSessionLocal() as session:
+        # Total closed PnL on this sub's trades
+        closed_pnl = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                PaperTrade.subscriber_id == sub_id,
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0.0
+
+        # Locked SOL on currently open trades
+        open_locked = (await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.paper_sol_spent), 0.0)).where(
+                PaperTrade.subscriber_id == sub_id,
+                PaperTrade.status == "open",
+            )
+        )).scalar() or 0.0
+
+        # Counts
+        closed_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.subscriber_id == sub_id,
+                PaperTrade.status == "closed",
+            )
+        )).scalar() or 0
+
+        open_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.subscriber_id == sub_id,
+                PaperTrade.status == "open",
+            )
+        )).scalar() or 0
+
+        wins = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.subscriber_id == sub_id,
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol > 0,
+            )
+        )).scalar() or 0
+
+    starting = 20.0
+    expected = round(starting - float(open_locked) + float(closed_pnl), 4)
+    actual = float(sub.paper_balance or 0.0)
+    discrepancy = round(actual - expected, 4)
+
+    DIVIDER = "━" * 30
+    lines = [
+        DIVIDER,
+        f"🔍 SUBSCRIBER CHECK — {sub_id}",
+        f"Wallet: {sub.wallet_address}",
+        f"Status: {sub.status}  |  Mode: {sub.trade_mode}",
+        DIVIDER,
+        "",
+        "📊 TRADE LEDGER",
+        f"Closed: {closed_count}  |  Wins: {wins}  |  Open: {open_count}",
+        f"Closed PnL sum:  {closed_pnl:+.4f} SOL",
+        f"Open locked SOL: {open_locked:.4f}",
+        DIVIDER,
+        "",
+        "💰 BALANCE RECONCILIATION",
+        f"Starting:           {starting:.4f}",
+        f"− Open locked:      {open_locked:.4f}",
+        f"+ Closed PnL:       {closed_pnl:+.4f}",
+        f"Expected balance:   {expected:.4f}",
+        f"Actual balance:     {actual:.4f}",
+        f"Discrepancy:        {discrepancy:+.4f}",
+        DIVIDER,
+        "",
+    ]
+    if abs(discrepancy) < 0.01:
+        lines.append("✅ MATCH — balance is correct accumulation of wins/losses.")
+        lines.append("(no leak; high balance = legit profitable trading)")
+    else:
+        lines.append(f"⚠️ MISMATCH of {discrepancy:+.4f} SOL")
+        if discrepancy > 0:
+            lines.append("Balance HIGHER than ledger — possible missing debit")
+            lines.append("on open OR HQ wins leaking into sub balance.")
+        else:
+            lines.append("Balance LOWER than ledger — possible missing refund")
+            lines.append("on close OR over-debit on open.")
+        lines.append("")
+        lines.append("To force-correct: /subreconcile " + str(sub_id))
+
+    text = "\n".join(lines)
+    await message.reply(text, parse_mode="")
+
+
 @router.message(Command("commands"))
 async def cmd_commands(message: Message):
     """Show every implemented command, scoped by who can run them.
