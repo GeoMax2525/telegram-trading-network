@@ -175,9 +175,36 @@ async def _relay_delayed(
             if sub_mode == "ai" and sub.paper_balance < (sub_size + 0.05):
                 continue
 
-            # Open paper trade for subscriber, tagged with their telegram_id
-            # so HQ stats / learning queries / scanner slot count exclude it.
+            # CRITICAL: open trade + debit balance in ONE transaction. Previously
+            # these were two separate AsyncSessionLocal() blocks; if the second
+            # threw (transaction conflict, connection drop) the trade was
+            # committed but the debit was lost. At close, the unconditional
+            # refund (locked_sol + pnl) inflated balance even on losses
+            # (e.g. 0.7 SOL probe at -20% SL: refund +0.56 against debit of 0).
+            # Atomic open+debit makes this impossible.
             async with AsyncSessionLocal() as session:
+                # Re-fetch the Subscriber row inside this session and require it.
+                # If the row vanished between get_all_active_subscribers() and
+                # now, skip the relay entirely — never open a trade we can't
+                # debit.
+                s = (await session.execute(
+                    select(Subscriber).where(Subscriber.telegram_id == sub.telegram_id)
+                )).scalar_one_or_none()
+                if s is None:
+                    logger.warning(
+                        "Relay: subscriber %s row missing at debit time — skipping %s",
+                        sub.telegram_id, token_name[:20],
+                    )
+                    continue
+                # Recheck balance under fresh row to avoid races with parallel
+                # closes / other relay calls.
+                if (s.paper_balance or 0) < sub_size:
+                    logger.info(
+                        "Relay: subscriber %s balance race — %.4f < %.2f, skipping %s",
+                        sub.telegram_id, s.paper_balance or 0, sub_size, token_name[:20],
+                    )
+                    continue
+
                 pt = PaperTrade(
                     token_address=token_address,
                     token_name=token_name,
@@ -195,16 +222,10 @@ async def _relay_delayed(
                     subscriber_id=sub.telegram_id,
                 )
                 session.add(pt)
+                # Debit balance in the same session — both rows commit together
+                # or the whole open is rolled back.
+                s.paper_balance = round((s.paper_balance or 0) - sub_size, 4)
                 await session.commit()
-
-            # Update subscriber balance — debit the actual size used
-            async with AsyncSessionLocal() as session:
-                s = (await session.execute(
-                    select(Subscriber).where(Subscriber.telegram_id == sub.telegram_id)
-                )).scalar_one_or_none()
-                if s:
-                    s.paper_balance = round((s.paper_balance or 0) - sub_size, 4)
-                    await session.commit()
 
             # Send full trade card to subscriber DM — values shown reflect
             # THIS subscriber's actual trade (their size + their TP/SL),
