@@ -4438,24 +4438,41 @@ async def cmd_4amreport(message: Message):
 
         async def _peak_for_untraded(sig):
             async with sem:
+                tok = token_by_mint.get(sig.mint)
+
+                # Establish signal-time MC: prefer the explicit signal mcap,
+                # fall back to Token.launch_mc (captured at first sighting),
+                # then to Token.market_cap as last resort. If we still have
+                # nothing, we genuinely can't compute a peak.
                 signal_mcap = float(sig.mcap or 0)
+                if signal_mcap <= 0 and tok:
+                    signal_mcap = float(tok.launch_mc or 0)
+                if signal_mcap <= 0 and tok:
+                    signal_mcap = float(tok.market_cap or 0)
                 if signal_mcap <= 0:
                     return None
-                # Try cached Token row first (last_known MC)
+
+                # Establish current MC: cached Token first, then live DexScreener.
                 cur_mc = 0.0
-                tok = token_by_mint.get(sig.mint)
                 if tok and tok.market_cap:
                     cur_mc = max(cur_mc, float(tok.market_cap))
-                # Then live DexScreener for accuracy
                 try:
                     live = await fetch_current_market_cap(sig.mint)
                     if live and live > 0:
                         cur_mc = max(cur_mc, float(live))
                 except Exception:
                     pass
+
+                # If current MC is missing, assume the token is dead and
+                # treat the peak as 1.0x (no observed movement). Conservative
+                # undercount — better than dropping the signal entirely.
+                # If the token actually pumped before dying, this misses that
+                # upside, but those rare cases are far less common than rugs.
                 if cur_mc <= 0:
-                    return None
-                peak_x = cur_mc / signal_mcap
+                    peak_x = 1.0
+                else:
+                    peak_x = cur_mc / signal_mcap
+
                 name = (tok.name if tok and tok.name else sig.mint[:12])
                 return (sig, peak_x, name)
 
