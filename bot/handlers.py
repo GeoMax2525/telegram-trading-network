@@ -4057,6 +4057,235 @@ async def cmd_setparam(message: Message):
 
 # ── /sharetoggle — flip external CA broadcast on/off ────────────────────────
 
+@router.message(Command("weeklyreport"))
+async def cmd_weeklyreport(message: Message):
+    """Past-7-days HQ snapshot: PnL, win rate, by-pattern, by-close-reason,
+    4am subset, sold_too_early misses, Agent 6 learning changes, top trades.
+
+    Admin-only. HQ rows only (subscriber relays excluded). Plain text so
+    it never fails to render."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from datetime import datetime, timedelta
+    from sqlalchemy import select, func, Integer
+    from database.models import (
+        AsyncSessionLocal, PaperTrade, AITradeParams, AgentParam,
+        STRATEGY_CLOSE_REASONS, META_CLOSE_REASONS,
+    )
+
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    admin_only = PaperTrade.subscriber_id.is_(None)
+    DIVIDER = "━" * 30
+
+    try:
+        async with AsyncSessionLocal() as session:
+            # Closed in last 7d (admin only)
+            closed_q = select(PaperTrade).where(
+                admin_only,
+                PaperTrade.status == "closed",
+                PaperTrade.closed_at >= cutoff,
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+            closed_rows = list((await session.execute(closed_q)).scalars().all())
+
+            # Opened in last 7d (any status)
+            opened_count = (await session.execute(
+                select(func.count(PaperTrade.id)).where(
+                    admin_only, PaperTrade.opened_at >= cutoff,
+                )
+            )).scalar() or 0
+
+            # Open right now
+            open_count = (await session.execute(
+                select(func.count(PaperTrade.id)).where(
+                    admin_only, PaperTrade.status == "open",
+                )
+            )).scalar() or 0
+
+            # Recently updated AI params (within last 7d)
+            ai_params_changed = (await session.execute(
+                select(AITradeParams)
+                .where(AITradeParams.updated_at >= cutoff)
+                .order_by(AITradeParams.updated_at.desc())
+                .limit(15)
+            )).scalars().all()
+
+            # Recently updated agent_params (within last 7d) — non-zero changes only
+            agent_params_changed = (await session.execute(
+                select(AgentParam)
+                .where(AgentParam.updated_at >= cutoff)
+                .order_by(AgentParam.updated_at.desc())
+                .limit(15)
+            )).scalars().all()
+
+        # ── Aggregate the closed rows ──────────────────────────────
+        n = len(closed_rows)
+        wins = sum(1 for r in closed_rows if (r.paper_pnl_sol or 0) > 0)
+        losses = n - wins
+        wr = round(wins / n * 100) if n > 0 else 0
+        total_pnl = sum((r.paper_pnl_sol or 0) for r in closed_rows)
+        avg_win = (sum((r.paper_pnl_sol or 0) for r in closed_rows if (r.paper_pnl_sol or 0) > 0) / wins) if wins > 0 else 0
+        avg_loss = (sum((r.paper_pnl_sol or 0) for r in closed_rows if (r.paper_pnl_sol or 0) <= 0) / losses) if losses > 0 else 0
+        expectancy = (total_pnl / n) if n > 0 else 0
+
+        # Strategy vs meta
+        strat_rows = [r for r in closed_rows if (r.close_reason or "") in STRATEGY_CLOSE_REASONS]
+        meta_rows = [r for r in closed_rows if (r.close_reason or "") in META_CLOSE_REASONS]
+        strat_pnl = sum((r.paper_pnl_sol or 0) for r in strat_rows)
+        strat_wins = sum(1 for r in strat_rows if (r.paper_pnl_sol or 0) > 0)
+        strat_wr = round(strat_wins / len(strat_rows) * 100) if strat_rows else 0
+        meta_pnl = sum((r.paper_pnl_sol or 0) for r in meta_rows)
+
+        # By close reason
+        from collections import defaultdict
+        by_reason = defaultdict(lambda: {"n": 0, "pnl": 0.0, "wins": 0})
+        for r in closed_rows:
+            reason = r.close_reason or "?"
+            by_reason[reason]["n"] += 1
+            by_reason[reason]["pnl"] += (r.paper_pnl_sol or 0)
+            if (r.paper_pnl_sol or 0) > 0:
+                by_reason[reason]["wins"] += 1
+
+        # 4am subset (tg_signal in pattern_type)
+        tg_rows = [r for r in closed_rows if "tg_signal" in (r.pattern_type or "")]
+        tg_n = len(tg_rows)
+        tg_wins = sum(1 for r in tg_rows if (r.paper_pnl_sol or 0) > 0)
+        tg_wr = round(tg_wins / tg_n * 100) if tg_n > 0 else 0
+        tg_pnl = sum((r.paper_pnl_sol or 0) for r in tg_rows)
+        tg_avg_peak = (sum((r.peak_multiple or 1) for r in tg_rows) / tg_n) if tg_n > 0 else 0
+
+        # Sold too early — closed trades flagged or with peak_after_close > 1.5x of close mult
+        early_rows = [r for r in closed_rows if getattr(r, "sold_too_early", False)]
+        early_n = len(early_rows)
+        early_rate = round(early_n / n * 100) if n > 0 else 0
+        # Top missed runners (highest peak_after_close * size)
+        top_missed = sorted(
+            [r for r in closed_rows if r.peak_after_close],
+            key=lambda r: (r.peak_after_close or 0) / (r.entry_mc or 1),
+            reverse=True,
+        )[:3]
+
+        # Best / worst
+        sorted_by_pnl = sorted(closed_rows, key=lambda r: r.paper_pnl_sol or 0, reverse=True)
+        best = sorted_by_pnl[:3]
+        worst = sorted_by_pnl[-3:][::-1]
+
+        # ── Render ────────────────────────────────────────────────
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        lines = [
+            DIVIDER,
+            f"📊 WEEKLY REPORT — {today}",
+            f"Period: last 7 days (HQ only)",
+            DIVIDER,
+            "",
+            "💰 PERFORMANCE",
+            f"Total PnL: {total_pnl:+.4f} SOL",
+            f"Strategy PnL: {strat_pnl:+.4f} SOL ({strat_wr}% WR on {len(strat_rows)} trades)",
+            f"Meta PnL: {meta_pnl:+.4f} SOL ({len(meta_rows)} cleanup closes)",
+            f"Trades closed: {n}  |  Opened: {opened_count}  |  Open now: {open_count}",
+            f"Wins: {wins}  |  Losses: {losses}  |  WR: {wr}%",
+            f"Avg win: {avg_win:+.4f}  |  Avg loss: {avg_loss:+.4f}",
+            f"Expectancy/trade: {expectancy:+.4f} SOL",
+            DIVIDER,
+            "",
+            "📋 BY CLOSE REASON",
+        ]
+        for reason, d in sorted(by_reason.items(), key=lambda x: x[1]["pnl"], reverse=True):
+            r_wr = round(d["wins"] / d["n"] * 100) if d["n"] else 0
+            lines.append(f"  {reason:14s}  n={d['n']:3d}  WR={r_wr:3d}%  pnl={d['pnl']:+.4f}")
+
+        lines.append(DIVIDER)
+        lines.append("")
+        lines.append("⚡ 4AM (tg_signal) SUBSET")
+        if tg_n > 0:
+            lines.append(f"  Trades: {tg_n}  |  Wins: {tg_wins}  |  WR: {tg_wr}%")
+            lines.append(f"  PnL: {tg_pnl:+.4f} SOL  |  Avg peak: {tg_avg_peak:.2f}x")
+        else:
+            lines.append("  No 4am trades closed this week")
+        lines.append(DIVIDER)
+        lines.append("")
+
+        lines.append("⚠️ MISSED RUNNERS (sold_too_early)")
+        if n > 0:
+            lines.append(f"  Rate: {early_rate}% of closed trades ({early_n}/{n})")
+        if top_missed:
+            for r in top_missed:
+                name = (r.token_name or "?")[:24]
+                close_mult = (r.peak_multiple or 1)
+                peak_after = r.peak_after_close or 0
+                peak_x = (peak_after / (r.entry_mc or 1)) if r.entry_mc else 0
+                lines.append(f"  {name}  closed {close_mult:.1f}x → peaked {peak_x:.1f}x")
+        else:
+            lines.append("  No tracked misses (post-close monitor still warming)")
+        lines.append(DIVIDER)
+        lines.append("")
+
+        lines.append("🤖 AGENT 6 — LEARNED PARAMS (last 7d)")
+        if ai_params_changed:
+            for p in ai_params_changed[:8]:
+                lines.append(
+                    f"  {p.pattern_type:18s}  tp={p.optimal_tp_x:.1f}x  "
+                    f"sl={p.optimal_sl_pct:.0f}%  trail={'on' if p.trail_sl_enabled else 'off'}  "
+                    f"n={p.sample_size}"
+                )
+        else:
+            lines.append("  No ai_trade_params changes (sample size threshold not met)")
+        lines.append(DIVIDER)
+        lines.append("")
+
+        lines.append("⚙️ TUNED PARAMS (last 7d)")
+        if agent_params_changed:
+            shown = 0
+            for p in agent_params_changed:
+                if p.param_name in {"paper_balance_offset", "force_reset_v5_done", "wallet_reset_v2_done"}:
+                    continue
+                lines.append(f"  {p.param_name:30s}  = {p.param_value}")
+                shown += 1
+                if shown >= 8:
+                    break
+            if shown == 0:
+                lines.append("  No tracked param changes this week")
+        else:
+            lines.append("  No agent_params changes")
+        lines.append(DIVIDER)
+        lines.append("")
+
+        lines.append("🏆 TOP WINS")
+        if best:
+            for r in best:
+                if (r.paper_pnl_sol or 0) <= 0:
+                    break
+                name = (r.token_name or "?")[:24]
+                lines.append(f"  ✅ {name}  {(r.peak_multiple or 0):.1f}x peak  {r.paper_pnl_sol:+.4f} SOL")
+        else:
+            lines.append("  No wins yet this week")
+        lines.append(DIVIDER)
+        lines.append("")
+
+        lines.append("💀 TOP LOSSES")
+        if worst:
+            for r in worst:
+                if (r.paper_pnl_sol or 0) >= 0:
+                    break
+                name = (r.token_name or "?")[:24]
+                reason = (r.close_reason or "?")
+                lines.append(f"  ❌ {name}  {reason}  {r.paper_pnl_sol:+.4f} SOL")
+        else:
+            lines.append("  No losses this week")
+        lines.append(DIVIDER)
+
+        text = "\n".join(lines)
+        # Telegram message limit ~4096 chars; chunk if needed
+        if len(text) <= 4000:
+            await message.reply(text, parse_mode="")
+        else:
+            for chunk_start in range(0, len(text), 3800):
+                await message.reply(text[chunk_start:chunk_start + 3800], parse_mode="")
+    except Exception as exc:
+        logger.error("Weekly report failed: %s", exc, exc_info=True)
+        await message.reply(f"Weekly report error: {exc}", parse_mode="")
+
+
 @router.message(Command("exportkey"))
 async def cmd_exportkey(message: Message):
     """Re-show the subscriber's private key so they can import it into
