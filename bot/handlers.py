@@ -4516,6 +4516,17 @@ async def cmd_4amreport(message: Message):
             return hits, pct
 
         # ── Render ────────────────────────────────────────────────
+        # 2x-based win/loss treatment — call is a "win" if it peaked >= 2x,
+        # "loss" if it didn't. This is a channel-quality view, not our PnL.
+        wins_2x_all = sum(1 for r in rows if r[2] >= 2.0)
+        losses_2x_all = n - wins_2x_all
+        wl_ratio_all = (wins_2x_all / losses_2x_all) if losses_2x_all > 0 else float(wins_2x_all)
+        wr_2x_all = (wins_2x_all / n * 100) if n > 0 else 0
+
+        wins_2x_traded = sum(1 for r in traded_rows if r[2] >= 2.0)
+        losses_2x_traded = n_traded - wins_2x_traded
+        wr_2x_traded = (wins_2x_traded / n_traded * 100) if n_traded > 0 else 0
+
         lines = [
             DIVIDER,
             "📡 4AM CALL REPORT",
@@ -4526,6 +4537,17 @@ async def cmd_4amreport(message: Message):
             f"  Traded with data:   {n_traded}",
             f"  Untraded w/ data:   {untraded_with_data}  (cooldown / no fill)",
             f"  No data available:  {untraded_no_data}  (token died / API miss)",
+            DIVIDER,
+            "",
+            "🎲 W/L (based on 2x threshold)",
+            "  CHANNEL (all signals)",
+            f"    Wins (≥ 2x):  {wins_2x_all}",
+            f"    Losses (< 2x): {losses_2x_all}",
+            f"    W/L:           {wl_ratio_all:.2f}  ({wr_2x_all:.1f}% win rate)",
+            "  OUR TRADES",
+            f"    Wins (≥ 2x):  {wins_2x_traded}",
+            f"    Losses (< 2x): {losses_2x_traded}",
+            f"    Win rate:     {wr_2x_traded:.1f}%",
             DIVIDER,
             "",
         ]
