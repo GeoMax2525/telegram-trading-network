@@ -4057,6 +4057,168 @@ async def cmd_setparam(message: Message):
 
 # ── /sharetoggle — flip external CA broadcast on/off ────────────────────────
 
+@router.message(Command("4amreport"))
+async def cmd_4amreport(message: Message):
+    """Hit-rate report for 4am calls — every TG signal in the last 7d, what
+    multiplier it actually peaked at, what % hit 2x / 3x / 5x / 10x, and
+    where we exited vs the true peak. Admin-only, plain text."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from datetime import datetime, timedelta
+    from sqlalchemy import select, func, and_
+    from database.models import (
+        AsyncSessionLocal, PaperTrade, TgSignal,
+    )
+
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    DIVIDER = "━" * 30
+
+    try:
+        async with AsyncSessionLocal() as session:
+            # All 4am signals in window
+            sigs = list((await session.execute(
+                select(TgSignal)
+                .where(TgSignal.signal_time >= cutoff)
+                .order_by(TgSignal.signal_time.asc())
+            )).scalars().all())
+
+            # All paper trades with tg_signal in pattern (admin only) within window
+            trades = list((await session.execute(
+                select(PaperTrade).where(
+                    PaperTrade.subscriber_id.is_(None),
+                    PaperTrade.opened_at >= cutoff,
+                    PaperTrade.pattern_type.like("%tg_signal%"),
+                )
+            )).scalars().all())
+
+        # Map mint → most recent matching trade
+        trade_by_mint: dict = {}
+        for t in trades:
+            mint = t.token_address
+            cur = trade_by_mint.get(mint)
+            if cur is None or (t.opened_at and (cur.opened_at is None or t.opened_at > cur.opened_at)):
+                trade_by_mint[mint] = t
+
+        total_signals = len(sigs)
+        traded_signals = []
+        no_data_signals = []
+        for s in sigs:
+            t = trade_by_mint.get(s.mint)
+            if t and t.entry_mc:
+                traded_signals.append((s, t))
+            else:
+                no_data_signals.append(s)
+
+        # Compute true peak per traded signal — max(entry * peak_multiple, peak_after_close) / entry
+        rows = []  # (sig, trade, true_peak, our_capture_x, name)
+        for s, t in traded_signals:
+            entry_mc = t.entry_mc or 0
+            held_peak_mc = (t.peak_mc or entry_mc)
+            after_peak_mc = (t.peak_after_close or 0)
+            true_peak_mc = max(held_peak_mc, after_peak_mc) if entry_mc > 0 else 0
+            true_peak_x = (true_peak_mc / entry_mc) if entry_mc > 0 else 1.0
+            our_capture_x = float(t.peak_multiple or 1.0)
+            name = (t.token_name or s.mint[:12])
+            rows.append((s, t, true_peak_x, our_capture_x, name))
+
+        n = len(rows)
+
+        # Hit rates
+        def hit_rate(threshold: float) -> tuple[int, float]:
+            hits = sum(1 for r in rows if r[2] >= threshold)
+            pct = (hits / n * 100) if n > 0 else 0
+            return hits, pct
+
+        h15, p15 = hit_rate(1.5)
+        h20, p20 = hit_rate(2.0)
+        h30, p30 = hit_rate(3.0)
+        h50, p50 = hit_rate(5.0)
+        h10x, p10x = hit_rate(10.0)
+        h25x, p25x = hit_rate(25.0)
+
+        avg_peak = (sum(r[2] for r in rows) / n) if n > 0 else 0
+        sorted_peaks = sorted([r[2] for r in rows])
+        median_peak = sorted_peaks[len(sorted_peaks) // 2] if sorted_peaks else 0
+
+        avg_capture = (sum(r[3] for r in rows) / n) if n > 0 else 0
+        avg_missed = avg_peak - avg_capture
+        missed_pct = ((avg_missed / avg_peak) * 100) if avg_peak > 0 else 0
+
+        # Top misses (true_peak - our_capture, biggest gap)
+        misses = sorted(
+            [(r[4], r[3], r[2], r[2] - r[3]) for r in rows if r[2] - r[3] > 0.5],
+            key=lambda x: x[3], reverse=True,
+        )[:5]
+
+        # Top runners (highest true_peak)
+        runners = sorted(rows, key=lambda r: r[2], reverse=True)[:5]
+
+        # ── Render ────────────────────────────────────────────────
+        lines = [
+            DIVIDER,
+            "📡 4AM CALL REPORT",
+            f"Period: last 7 days",
+            DIVIDER,
+            "",
+            f"Total 4am signals: {total_signals}",
+            f"  Traded with data: {n}",
+            f"  No trade/data:    {len(no_data_signals)}  (cooldown / no fill)",
+            DIVIDER,
+            "",
+            "🎯 PEAK HIT RATES",
+        ]
+        if n > 0:
+            lines.append(f"  >= 1.5x:  {h15:3d} / {n:3d} = {p15:5.1f}%")
+            lines.append(f"  >= 2.0x:  {h20:3d} / {n:3d} = {p20:5.1f}%")
+            lines.append(f"  >= 3.0x:  {h30:3d} / {n:3d} = {p30:5.1f}%   ← key threshold")
+            lines.append(f"  >= 5.0x:  {h50:3d} / {n:3d} = {p50:5.1f}%")
+            lines.append(f"  >= 10.0x: {h10x:3d} / {n:3d} = {p10x:5.1f}%")
+            lines.append(f"  >= 25.0x: {h25x:3d} / {n:3d} = {p25x:5.1f}%")
+            lines.append("")
+            lines.append(f"Avg peak:    {avg_peak:.2f}x")
+            lines.append(f"Median peak: {median_peak:.2f}x")
+        else:
+            lines.append("  No trades with data yet.")
+        lines.append(DIVIDER)
+        lines.append("")
+
+        lines.append("📊 OUR EXIT vs TRUE PEAK")
+        if n > 0:
+            lines.append(f"  Avg captured (our peak):  {avg_capture:.2f}x")
+            lines.append(f"  Avg true peak:            {avg_peak:.2f}x")
+            lines.append(f"  Avg missed upside:        {avg_missed:.2f}x ({missed_pct:.0f}% of true peak)")
+        lines.append(DIVIDER)
+        lines.append("")
+
+        lines.append("⚠️ TOP 5 MISSED RUNNERS")
+        if misses:
+            for name, capture, true_peak, gap in misses:
+                lines.append(f"  {name[:24]:24s}  closed {capture:.1f}x → peaked {true_peak:.1f}x  (missed +{gap:.1f}x)")
+        else:
+            lines.append("  No big misses tracked yet.")
+        lines.append(DIVIDER)
+        lines.append("")
+
+        lines.append("🚀 TOP 5 RUNNERS (true peak)")
+        if runners:
+            for r in runners:
+                _, _, true_peak, our_cap, name = r
+                lines.append(f"  {name[:24]:24s}  {true_peak:.1f}x peak  (we got {our_cap:.1f}x)")
+        else:
+            lines.append("  No runners yet.")
+        lines.append(DIVIDER)
+
+        text = "\n".join(lines)
+        if len(text) <= 4000:
+            await message.reply(text, parse_mode="")
+        else:
+            for chunk_start in range(0, len(text), 3800):
+                await message.reply(text[chunk_start:chunk_start + 3800], parse_mode="")
+    except Exception as exc:
+        logger.error("4am report failed: %s", exc, exc_info=True)
+        await message.reply(f"4am report error: {exc}", parse_mode="")
+
+
 @router.message(Command("weeklyreport"))
 async def cmd_weeklyreport(message: Message):
     """Past-7-days HQ snapshot: PnL, win rate, by-pattern, by-close-reason,
