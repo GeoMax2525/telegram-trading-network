@@ -121,6 +121,14 @@ async def _relay_delayed(
     if not fresh_mc or fresh_mc <= 0:
         fresh_mc = entry_mc  # fallback to admin entry
 
+    # Subscriber AI-mode probe size mirrors HQ's paper_probe_size param so a
+    # single /setparam updates everyone's AI-mode size in lockstep with HQ.
+    from database.models import get_param as _get_param
+    try:
+        ai_size_for_sub = float(await _get_param("paper_probe_size") or 0.2)
+    except Exception:
+        ai_size_for_sub = 0.2
+
     opened = 0
     for sub in subs:
         try:
@@ -131,10 +139,9 @@ async def _relay_delayed(
                 continue
 
             # Resolve trade params per subscriber's KeyBot decision_mode.
-            # AI mode (default): use HQ's AI-blended TP/SL with 0.1 SOL probe.
+            # AI mode (default): use HQ's AI-blended TP/SL with paper_probe_size.
             # Manual mode: use subscriber's KeyBot buy size + TP + SL.
             # Returns None if manual mode and balance < KeyBot.buy_amount_sol.
-            ai_size_for_sub = 0.1
             resolved = await resolve_owner_trade_params(
                 sub.telegram_id, ai_size_for_sub, tp_x, sl_pct, sub.paper_balance,
             )

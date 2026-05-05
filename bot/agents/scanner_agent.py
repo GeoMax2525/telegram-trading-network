@@ -1122,7 +1122,9 @@ async def run_once() -> tuple[int, int]:
         # Auto-buy with probe size — no confidence scoring needed
         try:
             state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-            if state.paper_balance < 0.15:
+            tg_probe_cfg = await get_params("paper_probe_size")
+            tg_paper_sol = float(tg_probe_cfg.get("paper_probe_size") or 0.2)
+            if state.paper_balance < tg_paper_sol + 0.05:
                 continue
 
             pt = await open_paper_trade(
@@ -1130,7 +1132,7 @@ async def run_once() -> tuple[int, int]:
                 token_name=token_name,
                 entry_mc=entry_mc,
                 entry_price=entry_mc,
-                paper_sol=0.1,
+                paper_sol=tg_paper_sol,
                 confidence=80.0,  # high confidence — trusted signal
                 pattern_type="tg_signal",
                 tp_x=8.0,   # let runners run
@@ -1140,8 +1142,8 @@ async def run_once() -> tuple[int, int]:
             state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
             state.paper_trades_today += 1
             logger.info(
-                "Scanner: TG AUTO-BUY %s at MC=%s | 0.1 SOL | bal=%.4f",
-                token_name[:20], entry_mc, state.paper_balance,
+                "Scanner: TG AUTO-BUY %s at MC=%s | %.2f SOL | bal=%.4f",
+                token_name[:20], entry_mc, tg_paper_sol, state.paper_balance,
             )
 
             # Relay to subscribers
@@ -1345,13 +1347,14 @@ async def run_once() -> tuple[int, int]:
             sp = await get_params("max_position_sol")
             max_abs = float(sp.get("max_position_sol") or 5.0)
 
-            # Probe sizing: 0.1 SOL per trade like real degen traders.
-            # Small probes = survive losses, let winners compound via scaling.
-            # At 20% SL, a 0.1 SOL probe loses max 0.02 SOL per bad trade.
-            # At 5x win, a 0.1 SOL probe gains 0.4 SOL.
-            # 10 trades: 3 wins (3 * 0.4 = 1.2) + 7 losses (7 * 0.02 = 0.14)
-            # Net: +1.06 SOL even at 30% WR.
-            paper_sol = 0.1
+            # Probe sizing: pulled from agent_params (paper_probe_size) so
+            # /setparam can adjust without a deploy. Default 0.2 SOL.
+            # At 20% SL, a 0.2 SOL probe loses max 0.04 SOL per bad trade.
+            # At 5x win, a 0.2 SOL probe gains 0.8 SOL.
+            # 10 trades: 2 wins (2 * 0.8 = 1.6) + 8 losses (8 * 0.04 = 0.32)
+            # Net: +1.28 SOL even at 20% WR.
+            probe_cfg = await get_params("paper_probe_size")
+            paper_sol = float(probe_cfg.get("paper_probe_size") or 0.2)
 
             logger.info(
                 "Scanner: PAPER TRADE %s conf=%.0f sol=%.4f bal=%.4f",

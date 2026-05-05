@@ -3073,6 +3073,11 @@ AGENT_PARAM_DEFAULTS = {
     # to keep CAs private to HQ + subscribers. Toggle from /hub or /sharetoggle.
     "external_ca_post_enabled": 1.0,
 
+    # Paper trading probe size (SOL per trade). Used to be hardcoded 0.1 in
+    # scanner_agent and signal_relay; promoted to a param so it can be
+    # /setparam'd without a deploy. Phase 1 default 0.2 (was 0.1).
+    "paper_probe_size": 0.2,
+
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
     # before AI scoring. Non-learning: do not reference from learning_loop.
     # LP burn/lock gate was removed — rugcheck data proved too unreliable.

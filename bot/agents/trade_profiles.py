@@ -68,13 +68,17 @@ CHART_MIN            = 75      # pattern score > 75
 CALLER_MIN           = 70      # caller_score binary 20/80; 70 means scanned
 INSIDER_MIN          = 60      # insider_score 60+ == 1+ insiders
 
-# Timing
+# Timing — UTC ranges. Each token gets at most one timezone tag based
+# on the hour the trade opens (entry time). Allows Agent 6 to learn
+# WR / TP / SL per session.
 EARLY_ENTRY_MINUTES  = 30      # token < 30 min old
 LATE_ENTRY_MINUTES   = 240     # token > 4 h old
-ASIA_HOUR_START      = 0       # UTC
-ASIA_HOUR_END        = 8       # exclusive
-US_HOUR_START        = 13
-US_HOUR_END          = 21      # exclusive
+ASIA_HOUR_START      = 0       # UTC 00-08  (Tokyo open → mid-afternoon)
+ASIA_HOUR_END        = 8
+EUROPE_HOUR_START    = 8       # UTC 08-13  (London morning → midday)
+EUROPE_HOUR_END      = 13
+US_HOUR_START        = 13      # UTC 13-21  (NY open → close)
+US_HOUR_END          = 21
 
 # Market regime (SOL 24h change thresholds in PERCENT)
 SOL_UP_PCT           = 3.0
@@ -111,7 +115,8 @@ ALL_PATTERN_TYPES = [
     # Signal quality
     "high_chart", "high_caller",
     # Timing
-    "early_entry", "late_entry", "weekend_trade", "asia_hours", "us_hours",
+    "early_entry", "late_entry", "weekend_trade",
+    "asia_hours", "europe_hours", "us_hours",
     # Momentum
     "accelerating_volume",
     # Wallet
@@ -151,6 +156,7 @@ DEFAULT_AI_TRADE_PARAMS = {
     "late_entry":             _default(),
     "weekend_trade":          _default(),
     "asia_hours":             _default(),
+    "europe_hours":           _default(),
     "us_hours":               _default(),
     "accelerating_volume":    _default(),
     "tier1_insider":          _default(),
@@ -229,7 +235,9 @@ def match_pattern_types(candidate: dict, now: datetime | None = None) -> list[st
         tags.append("weekend_trade")
     if ASIA_HOUR_START <= now.hour < ASIA_HOUR_END:
         tags.append("asia_hours")
-    if US_HOUR_START <= now.hour < US_HOUR_END:
+    elif EUROPE_HOUR_START <= now.hour < EUROPE_HOUR_END:
+        tags.append("europe_hours")
+    elif US_HOUR_START <= now.hour < US_HOUR_END:
         tags.append("us_hours")
 
     # ── Momentum: accelerating_volume ────────────────────────────────
