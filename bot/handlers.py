@@ -4544,106 +4544,131 @@ async def cmd_4amreport(message: Message):
         losses_2x_traded = n_traded - wins_2x_traded
         wr_2x_traded = (wins_2x_traded / n_traded * 100) if n_traded > 0 else 0
 
+        # Render with HTML <pre> blocks for tabular sections so columns
+        # align in Telegram's monospace block. Token names are HTML-escaped
+        # so memecoin names with &<>* don't break parsing.
+        import html as _html
+
+        avg_peak_all = sum(r[2] for r in rows) / n if n > 0 else 0
+        median_all = sorted([r[2] for r in rows])[len(rows) // 2] if n > 0 else 0
+        avg_true_traded = sum(r[2] for r in traded_rows) / n_traded if n_traded > 0 else 0
+
+        # Header
         lines = [
-            DIVIDER,
-            "📡 4AM CALL REPORT",
-            f"Period: last 7 days",
-            DIVIDER,
+            "📡 <b>4AM CALL REPORT</b> — 7d",
             "",
-            f"Total 4am signals: {total_signals}",
-            f"  Traded with data:   {n_traded}",
-            f"  Untraded w/ data:   {untraded_with_data}  (cooldown / no fill)",
-            f"  No data available:  {untraded_no_data}  (token died / API miss)",
-            DIVIDER,
-            "",
-            "🎲 W/L (based on 2x threshold)",
-            "  CHANNEL (all signals)",
-            f"    Wins (≥ 2x):  {wins_2x_all}",
-            f"    Losses (< 2x): {losses_2x_all}",
-            f"    W/L:           {wl_ratio_all:.2f}  ({wr_2x_all:.1f}% win rate)",
-            "  OUR TRADES",
-            f"    Wins (≥ 2x):  {wins_2x_traded}",
-            f"    Losses (< 2x): {losses_2x_traded}",
-            f"    Win rate:     {wr_2x_traded:.1f}%",
-            DIVIDER,
+            f"<b>Signals:</b> {total_signals}",
+            f"  • Traded: <b>{n_traded}</b>",
+            f"  • Untraded (with data): {untraded_with_data}",
+            f"  • No data: {untraded_no_data}",
             "",
         ]
 
-        # CHANNEL HIT RATES — all signals with data, traded or not
-        lines.append("🎯 CHANNEL HIT RATES (all signals)")
+        # 2x W/L block — clean two-column layout in <pre>
+        lines.append("🎲 <b>W/L @ 2x threshold</b>")
+        lines.append("<pre>")
+        lines.append(f"               Channel      Ours")
+        lines.append(f"Wins (≥2x)  {wins_2x_all:7d}   {wins_2x_traded:7d}")
+        lines.append(f"Losses      {losses_2x_all:7d}   {losses_2x_traded:7d}")
+        lines.append(f"Win rate    {wr_2x_all:6.1f}%   {wr_2x_traded:6.1f}%")
+        lines.append("</pre>")
+
+        # Hit rates — channel-wide, monospace aligned
+        lines.append("🎯 <b>Channel Hit Rates</b>")
         if n > 0:
+            lines.append("<pre>")
             for threshold, label in [(1.5, "1.5x"), (2.0, "2.0x"), (3.0, "3.0x"),
-                                       (5.0, "5.0x"), (10.0, "10.0x"), (25.0, "25.0x"),
-                                       (50.0, "50.0x")]:
+                                       (5.0, "5.0x"), (10.0, " 10x"), (25.0, " 25x"),
+                                       (50.0, " 50x")]:
                 hits, pct = hit_pct(threshold, rows)
-                marker = "   ← key threshold" if threshold == 3.0 else ""
-                lines.append(f"  >= {label:6s} {hits:3d} / {n:3d} = {pct:5.1f}%{marker}")
-            avg_peak_all = sum(r[2] for r in rows) / n
-            sorted_all = sorted([r[2] for r in rows])
-            median_all = sorted_all[len(sorted_all) // 2]
+                marker = " ⭐" if threshold == 3.0 else ""
+                lines.append(f"≥ {label}   {pct:5.1f}%  ({hits}/{n}){marker}")
             lines.append("")
-            lines.append(f"  Avg peak:    {avg_peak_all:.2f}x")
-            lines.append(f"  Median peak: {median_all:.2f}x")
+            lines.append(f"Avg peak:    {avg_peak_all:.2f}x")
+            lines.append(f"Median peak: {median_all:.2f}x")
+            lines.append("</pre>")
         else:
-            lines.append("  No data yet.")
-        lines.append(DIVIDER)
-        lines.append("")
+            lines.append("<i>No data yet.</i>")
+            lines.append("")
 
-        # OUR-EXECUTION HIT RATES — restricted to trades we took
-        lines.append("📈 OUR EXECUTION (trades we took)")
+        # Our execution
+        lines.append("📈 <b>Our Execution</b>")
         if n_traded > 0:
+            lines.append("<pre>")
             for threshold, label in [(1.5, "1.5x"), (2.0, "2.0x"), (3.0, "3.0x"),
-                                       (5.0, "5.0x"), (10.0, "10.0x")]:
+                                       (5.0, "5.0x"), (10.0, " 10x")]:
                 hits, pct = hit_pct(threshold, traded_rows)
-                lines.append(f"  >= {label:6s} {hits:3d} / {n_traded:3d} = {pct:5.1f}%")
+                lines.append(f"≥ {label}   {pct:5.1f}%  ({hits}/{n_traded})")
             lines.append("")
-            lines.append(f"  Avg captured (our peak):  {avg_capture:.2f}x")
-            lines.append(f"  Avg true peak (traded):   {sum(r[2] for r in traded_rows)/n_traded:.2f}x")
-            lines.append(f"  Avg missed upside:        {avg_missed:.2f}x ({missed_pct:.0f}% of true peak)")
+            lines.append(f"We captured:  {avg_capture:.2f}x avg")
+            lines.append(f"True peak:    {avg_true_traded:.2f}x avg")
+            lines.append(f"Missed:       {missed_pct:.0f}% of upside")
+            lines.append("</pre>")
         else:
-            lines.append("  No traded signals yet.")
-        lines.append(DIVIDER)
-        lines.append("")
+            lines.append("<i>No traded signals yet.</i>")
+            lines.append("")
 
-        lines.append("⚠️ TOP 5 MISSED RUNNERS (we held)")
+        # Top 5 missed runners — one per line, name on its own line
+        lines.append("⚠️ <b>Top Missed Runners</b> (we held)")
         if misses:
+            lines.append("<pre>")
             for name, capture, true_peak, gap in misses:
-                lines.append(f"  {name[:24]:24s}  closed {capture:.1f}x → peaked {true_peak:.1f}x  (missed +{gap:.1f}x)")
+                safe_name = _html.escape(name[:30])
+                lines.append(f"{safe_name}")
+                lines.append(f"  closed {capture:5.1f}x → peaked {true_peak:6.1f}x")
+            lines.append("</pre>")
         else:
-            lines.append("  No big misses tracked yet.")
-        lines.append(DIVIDER)
-        lines.append("")
+            lines.append("<i>No big misses tracked yet.</i>")
+            lines.append("")
 
-        # Untraded runners — what the channel called that we never opened
+        # Untraded runners
         untraded_rows = [r for r in rows if not r[5]]
         untraded_runners = sorted(untraded_rows, key=lambda r: r[2], reverse=True)[:5]
-        lines.append("🚫 TOP 5 UNTRADED RUNNERS (cooldown/skip)")
+        lines.append("🚫 <b>Top Untraded Runners</b>")
         if untraded_runners:
+            lines.append("<pre>")
             for r in untraded_runners:
                 _, _, true_peak, _, name, _ = r
-                lines.append(f"  {name[:24]:24s}  {true_peak:.1f}x peak  (we never opened)")
+                safe_name = _html.escape(name[:30])
+                lines.append(f"{safe_name}")
+                lines.append(f"  peaked {true_peak:6.1f}x  (never opened)")
+            lines.append("</pre>")
         else:
-            lines.append("  None — every signal was traded.")
-        lines.append(DIVIDER)
-        lines.append("")
+            lines.append("<i>None — every signal was traded.</i>")
+            lines.append("")
 
-        lines.append("🚀 TOP 5 OVERALL RUNNERS (any source)")
+        # Top 5 overall
+        lines.append("🚀 <b>Top Overall Runners</b>")
         runners_all = sorted(rows, key=lambda r: r[2], reverse=True)[:5]
         if runners_all:
+            lines.append("<pre>")
             for r in runners_all:
                 _, _, true_peak, our_cap, name, was_traded = r
+                safe_name = _html.escape(name[:30])
                 tag = f"we got {our_cap:.1f}x" if was_traded else "untraded"
-                lines.append(f"  {name[:24]:24s}  {true_peak:.1f}x peak  ({tag})")
+                lines.append(f"{safe_name}")
+                lines.append(f"  peaked {true_peak:6.1f}x  ({tag})")
+            lines.append("</pre>")
         else:
-            lines.append("  No runners yet.")
-        lines.append(DIVIDER)
+            lines.append("<i>No runners yet.</i>")
 
         text = "\n".join(lines)
-        if len(text) <= 4000:
-            await message.reply(text, parse_mode="")
-        else:
-            for chunk_start in range(0, len(text), 3800):
-                await message.reply(text[chunk_start:chunk_start + 3800], parse_mode="")
+        try:
+            if len(text) <= 4000:
+                await message.reply(text, parse_mode="HTML")
+            else:
+                for chunk_start in range(0, len(text), 3800):
+                    await message.reply(
+                        text[chunk_start:chunk_start + 3800],
+                        parse_mode="HTML",
+                    )
+        except Exception as render_exc:
+            # Fallback to plain text if any token name slipped past escaping
+            logger.warning("4am report HTML render failed, falling back: %s", render_exc)
+            plain = text.replace("<b>", "").replace("</b>", "")
+            plain = plain.replace("<i>", "").replace("</i>", "")
+            plain = plain.replace("<pre>", "").replace("</pre>", "")
+            await message.reply(plain[:4000], parse_mode="")
     except Exception as exc:
         logger.error("4am report failed: %s", exc, exc_info=True)
         await message.reply(f"4am report error: {exc}", parse_mode="")
