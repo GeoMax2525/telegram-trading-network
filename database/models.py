@@ -3078,6 +3078,13 @@ AGENT_PARAM_DEFAULTS = {
     # /setparam'd without a deploy. Phase 1 default 0.2 (was 0.1).
     "paper_probe_size": 0.2,
 
+    # 4am (tg_signal) re-entry cooldown — separate from the global 24h close
+    # cooldown because /4amreport data shows the channel sometimes re-calls
+    # the same mint and it runs (Apple: closed 0.0x then peaked 18.8x on
+    # second call within 24h, was blocked). Shorter window means second-
+    # call winners get caught; cap each loss at 20% SL keeps risk bounded.
+    "tg_signal_cooldown_hours": 4.0,
+
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
     # before AI scoring. Non-learning: do not reference from learning_loop.
     # LP burn/lock gate was removed — rugcheck data proved too unreliable.
