@@ -4358,14 +4358,21 @@ async def cmd_commands(message: Message):
 async def cmd_4amreport(message: Message):
     """Hit-rate report for 4am calls — every TG signal in the last 7d, what
     multiplier it actually peaked at, what % hit 2x / 3x / 5x / 10x, and
-    where we exited vs the true peak. Admin-only, plain text."""
+    where we exited vs the true peak. Admin-only, plain text.
+
+    Also fetches current MC for untraded signals (cooldown / no-fill /
+    skipped) so the report reflects the channel's TRUE hit rate, not just
+    what we executed on. Untraded peaks are best-effort: current_mc /
+    signal_mcap, so they undercount tokens that pumped + dumped before we
+    queried (still better than excluding them entirely)."""
     if message.from_user.id not in ADMIN_IDS:
         return
     from datetime import datetime, timedelta
     from sqlalchemy import select, func, and_
     from database.models import (
-        AsyncSessionLocal, PaperTrade, TgSignal,
+        AsyncSessionLocal, PaperTrade, TgSignal, Token,
     )
+    from bot.scanner import fetch_current_market_cap
 
     cutoff = datetime.utcnow() - timedelta(days=7)
     DIVIDER = "━" * 30
@@ -4388,6 +4395,13 @@ async def cmd_4amreport(message: Message):
                 )
             )).scalars().all())
 
+            # Cached Token rows for untraded mints — saves DexScreener calls
+            untraded_mints = [s.mint for s in sigs]
+            tok_rows = list((await session.execute(
+                select(Token).where(Token.mint.in_(untraded_mints))
+            )).scalars().all()) if untraded_mints else []
+            token_by_mint = {t.mint: t for t in tok_rows}
+
         # Map mint → most recent matching trade
         trade_by_mint: dict = {}
         for t in trades:
@@ -4398,16 +4412,16 @@ async def cmd_4amreport(message: Message):
 
         total_signals = len(sigs)
         traded_signals = []
-        no_data_signals = []
+        untraded_signals = []
         for s in sigs:
             t = trade_by_mint.get(s.mint)
             if t and t.entry_mc:
                 traded_signals.append((s, t))
             else:
-                no_data_signals.append(s)
+                untraded_signals.append(s)
 
         # Compute true peak per traded signal — max(entry * peak_multiple, peak_after_close) / entry
-        rows = []  # (sig, trade, true_peak, our_capture_x, name)
+        rows = []  # (sig, trade, true_peak, our_capture_x, name, was_traded)
         for s, t in traded_signals:
             entry_mc = t.entry_mc or 0
             held_peak_mc = (t.peak_mc or entry_mc)
@@ -4416,7 +4430,49 @@ async def cmd_4amreport(message: Message):
             true_peak_x = (true_peak_mc / entry_mc) if entry_mc > 0 else 1.0
             our_capture_x = float(t.peak_multiple or 1.0)
             name = (t.token_name or s.mint[:12])
-            rows.append((s, t, true_peak_x, our_capture_x, name))
+            rows.append((s, t, true_peak_x, our_capture_x, name, True))
+
+        # Untraded signals — fetch current MC in parallel (bounded concurrency)
+        # so a 7-day window doesn't blow up the API. Best-effort peak estimate.
+        sem = asyncio.Semaphore(8)
+
+        async def _peak_for_untraded(sig):
+            async with sem:
+                signal_mcap = float(sig.mcap or 0)
+                if signal_mcap <= 0:
+                    return None
+                # Try cached Token row first (last_known MC)
+                cur_mc = 0.0
+                tok = token_by_mint.get(sig.mint)
+                if tok and tok.market_cap:
+                    cur_mc = max(cur_mc, float(tok.market_cap))
+                # Then live DexScreener for accuracy
+                try:
+                    live = await fetch_current_market_cap(sig.mint)
+                    if live and live > 0:
+                        cur_mc = max(cur_mc, float(live))
+                except Exception:
+                    pass
+                if cur_mc <= 0:
+                    return None
+                peak_x = cur_mc / signal_mcap
+                name = (tok.name if tok and tok.name else sig.mint[:12])
+                return (sig, peak_x, name)
+
+        untraded_results = await asyncio.gather(
+            *[_peak_for_untraded(s) for s in untraded_signals],
+            return_exceptions=True,
+        )
+        untraded_with_data = 0
+        untraded_no_data = 0
+        for r in untraded_results:
+            if isinstance(r, Exception) or r is None:
+                untraded_no_data += 1
+                continue
+            sig, peak_x, name = r
+            untraded_with_data += 1
+            # our_capture_x = 0 (we never opened it). was_traded=False.
+            rows.append((sig, None, peak_x, 0.0, name, False))
 
         n = len(rows)
 
@@ -4450,6 +4506,15 @@ async def cmd_4amreport(message: Message):
         # Top runners (highest true_peak)
         runners = sorted(rows, key=lambda r: r[2], reverse=True)[:5]
 
+        # Hit-rate breakdown — channel-wide (all rows) vs our-trades-only
+        traded_rows = [r for r in rows if r[5]]
+        n_traded = len(traded_rows)
+
+        def hit_pct(threshold: float, subset: list) -> tuple[int, float]:
+            hits = sum(1 for r in subset if r[2] >= threshold)
+            pct = (hits / len(subset) * 100) if subset else 0
+            return hits, pct
+
         # ── Render ────────────────────────────────────────────────
         lines = [
             DIVIDER,
@@ -4458,36 +4523,50 @@ async def cmd_4amreport(message: Message):
             DIVIDER,
             "",
             f"Total 4am signals: {total_signals}",
-            f"  Traded with data: {n}",
-            f"  No trade/data:    {len(no_data_signals)}  (cooldown / no fill)",
+            f"  Traded with data:   {n_traded}",
+            f"  Untraded w/ data:   {untraded_with_data}  (cooldown / no fill)",
+            f"  No data available:  {untraded_no_data}  (token died / API miss)",
             DIVIDER,
             "",
-            "🎯 PEAK HIT RATES",
         ]
+
+        # CHANNEL HIT RATES — all signals with data, traded or not
+        lines.append("🎯 CHANNEL HIT RATES (all signals)")
         if n > 0:
-            lines.append(f"  >= 1.5x:  {h15:3d} / {n:3d} = {p15:5.1f}%")
-            lines.append(f"  >= 2.0x:  {h20:3d} / {n:3d} = {p20:5.1f}%")
-            lines.append(f"  >= 3.0x:  {h30:3d} / {n:3d} = {p30:5.1f}%   ← key threshold")
-            lines.append(f"  >= 5.0x:  {h50:3d} / {n:3d} = {p50:5.1f}%")
-            lines.append(f"  >= 10.0x: {h10x:3d} / {n:3d} = {p10x:5.1f}%")
-            lines.append(f"  >= 25.0x: {h25x:3d} / {n:3d} = {p25x:5.1f}%")
+            for threshold, label in [(1.5, "1.5x"), (2.0, "2.0x"), (3.0, "3.0x"),
+                                       (5.0, "5.0x"), (10.0, "10.0x"), (25.0, "25.0x"),
+                                       (50.0, "50.0x")]:
+                hits, pct = hit_pct(threshold, rows)
+                marker = "   ← key threshold" if threshold == 3.0 else ""
+                lines.append(f"  >= {label:6s} {hits:3d} / {n:3d} = {pct:5.1f}%{marker}")
+            avg_peak_all = sum(r[2] for r in rows) / n
+            sorted_all = sorted([r[2] for r in rows])
+            median_all = sorted_all[len(sorted_all) // 2]
             lines.append("")
-            lines.append(f"Avg peak:    {avg_peak:.2f}x")
-            lines.append(f"Median peak: {median_peak:.2f}x")
+            lines.append(f"  Avg peak:    {avg_peak_all:.2f}x")
+            lines.append(f"  Median peak: {median_all:.2f}x")
         else:
-            lines.append("  No trades with data yet.")
+            lines.append("  No data yet.")
         lines.append(DIVIDER)
         lines.append("")
 
-        lines.append("📊 OUR EXIT vs TRUE PEAK")
-        if n > 0:
+        # OUR-EXECUTION HIT RATES — restricted to trades we took
+        lines.append("📈 OUR EXECUTION (trades we took)")
+        if n_traded > 0:
+            for threshold, label in [(1.5, "1.5x"), (2.0, "2.0x"), (3.0, "3.0x"),
+                                       (5.0, "5.0x"), (10.0, "10.0x")]:
+                hits, pct = hit_pct(threshold, traded_rows)
+                lines.append(f"  >= {label:6s} {hits:3d} / {n_traded:3d} = {pct:5.1f}%")
+            lines.append("")
             lines.append(f"  Avg captured (our peak):  {avg_capture:.2f}x")
-            lines.append(f"  Avg true peak:            {avg_peak:.2f}x")
+            lines.append(f"  Avg true peak (traded):   {sum(r[2] for r in traded_rows)/n_traded:.2f}x")
             lines.append(f"  Avg missed upside:        {avg_missed:.2f}x ({missed_pct:.0f}% of true peak)")
+        else:
+            lines.append("  No traded signals yet.")
         lines.append(DIVIDER)
         lines.append("")
 
-        lines.append("⚠️ TOP 5 MISSED RUNNERS")
+        lines.append("⚠️ TOP 5 MISSED RUNNERS (we held)")
         if misses:
             for name, capture, true_peak, gap in misses:
                 lines.append(f"  {name[:24]:24s}  closed {capture:.1f}x → peaked {true_peak:.1f}x  (missed +{gap:.1f}x)")
@@ -4496,11 +4575,26 @@ async def cmd_4amreport(message: Message):
         lines.append(DIVIDER)
         lines.append("")
 
-        lines.append("🚀 TOP 5 RUNNERS (true peak)")
-        if runners:
-            for r in runners:
-                _, _, true_peak, our_cap, name = r
-                lines.append(f"  {name[:24]:24s}  {true_peak:.1f}x peak  (we got {our_cap:.1f}x)")
+        # Untraded runners — what the channel called that we never opened
+        untraded_rows = [r for r in rows if not r[5]]
+        untraded_runners = sorted(untraded_rows, key=lambda r: r[2], reverse=True)[:5]
+        lines.append("🚫 TOP 5 UNTRADED RUNNERS (cooldown/skip)")
+        if untraded_runners:
+            for r in untraded_runners:
+                _, _, true_peak, _, name, _ = r
+                lines.append(f"  {name[:24]:24s}  {true_peak:.1f}x peak  (we never opened)")
+        else:
+            lines.append("  None — every signal was traded.")
+        lines.append(DIVIDER)
+        lines.append("")
+
+        lines.append("🚀 TOP 5 OVERALL RUNNERS (any source)")
+        runners_all = sorted(rows, key=lambda r: r[2], reverse=True)[:5]
+        if runners_all:
+            for r in runners_all:
+                _, _, true_peak, our_cap, name, was_traded = r
+                tag = f"we got {our_cap:.1f}x" if was_traded else "untraded"
+                lines.append(f"  {name[:24]:24s}  {true_peak:.1f}x peak  ({tag})")
         else:
             lines.append("  No runners yet.")
         lines.append(DIVIDER)
