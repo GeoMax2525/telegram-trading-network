@@ -303,11 +303,17 @@ async def _handle_message(event, channel_name: str) -> None:
         "tg_volume": parsed.get("volume"),
     }
 
-    # Add to pending candidates for the next scanner tick
+    # Add to pending candidates for the next scanner tick AND fire the
+    # urgent-wake event so scanner processes this immediately instead of
+    # waiting up to 15s for its next regular tick.
     state.pending_candidates.append(candidate)
     state.data_points_today += 1
+    try:
+        state.get_urgent_event().set()
+    except Exception:
+        pass
 
-    logger.info("TG scraper: injected %s into scanner pipeline from [%s]", mint[:12], channel_name)
+    logger.info("TG scraper: injected %s into scanner pipeline from [%s] (urgent wake)", mint[:12], channel_name)
 
 
 async def tg_scraper_loop() -> None:

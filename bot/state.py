@@ -21,6 +21,20 @@ scanner_status:           str             = "idle"   # "running" | "idle"
 # Each entry: {mint, name, symbol, source, ai_score, match_score, mcap, liquidity}
 pending_candidates:       list[dict]      = []
 
+# Set by tg_scraper when a high-priority candidate is injected (4am etc).
+# Scanner loop waits on this with a 15s timeout instead of plain asyncio.sleep,
+# so urgent signals get processed in ~1s instead of waiting up to 15s for
+# the next regular tick. Lazily initialised on first read so module-level
+# import order doesn't matter.
+import asyncio as _asyncio
+urgent_candidate_event: "_asyncio.Event | None" = None
+
+def get_urgent_event() -> "_asyncio.Event":
+    global urgent_candidate_event
+    if urgent_candidate_event is None:
+        urgent_candidate_event = _asyncio.Event()
+    return urgent_candidate_event
+
 # ── Learning Loop Agent 6 live stats ────────────────────────────────────────
 learning_loop_last_run:      datetime | None = None
 learning_loop_last_analyzed: int             = 0

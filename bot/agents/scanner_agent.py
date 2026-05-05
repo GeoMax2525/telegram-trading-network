@@ -1482,13 +1482,24 @@ async def run_once() -> tuple[int, int]:
 # ── Background loop ───────────────────────────────────────────────────────────
 
 async def scanner_agent_loop() -> None:
-    """Runs the scanner every 30 seconds ALWAYS — autotrade only controls execution."""
+    """Runs the scanner every POLL_INTERVAL seconds, OR earlier if the
+    urgent_candidate_event fires (4am signal injected by tg_scraper).
+    Autotrade only controls execution; scanner cycle is always on."""
     await asyncio.sleep(STARTUP_DELAY)
-    logger.info("Scanner agent started — polling every %ds (always-on mode)", POLL_INTERVAL)
+    logger.info("Scanner agent started — polling every %ds (urgent-wake enabled)", POLL_INTERVAL)
+    urgent = state.get_urgent_event()
     while True:
         try:
             await run_once()
         except Exception as exc:
             logger.error("Scanner loop error: %s", exc)
             state.scanner_status = "idle"
-        await asyncio.sleep(POLL_INTERVAL)
+        # Wait for either the regular interval OR an urgent wake (TG signal).
+        # asyncio.wait_for raises TimeoutError after POLL_INTERVAL — we treat
+        # that as "no urgent signal, run a regular tick."
+        try:
+            await asyncio.wait_for(urgent.wait(), timeout=POLL_INTERVAL)
+            urgent.clear()
+            logger.info("Scanner: urgent wake (TG signal) — skipping wait")
+        except asyncio.TimeoutError:
+            pass
