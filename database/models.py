@@ -3028,7 +3028,7 @@ AGENT_PARAM_DEFAULTS = {
     # constants. /setparam also works for manual overrides.
     "scanner_min_mc": 5000, "scanner_max_mc": 15000000, "scanner_min_liquidity": 3000,
     "scanner_min_ai_score": 40, "scanner_rugcheck_max_risk": 500,
-    "scanner_interval_seconds": 15, "scanner_max_candidates": 10,
+    "scanner_interval_seconds": 20, "scanner_max_candidates": 10,
     "scanner_max_age_hours": 4.0,
     "scanner_min_buyers_m5": 5.0,
     # Wallet tiers — live tunables are the tier{n}_min_{wr,mult,trades,score}

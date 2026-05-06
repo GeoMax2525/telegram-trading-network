@@ -75,7 +75,17 @@ logger = logging.getLogger(__name__)
 PROFILES_URL    = "https://api.dexscreener.com/token-profiles/latest/v1"
 RUGCHECK_URL    = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
-POLL_INTERVAL   = 8      # seconds (faster scanning — speed is edge)
+POLL_INTERVAL   = 20     # default seconds — read from agent_params each cycle
+                          # (scanner_interval_seconds). 8s was burning ~3-5M
+                          # Helius credits/day on source 2 polling. 20s halves
+                          # that with no real strategy impact (urgent-wake event
+                          # already covers the 4am latency case).
+
+# Rotation cursor for source 2 — instead of polling all 50 tier wallets per
+# cycle, sample 5 and rotate through. Full pass takes ~80s instead of 8s,
+# 10x fewer Helius calls. Wallet priority order stays preserved.
+_SOURCE2_CURSOR  = 0
+_SOURCE2_BATCH   = 5
 STARTUP_DELAY   = 60     # seconds after bot start
 INSIDER_WINDOW  = 1_800   # 30 min in seconds
 
@@ -525,7 +535,25 @@ async def _source2_insider_wallets() -> list[dict]:
         return tier_w * wr_bonus
 
     wallets = sorted(wallets, key=_wallet_priority, reverse=True)
-    logger.info("Scanner source2: checking %d tier1/2/3 wallets (prioritized)", len(wallets[:50]))
+
+    # Sample-based rotation: each cycle checks _SOURCE2_BATCH wallets starting
+    # at _SOURCE2_CURSOR. Full pass through priority queue takes ~10 cycles.
+    # Cuts source 2 Helius calls by ~10x with same coverage over time.
+    global _SOURCE2_CURSOR
+    pool = wallets[:50]
+    if not pool:
+        return []
+    cursor = _SOURCE2_CURSOR % len(pool)
+    sampled = pool[cursor:cursor + _SOURCE2_BATCH]
+    if len(sampled) < _SOURCE2_BATCH:
+        # Wrap around to the top of the priority queue
+        sampled += pool[:_SOURCE2_BATCH - len(sampled)]
+    _SOURCE2_CURSOR = (cursor + _SOURCE2_BATCH) % len(pool)
+    wallets = sampled
+    logger.info(
+        "Scanner source2: checking %d/%d tier1/2/3 wallets (rotation cursor=%d)",
+        len(wallets), len(pool), cursor,
+    )
 
     since_ts = int(time.time()) - INSIDER_WINDOW
     # mint -> {1: count, 2: count, 3: count}
@@ -1501,11 +1529,13 @@ async def run_once() -> tuple[int, int]:
 # ── Background loop ───────────────────────────────────────────────────────────
 
 async def scanner_agent_loop() -> None:
-    """Runs the scanner every POLL_INTERVAL seconds, OR earlier if the
-    urgent_candidate_event fires (4am signal injected by tg_scraper).
-    Autotrade only controls execution; scanner cycle is always on."""
+    """Runs the scanner every scanner_interval_seconds (default 20), OR
+    earlier if the urgent_candidate_event fires (4am signal injected by
+    tg_scraper). Interval is read fresh each cycle so /setparam changes
+    take effect without restart. Autotrade only controls execution;
+    scanner cycle is always on."""
     await asyncio.sleep(STARTUP_DELAY)
-    logger.info("Scanner agent started — polling every %ds (urgent-wake enabled)", POLL_INTERVAL)
+    logger.info("Scanner agent started — polling every %ds default (urgent-wake enabled)", POLL_INTERVAL)
     urgent = state.get_urgent_event()
     while True:
         try:
@@ -1513,11 +1543,14 @@ async def scanner_agent_loop() -> None:
         except Exception as exc:
             logger.error("Scanner loop error: %s", exc)
             state.scanner_status = "idle"
-        # Wait for either the regular interval OR an urgent wake (TG signal).
-        # asyncio.wait_for raises TimeoutError after POLL_INTERVAL — we treat
-        # that as "no urgent signal, run a regular tick."
+        # Wait for either the dynamic interval OR an urgent wake (TG signal).
         try:
-            await asyncio.wait_for(urgent.wait(), timeout=POLL_INTERVAL)
+            interval_cfg = await get_params("scanner_interval_seconds")
+            interval = float(interval_cfg.get("scanner_interval_seconds") or POLL_INTERVAL)
+        except Exception:
+            interval = POLL_INTERVAL
+        try:
+            await asyncio.wait_for(urgent.wait(), timeout=interval)
             urgent.clear()
             logger.info("Scanner: urgent wake (TG signal) — skipping wait")
         except asyncio.TimeoutError:
