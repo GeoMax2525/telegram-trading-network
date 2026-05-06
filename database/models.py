@@ -3721,6 +3721,39 @@ async def init_agent_params() -> int:
                     row.updated_at = datetime.utcnow()
                     added += 1
             await session.commit()
+
+            # One-shot: archive legacy manual_close rows. When we flipped
+            # manual_close from META to STRATEGY (commit d5b15b1), historical
+            # manual closes from before the user's last /resetbalance suddenly
+            # appeared in /hub's "All Time" PnL because they were never
+            # caught by the original reclassify (manual_close was META at
+            # that time). Flip them all to "reset" once so the displayed
+            # All Time PnL equals what's been earned since the actual reset.
+            flag = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "manual_close_archived_v1_done")
+            )).scalar_one_or_none()
+            if flag is None or flag.param_value < 1.0:
+                from sqlalchemy import update as _update
+                result = await session.execute(
+                    _update(PaperTrade)
+                    .where(
+                        PaperTrade.status == "closed",
+                        PaperTrade.close_reason == "manual_close",
+                    )
+                    .values(close_reason="reset")
+                )
+                logger.info(
+                    "Archived %d legacy manual_close rows to 'reset' so /hub "
+                    "All Time matches actual balance change since reset",
+                    result.rowcount or 0,
+                )
+                if flag is None:
+                    session.add(AgentParam(param_name="manual_close_archived_v1_done", param_value=1.0))
+                else:
+                    flag.param_value = 1.0
+                    flag.updated_at = datetime.utcnow()
+                await session.commit()
+                added += 1
     except Exception as exc:
         logger.warning("Paper tightening migration failed: %s", exc)
 
