@@ -570,7 +570,7 @@ async def _manual_close_all_open(bot) -> int:
     closed = 0
     for pt in trades:
         try:
-            live = await fetch_live_data(pt.token_address)
+            live = await fetch_live_data(pt.token_address, bypass_cache=True)
             current_mc = (live or {}).get("market_cap") or 0
 
             entry_mc = pt.entry_mc or 1
@@ -1148,10 +1148,12 @@ async def cb_subhub(callback: CallbackQuery):
         if pt.status != "open":
             await callback.answer("Trade already closed.")
             return
-        # Close at current MC
+        # Close at current MC — bypass cache so subscriber sees real price
         from bot.scanner import fetch_current_market_cap
         try:
-            cur_mc = await fetch_current_market_cap(pt.token_address) or (pt.entry_mc or 0)
+            cur_mc = await fetch_current_market_cap(
+                pt.token_address, bypass_cache=True,
+            ) or (pt.entry_mc or 0)
         except Exception:
             cur_mc = pt.entry_mc or 0
         entry_mc = pt.entry_mc or 0
@@ -1197,7 +1199,9 @@ async def cb_subhub(callback: CallbackQuery):
         total_pnl = 0.0
         for pt in open_trades:
             try:
-                cur_mc = await fetch_current_market_cap(pt.token_address) or (pt.entry_mc or 0)
+                cur_mc = await fetch_current_market_cap(
+                    pt.token_address, bypass_cache=True,
+                ) or (pt.entry_mc or 0)
             except Exception:
                 cur_mc = pt.entry_mc or 0
             entry_mc = pt.entry_mc or 0
@@ -1445,7 +1449,12 @@ async def cb_hub(callback: CallbackQuery):
                 entry_mc = pt.entry_mc or 0
                 current_mc = 0
                 try:
-                    live_mc = await fetch_current_market_cap(pt.token_address)
+                    # bypass_cache=True — manual closes need fresh price,
+                    # not a stale 5-min cached value (would close at lower
+                    # MC than what user sees and cost them upside).
+                    live_mc = await fetch_current_market_cap(
+                        pt.token_address, bypass_cache=True,
+                    )
                     if live_mc:
                         current_mc = live_mc
                 except Exception:

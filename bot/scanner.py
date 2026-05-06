@@ -95,6 +95,7 @@ def _cache_set(address: str, pair: dict) -> None:
 async def fetch_token_data(
     address: str,
     allow_any_dex: bool = False,
+    bypass_cache: bool = False,
 ) -> Optional[dict]:
     """
     Calls the DexScreener API for the given contract address.
@@ -108,15 +109,21 @@ async def fetch_token_data(
     helpers so trades already open on now-unsupported DEXes can still
     be tracked to exit — filtering them there would orphan the
     position with current_mc=0 forever.
+
+    bypass_cache=True skips the 5-min response cache and forces a fresh
+    DexScreener call. Use for manual closes / live trade execution where
+    stale data costs the user money — they tapped Close explicitly,
+    they need the actual current price, not a cached snapshot.
     """
-    # Check cache first (5 min TTL)
-    cached = _cache_get(address)
-    if cached is not None:
-        if allow_any_dex:
-            return cached
-        # Cached pair might be on a non-allowed DEX — still need to filter
-        if _pair_dex_id(cached) in ALLOWED_DEXES:
-            return cached
+    # Check cache first (5 min TTL) unless bypassing
+    if not bypass_cache:
+        cached = _cache_get(address)
+        if cached is not None:
+            if allow_any_dex:
+                return cached
+            # Cached pair might be on a non-allowed DEX — still need to filter
+            if _pair_dex_id(cached) in ALLOWED_DEXES:
+                return cached
 
     url = DEXSCREENER_URL.format(address=address)
 
@@ -645,21 +652,28 @@ def calculate_ai_score(metrics: dict) -> dict:
 
 # ── Public entry points ───────────────────────────────────────────────────────
 
-async def fetch_current_market_cap(address: str) -> Optional[float]:
+async def fetch_current_market_cap(
+    address: str,
+    bypass_cache: bool = False,
+) -> Optional[float]:
     """Returns the current market cap (USD) for an address, or None on failure.
     Falls back to fdv if marketCap is null (common on pump.fun tokens).
 
     Uses allow_any_dex=True so trades already open on now-unsupported
     DEXes can still be tracked to exit; the DEX allowlist only gates
     the scanner's open path.
+
+    bypass_cache=True forces a fresh DexScreener call. Use for manual
+    closes — the 5-min response cache otherwise causes close prices to
+    lag behind reality (saw $160K MC, closed at stale $124K).
     """
-    pair = await fetch_token_data(address, allow_any_dex=True)
+    pair = await fetch_token_data(address, allow_any_dex=True, bypass_cache=bypass_cache)
     if pair is None:
         return None
     return float(pair.get("marketCap") or pair.get("fdv") or 0) or None
 
 
-async def fetch_live_data(address: str) -> Optional[dict]:
+async def fetch_live_data(address: str, bypass_cache: bool = False) -> Optional[dict]:
     """
     Returns live token data dict, or None on failure.
     Keys: market_cap, liquidity_usd, price_usd, symbol, price_changes, volume
@@ -667,8 +681,11 @@ async def fetch_live_data(address: str) -> Optional[dict]:
     Uses allow_any_dex=True so the paper monitor can track trades
     opened before the filter (or against DEXes that later dropped off
     the allowlist) all the way to their TP/SL/expired exit.
+
+    bypass_cache=True forces fresh DexScreener fetch — use for manual
+    closes where stale data costs PnL.
     """
-    pair = await fetch_token_data(address, allow_any_dex=True)
+    pair = await fetch_token_data(address, allow_any_dex=True, bypass_cache=bypass_cache)
     if pair is None:
         return None
     mc     = float(pair.get("marketCap") or pair.get("fdv") or 0)
