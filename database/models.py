@@ -3085,6 +3085,15 @@ AGENT_PARAM_DEFAULTS = {
     # call winners get caught; cap each loss at 20% SL keeps risk bounded.
     "tg_signal_cooldown_hours": 4.0,
 
+    # Helius credit kill-switch. When 1.0, ALL Helius-using subsystems pause:
+    # LaserStream WebSocket disconnects, wallet_analyst skips ticks,
+    # scanner_agent's source 2 (insider wallet detection) skips, and per-
+    # candidate Helius enrichment stops. The bot keeps trading via DexScreener
+    # data. Toggle via /pausehelius and /resumehelius. Use during plan
+    # downgrade or credit emergencies — running at 6-7M credits/day on a
+    # 100M/month plan was unsustainable.
+    "helius_paused": 0.0,
+
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
     # before AI scoring. Non-learning: do not reference from learning_loop.
     # LP burn/lock gate was removed — rugcheck data proved too unreliable.

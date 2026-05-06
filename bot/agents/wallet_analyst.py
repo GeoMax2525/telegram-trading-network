@@ -938,12 +938,18 @@ async def run_once() -> tuple[int, int]:
 # ── Background loop ──────────────────────────────────────────────────────────
 
 async def wallet_analyst_loop() -> None:
-    """Runs the wallet analyst once per hour."""
+    """Runs the wallet analyst once per hour. Skips ticks while
+    helius_paused agent_param is on (credit kill-switch)."""
     await asyncio.sleep(STARTUP_DELAY)
     logger.info("Wallet Analyst agent started — running every %ds (Helius enrichment)", POLL_INTERVAL)
     while True:
         try:
-            await run_once()
+            from database.models import get_param as _get_param
+            paused = await _get_param("helius_paused")
+            if paused and paused >= 0.5:
+                logger.info("Wallet Analyst: helius_paused=1, skipping tick")
+            else:
+                await run_once()
         except Exception as exc:
             logger.error("Wallet Analyst loop error: %s", exc)
         await asyncio.sleep(POLL_INTERVAL)

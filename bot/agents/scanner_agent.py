@@ -500,7 +500,19 @@ async def _source2_insider_wallets() -> list[dict]:
     """
     Checks recent buys by Tier 1/2 wallets via Helius.
     Returns list of {mint, source, insider_count, insider_tier_1_count, insider_tier_2_count}.
+
+    Skipped while helius_paused=1. Source 2 is the heaviest Helius consumer
+    in the scanner — it does getSignaturesForAddress + getTransaction loops
+    on tier wallets every 8s. Pausing it cuts ~70% of scanner Helius cost.
     """
+    try:
+        from database.models import get_param as _get_param
+        paused = await _get_param("helius_paused")
+        if paused and paused >= 0.5:
+            return []
+    except Exception:
+        pass
+
     wallets = await get_tier_wallets(max_tier=3)
     if not wallets:
         logger.info("Scanner source2: no tiered wallets in DB — source will return empty until Agent 2 or GMGN imports some")

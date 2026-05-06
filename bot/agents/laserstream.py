@@ -175,6 +175,18 @@ async def laserstream_loop() -> None:
     logger.info("LaserStream: connecting to %s...", ws_url[:50])
 
     while True:
+        # Helius kill-switch — when paused, sleep instead of streaming.
+        # Re-checks every 60s so unpause re-enables without restart.
+        try:
+            from database.models import get_param as _get_param
+            paused = await _get_param("helius_paused")
+            if paused and paused >= 0.5:
+                logger.info("LaserStream: helius_paused=1, sleeping 60s")
+                await asyncio.sleep(60)
+                continue
+        except Exception:
+            pass
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(ws_url, heartbeat=30) as ws:

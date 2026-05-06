@@ -4969,6 +4969,53 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("pausehelius"))
+async def cmd_pausehelius(message: Message):
+    """Helius credit kill-switch ON. Pauses LaserStream, wallet_analyst,
+    scanner source 2 (insider wallets). Bot keeps trading via DexScreener.
+    Admin-only."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await set_param(
+        "helius_paused", 1.0,
+        f"Paused via /pausehelius by admin {message.from_user.id}",
+    )
+    await message.reply(
+        "🛑 <b>Helius PAUSED</b>\n\n"
+        "Disabled now:\n"
+        "  • LaserStream WebSocket\n"
+        "  • Wallet Analyst hourly enrichment\n"
+        "  • Scanner source 2 (insider wallet detection)\n\n"
+        "Still running:\n"
+        "  • DexScreener-based scanner (sources 1, 3)\n"
+        "  • TG scraper / 4am auto-buy\n"
+        "  • Paper monitor (DexScreener for MC)\n"
+        "  • Pattern engine, learning loop\n\n"
+        "Credit burn should drop to near zero. Run /resumehelius to undo.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("resumehelius"))
+async def cmd_resumehelius(message: Message):
+    """Helius credit kill-switch OFF. Re-enables LaserStream, wallet_analyst,
+    scanner source 2. Admin-only."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await set_param(
+        "helius_paused", 0.0,
+        f"Resumed via /resumehelius by admin {message.from_user.id}",
+    )
+    await message.reply(
+        "✅ <b>Helius RESUMED</b>\n\n"
+        "LaserStream will reconnect within 60s.\n"
+        "Wallet Analyst resumes on next hourly tick.\n"
+        "Scanner source 2 (insider wallets) re-enabled.\n\n"
+        "Watch credit usage on Helius dashboard.",
+        parse_mode="HTML",
+    )
+
+
 @router.message(Command("sharetoggle"))
 async def cmd_sharetoggle(message: Message):
     """Toggle whether each new trade's CA is auto-posted to the external
