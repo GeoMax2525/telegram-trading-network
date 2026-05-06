@@ -233,6 +233,7 @@ async def _check_open_trades(bot) -> None:
         "stale_exit_hours", "stale_exit_threshold",
         "expired_exit_hours", "expired_exit_threshold",
         "breakeven_trigger", "profit_trail_trigger", "profit_trail_pct",
+        "tg_signal_trail_pct",
     )
 
     for pt in trades:
@@ -389,10 +390,11 @@ async def _check_open_trades(bot) -> None:
 
             # Profit trailing stop: once peak crosses the profit trail
             # trigger, follow the peak down by profit_trail_pct.
-            # 4am trades get wider settings to let runners run.
+            # 4am trades get wider settings to let runners run; trail %
+            # is /setparam-tunable via tg_signal_trail_pct.
             if is_tg_signal:
                 pt_trigger = 3.0   # 4am: don't trail until 3x
-                pt_pct = 0.30      # 4am: 30% below peak
+                pt_pct = float(cfg.get("tg_signal_trail_pct", 0.35) or 0.35)
             else:
                 pt_trigger = float(cfg.get("profit_trail_trigger", 2.0) or 2.0)
                 pt_pct     = float(cfg.get("profit_trail_pct",     0.15) or 0.15)
@@ -549,9 +551,9 @@ async def _check_open_trades(bot) -> None:
             # Trailing stop — 4am signals get wider trail + later activation
             if resolved and resolved["trail_enabled"]:
                 if is_tg_signal:
-                    # 4am trades: trail at 30% below peak, activate at 3x
+                    # 4am trades: activate at 3x peak, trail width from param
                     trigger_mult = 3.0   # activate at 3x peak
-                    trail_pct = 0.30     # 30% below peak
+                    trail_pct = float(cfg.get("tg_signal_trail_pct", 0.35) or 0.35)
                 else:
                     trigger_mult = 1.0 + float(resolved["trail_trigger"])
                     trail_pct = float(resolved["trail_pct"])

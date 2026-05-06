@@ -3088,6 +3088,13 @@ AGENT_PARAM_DEFAULTS = {
     # call winners get caught; cap each loss at 20% SL keeps risk bounded.
     "tg_signal_cooldown_hours": 4.0,
 
+    # 4am trail width % below peak. Was hardcoded 0.30 (30% off peak) in
+    # paper_monitor; promoted to a param after /4amreport showed avg
+    # captured 1.32x vs avg true peak 3.10x (54% upside lost to early
+    # trail exits). Widened to 0.35 to let typical 4am dump-then-pump
+    # patterns survive the cooldown wave. /setparam tg_signal_trail_pct.
+    "tg_signal_trail_pct": 0.35,
+
     # Helius credit kill-switch. When 1.0, ALL Helius-using subsystems pause:
     # LaserStream WebSocket disconnects, wallet_analyst skips ticks,
     # scanner_agent's source 2 (insider wallet detection) skips, and per-
