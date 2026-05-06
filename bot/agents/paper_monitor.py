@@ -419,9 +419,15 @@ async def _check_open_trades(bot) -> None:
             # This is how real traders work — don't risk big until it proves.
             # HQ-only: subscriber relay rows have a fixed 0.1 SOL probe and
             # don't scale; scaling them would also drain admin paper_balance.
+            #
+            # Upper cap at 1.95x: above 2.0x the scale-out branch fires in
+            # the same tick, which used to mean we'd add 0.2 SOL THEN sell
+            # 30% of it at the same price — wasteful round-trip. Confirmation
+            # zone is 1.5x-1.95x (token is moving but not yet at first profit
+            # target); scale-out owns 2.0x+.
             age_min = age_hours * 60
             if (pt.subscriber_id is None
-                    and current_mult >= 1.5 and age_min >= 2 and age_min <= 10
+                    and 1.5 <= current_mult < 1.95 and age_min >= 2 and age_min <= 10
                     and sol < 0.25 and remaining >= 100):
                 # Token pumped 50%+ in first 2-10 min — add more size
                 add_sol = 0.2
