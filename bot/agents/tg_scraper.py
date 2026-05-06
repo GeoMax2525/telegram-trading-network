@@ -294,7 +294,80 @@ async def _handle_message(event, channel_name: str) -> None:
     except Exception as exc:
         logger.debug("TG scraper: upgrade check failed for %s: %s", mint[:12], exc)
 
-    # Inject into scanner candidate pool immediately
+    # FAST-PATH: open the trade DIRECTLY from tg_scraper instead of routing
+    # through scanner. Cuts entry latency from ~3-8s to ~0.5-2s on 4am
+    # signals — scanner round-trip (run_once cycle through all sources +
+    # eval pipeline) was the bottleneck. Falls back to candidate-injection
+    # if any step fails so scanner can retry on next cycle.
+    fast_path_opened = False
+    try:
+        from bot.scanner import fetch_token_data, parse_token_metrics
+        from bot import state as _state
+        from database.models import (
+            open_paper_trade, get_params, compute_paper_balance,
+        )
+
+        # Fresh MC fetch (DexScreener, bypass cache so the entry price is
+        # exactly current — the original /4amreport showed stale-cache
+        # entries hurt PnL).
+        pair = await fetch_token_data(mint, allow_any_dex=True, bypass_cache=True)
+        if pair is not None:
+            metrics = parse_token_metrics(pair)
+            entry_mc = metrics.get("market_cap", 0) or 0
+            token_name = metrics.get("name", parsed.get("name") or mint[:12])
+
+            if entry_mc > 0:
+                tg_cfg = await get_params("paper_probe_size", "tg_signal_tp_x")
+                tg_paper_sol = float(tg_cfg.get("paper_probe_size") or 0.2)
+                tg_tp_x = float(tg_cfg.get("tg_signal_tp_x") or 8.0)
+
+                bal = await compute_paper_balance(_state.PAPER_STARTING_BALANCE)
+                if bal >= tg_paper_sol + 0.05:
+                    pt = await open_paper_trade(
+                        token_address=mint,
+                        token_name=token_name,
+                        entry_mc=entry_mc,
+                        entry_price=entry_mc,
+                        paper_sol=tg_paper_sol,
+                        confidence=80.0,
+                        pattern_type="tg_signal",
+                        tp_x=tg_tp_x,
+                        sl_pct=20.0,
+                        trade_reasoning=f"AUTO-BUY [fast-path] from {channel_name}",
+                    )
+                    _state.paper_balance = await compute_paper_balance(_state.PAPER_STARTING_BALANCE)
+                    _state.paper_trades_today += 1
+                    fast_path_opened = True
+                    logger.info(
+                        "TG scraper FAST-PATH: opened %s at MC=%.0f | %.2f SOL | bal=%.4f",
+                        token_name[:20], entry_mc, tg_paper_sol, _state.paper_balance,
+                    )
+
+                    # Relay to subscribers (background task — doesn't block)
+                    try:
+                        from bot.signal_relay import relay_trade_to_subscribers
+                        await relay_trade_to_subscribers(
+                            token_address=mint,
+                            token_name=token_name,
+                            entry_mc=entry_mc,
+                            tp_x=tg_tp_x,
+                            sl_pct=20.0,
+                            pattern_type="tg_signal",
+                            trade_reasoning=f"AUTO-BUY from {channel_name}",
+                            confidence=80.0,
+                        )
+                    except Exception as exc:
+                        logger.debug("Fast-path relay failed: %s", exc)
+    except Exception as exc:
+        logger.warning("TG scraper fast-path failed for %s: %s — falling back to scanner", mint[:12], exc)
+
+    # If fast-path opened the trade, skip the candidate injection.
+    if fast_path_opened:
+        return
+
+    # FALLBACK: inject into scanner candidate pool. Scanner will pick up
+    # via the urgent-wake event on next iteration. Used when fresh MC
+    # fetch fails or any other fast-path step errors.
     candidate = {
         "mint": mint,
         "name": None,
