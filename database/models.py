@@ -44,14 +44,17 @@ STRATEGY_CLOSE_REASONS = frozenset({
     "trail_hit",       # trailing-stop auto-close
     "breakeven_stop",  # profit-protection break-even SL fired after 1.5x
     "profit_trail",    # profit-protection trailing stop fired after 2.0x
+    "manual_close",    # operator-driven close via /hub or /close — counted
+                       # in WR per user request; Agent 6 also sees these in
+                       # learning corpus, mild bias risk if operator
+                       # consistently closes earlier than bot would
 })
 
-# Reasons that are NOT strategy decisions — human actions OR time-based
-# cleanup (stale/expired) OR backup-SL (dead_token / dead_api). Kept out
+# Reasons that are NOT strategy decisions — time-based cleanup
+# (stale/expired) OR backup-SL (dead_token / dead_api). Kept out
 # of win/loss math so Agent 6 doesn't learn to chase them and the WR
 # isn't dragged down by rugs that escaped the primary SL window.
 META_CLOSE_REASONS = frozenset({
-    "manual_close",
     "reset",
     "stale",       # open >2h and <1.05x
     "expired",     # open >4h and <1.20x  (also used by scans 7-day close)
