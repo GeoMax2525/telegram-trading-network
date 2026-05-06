@@ -296,10 +296,13 @@ async def _handle_message(event, channel_name: str) -> None:
 
     # FAST-PATH: open the trade DIRECTLY from tg_scraper instead of routing
     # through scanner. Cuts entry latency from ~3-8s to ~0.5-2s on 4am
-    # signals — scanner round-trip (run_once cycle through all sources +
-    # eval pipeline) was the bottleneck. Falls back to candidate-injection
-    # if any step fails so scanner can retry on next cycle.
+    # signals — scanner round-trip was the bottleneck. Falls back to
+    # candidate-injection if any step fails so scanner can retry.
+    #
+    # Diagnostic: every drop point logs WARNING with the explicit reason
+    # so /4amreport untraded misses can be traced in Railway logs.
     fast_path_opened = False
+    skip_reason = None
     try:
         from bot.scanner import fetch_token_data, parse_token_metrics
         from bot import state as _state
@@ -307,22 +310,25 @@ async def _handle_message(event, channel_name: str) -> None:
             open_paper_trade, get_params, compute_paper_balance,
         )
 
-        # Fresh MC fetch (DexScreener, bypass cache so the entry price is
-        # exactly current — the original /4amreport showed stale-cache
-        # entries hurt PnL).
         pair = await fetch_token_data(mint, allow_any_dex=True, bypass_cache=True)
-        if pair is not None:
+        if pair is None:
+            skip_reason = "dexscreener_no_pair"
+        else:
             metrics = parse_token_metrics(pair)
             entry_mc = metrics.get("market_cap", 0) or 0
             token_name = metrics.get("name", parsed.get("name") or mint[:12])
 
-            if entry_mc > 0:
+            if entry_mc <= 0:
+                skip_reason = "dexscreener_zero_mc"
+            else:
                 tg_cfg = await get_params("paper_probe_size", "tg_signal_tp_x")
                 tg_paper_sol = float(tg_cfg.get("paper_probe_size") or 0.2)
                 tg_tp_x = float(tg_cfg.get("tg_signal_tp_x") or 8.0)
 
                 bal = await compute_paper_balance(_state.PAPER_STARTING_BALANCE)
-                if bal >= tg_paper_sol + 0.05:
+                if bal < tg_paper_sol + 0.05:
+                    skip_reason = f"insufficient_balance({bal:.3f}<{tg_paper_sol + 0.05:.3f})"
+                else:
                     pt = await open_paper_trade(
                         token_address=mint,
                         token_name=token_name,
@@ -360,6 +366,15 @@ async def _handle_message(event, channel_name: str) -> None:
                         logger.debug("Fast-path relay failed: %s", exc)
     except Exception as exc:
         logger.warning("TG scraper fast-path failed for %s: %s — falling back to scanner", mint[:12], exc)
+        skip_reason = f"fast_path_exception:{type(exc).__name__}"
+
+    # Log explicit skip reason so /4amreport untraded misses are
+    # diagnosable. Visible in Railway under "TG scraper SKIPPED ...".
+    if not fast_path_opened and skip_reason:
+        logger.warning(
+            "TG scraper SKIPPED %s — reason: %s",
+            mint[:12], skip_reason,
+        )
 
     # If fast-path opened the trade, skip the candidate injection.
     if fast_path_opened:
