@@ -4429,14 +4429,37 @@ async def cmd_4amreport(message: Message):
             else:
                 untraded_signals.append(s)
 
-        # Compute true peak per traded signal — max(entry * peak_multiple, peak_after_close) / entry
+        # Compute true peak per traded signal — max(entry * peak_multiple,
+        # peak_after_close, current_mc_if_open) / entry. Currently-open
+        # trades get a fresh MC fetch so the report doesn't lag the real
+        # peak (paper_monitor's 30s tick + 5min DexScreener cache can miss
+        # fast spikes that the live API would show).
+        sem_open = asyncio.Semaphore(8)
+
+        async def _live_mc_for_open(t):
+            if t.status != "open":
+                return None
+            async with sem_open:
+                try:
+                    return await fetch_current_market_cap(t.token_address, bypass_cache=True)
+                except Exception:
+                    return None
+
+        live_mc_results = await asyncio.gather(
+            *[_live_mc_for_open(t) for s, t in traded_signals],
+            return_exceptions=True,
+        )
+
         rows = []  # (sig, trade, true_peak, our_capture_x, name, was_traded)
-        for s, t in traded_signals:
+        for (s, t), live_mc in zip(traded_signals, live_mc_results):
             entry_mc = t.entry_mc or 0
             held_peak_mc = (t.peak_mc or entry_mc)
             after_peak_mc = (t.peak_after_close or 0)
-            true_peak_mc = max(held_peak_mc, after_peak_mc) if entry_mc > 0 else 0
+            live_mc_val = float(live_mc) if isinstance(live_mc, (int, float)) and live_mc else 0
+            true_peak_mc = max(held_peak_mc, after_peak_mc, live_mc_val) if entry_mc > 0 else 0
             true_peak_x = (true_peak_mc / entry_mc) if entry_mc > 0 else 1.0
+            # Our capture: recompute against true peak so currently-open trades
+            # whose peak just spiked show as bigger misses correctly.
             our_capture_x = float(t.peak_multiple or 1.0)
             name = (t.token_name or s.mint[:12])
             rows.append((s, t, true_peak_x, our_capture_x, name, True))
@@ -4523,14 +4546,14 @@ async def cmd_4amreport(message: Message):
         avg_missed = avg_peak - avg_capture
         missed_pct = ((avg_missed / avg_peak) * 100) if avg_peak > 0 else 0
 
-        # Top misses (true_peak - our_capture, biggest gap)
+        # Top misses (true_peak - our_capture, biggest gap) — top 10
         misses = sorted(
             [(r[4], r[3], r[2], r[2] - r[3]) for r in rows if r[2] - r[3] > 0.5],
             key=lambda x: x[3], reverse=True,
-        )[:5]
+        )[:10]
 
-        # Top runners (highest true_peak)
-        runners = sorted(rows, key=lambda r: r[2], reverse=True)[:5]
+        # Top runners (highest true_peak) — top 10
+        runners = sorted(rows, key=lambda r: r[2], reverse=True)[:10]
 
         # Hit-rate breakdown — channel-wide (all rows) vs our-trades-only
         traded_rows = [r for r in rows if r[5]]
@@ -4618,7 +4641,7 @@ async def cmd_4amreport(message: Message):
             lines.append("")
 
         # Top 5 missed runners — one per line, name on its own line
-        lines.append("⚠️ <b>Top Missed Runners</b> (we held)")
+        lines.append("⚠️ <b>Top 10 Missed Runners</b> (we held)")
         if misses:
             lines.append("<pre>")
             for name, capture, true_peak, gap in misses:
@@ -4630,10 +4653,10 @@ async def cmd_4amreport(message: Message):
             lines.append("<i>No big misses tracked yet.</i>")
             lines.append("")
 
-        # Untraded runners
+        # Untraded runners — top 10
         untraded_rows = [r for r in rows if not r[5]]
-        untraded_runners = sorted(untraded_rows, key=lambda r: r[2], reverse=True)[:5]
-        lines.append("🚫 <b>Top Untraded Runners</b>")
+        untraded_runners = sorted(untraded_rows, key=lambda r: r[2], reverse=True)[:10]
+        lines.append("🚫 <b>Top 10 Untraded Runners</b>")
         if untraded_runners:
             lines.append("<pre>")
             for r in untraded_runners:
@@ -4646,9 +4669,9 @@ async def cmd_4amreport(message: Message):
             lines.append("<i>None — every signal was traded.</i>")
             lines.append("")
 
-        # Top 5 overall
-        lines.append("🚀 <b>Top Overall Runners</b>")
-        runners_all = sorted(rows, key=lambda r: r[2], reverse=True)[:5]
+        # Top 10 overall
+        lines.append("🚀 <b>Top 10 Overall Runners</b>")
+        runners_all = sorted(rows, key=lambda r: r[2], reverse=True)[:10]
         if runners_all:
             lines.append("<pre>")
             for r in runners_all:
