@@ -281,6 +281,7 @@ async def _check_open_trades(bot) -> None:
                     bot, pt, "dead_token", pnl, pt.peak_mc, pt.peak_multiple, [
                         f"💀 PAPER TRADE — DEAD TOKEN",
                         f"🪙 {name} | MC collapsed to ${current_mc:.0f}",
+                        f"PnL: {pnl:+.4f} SOL",
                         "Balance: {bal:.2f} SOL",
                     ],
                 )
