@@ -1478,7 +1478,16 @@ async def run_once(bot, force: bool = False) -> bool:
 # ── Weekly report ────────────────────────────────────────────────────────────
 
 async def _send_weekly_report(bot) -> None:
-    """Full weekly performance report to Callers HQ."""
+    """Memecoin-realistic weekly performance report to Callers HQ.
+
+    Optimizes for expectancy/trade, edge ratio (avg_win / avg_loss), and
+    drawdown — NOT win rate. At 4am memecoin asset class, 20-30% WR with
+    5x+ avg winners is mathematically superior to 60% WR with 1.5x avg
+    winners. Win-rate-target reports steer the operator toward a worse
+    strategy, so this rewrite reframes around the actual edge metrics.
+    """
+    from database.models import STRATEGY_CLOSE_REASONS, META_CLOSE_REASONS
+
     now = datetime.utcnow()
     week_start = (now - timedelta(days=7)).strftime("%b %d")
     week_end = now.strftime("%b %d, %Y")
@@ -1488,6 +1497,8 @@ async def _send_weekly_report(bot) -> None:
         token_count = await get_token_count()
 
         cutoff = now - timedelta(days=7)
+        admin_only = PaperTrade.subscriber_id.is_(None)
+
         async with AsyncSessionLocal() as session:
             candidates_week = (await session.execute(
                 select(func.count(Candidate.id)).where(Candidate.created_at >= cutoff)
@@ -1496,7 +1507,7 @@ async def _send_weekly_report(bot) -> None:
             paper_week = (await session.execute(
                 select(func.count(PaperTrade.id)).where(
                     PaperTrade.opened_at >= cutoff,
-                    PaperTrade.subscriber_id.is_(None),
+                    admin_only,
                 )
             )).scalar() or 0
 
@@ -1510,64 +1521,64 @@ async def _send_weekly_report(bot) -> None:
                 )
             )).scalar() or 0
 
-        # ── Paper trading performance ────────────────────────────────────
+        # ── Paper trading performance (admin only, strategy split) ───────
         async with AsyncSessionLocal() as session:
-            paper_closed = (await session.execute(
-                select(func.count(PaperTrade.id)).where(
-                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
-                )
-            )).scalar() or 0
-
-            paper_wins = (await session.execute(
-                select(func.count(PaperTrade.id)).where(
-                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
-                    PaperTrade.paper_pnl_sol > 0,
-                )
-            )).scalar() or 0
-
-            paper_pnl = float((await session.execute(
-                select(func.coalesce(func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
-                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
-                )
-            )).scalar() or 0.0)
-
-            # Best and worst trades
-            best_trade = (await session.execute(
+            all_closed_trades = list((await session.execute(
                 select(PaperTrade).where(
+                    admin_only,
                     PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
-                ).order_by(PaperTrade.paper_pnl_sol.desc()).limit(1)
-            )).scalar_one_or_none()
-
-            worst_trade = (await session.execute(
-                select(PaperTrade).where(
-                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
-                ).order_by(PaperTrade.paper_pnl_sol.asc()).limit(1)
-            )).scalar_one_or_none()
-
-            # Avg win multiple and avg loss %
-            win_trades = (await session.execute(
-                select(PaperTrade).where(
-                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
-                    PaperTrade.paper_pnl_sol > 0,
+                    PaperTrade.paper_pnl_sol.is_not(None),
                 )
-            )).scalars().all()
+            )).scalars().all())
 
-            loss_trades = (await session.execute(
+            # All trades opened during the week (for high-water mark calc)
+            opened_in_window = list((await session.execute(
                 select(PaperTrade).where(
-                    PaperTrade.status == "closed", PaperTrade.closed_at >= cutoff,
-                    PaperTrade.paper_pnl_sol <= 0,
+                    admin_only,
+                    PaperTrade.opened_at >= cutoff,
                 )
-            )).scalars().all()
+            )).scalars().all())
 
+        paper_closed = len(all_closed_trades)
+        paper_wins_list = [t for t in all_closed_trades if (t.paper_pnl_sol or 0) > 0]
+        paper_loss_list = [t for t in all_closed_trades if (t.paper_pnl_sol or 0) <= 0]
+        paper_wins = len(paper_wins_list)
+        paper_pnl = sum((t.paper_pnl_sol or 0) for t in all_closed_trades)
+
+        # Strategy vs meta split
+        strat_trades = [t for t in all_closed_trades if (t.close_reason or "") in STRATEGY_CLOSE_REASONS]
+        meta_trades = [t for t in all_closed_trades if (t.close_reason or "") in META_CLOSE_REASONS]
+        strat_pnl = sum((t.paper_pnl_sol or 0) for t in strat_trades)
+        meta_pnl = sum((t.paper_pnl_sol or 0) for t in meta_trades)
+        strat_wins = len([t for t in strat_trades if (t.paper_pnl_sol or 0) > 0])
+        strat_wr = round(strat_wins / len(strat_trades) * 100) if strat_trades else 0
+
+        # Edge metrics — what actually matters
         win_rate = round(paper_wins / paper_closed * 100) if paper_closed > 0 else 0
+        avg_win_pnl = (sum((t.paper_pnl_sol or 0) for t in paper_wins_list) / paper_wins) if paper_wins else 0
+        avg_loss_pnl = (sum((t.paper_pnl_sol or 0) for t in paper_loss_list) / len(paper_loss_list)) if paper_loss_list else 0
+        edge_ratio = (avg_win_pnl / abs(avg_loss_pnl)) if avg_loss_pnl < 0 else 0
+        expectancy = (paper_pnl / paper_closed) if paper_closed > 0 else 0
+
+        # dead_token bleed (specific tracking — was the killer last week)
+        dead_trades = [t for t in all_closed_trades if t.close_reason == "dead_token"]
+        dead_pnl = sum((t.paper_pnl_sol or 0) for t in dead_trades)
+
+        # 4am subset (where the alpha lives)
+        tg_trades = [t for t in all_closed_trades if "tg_signal" in (t.pattern_type or "")]
+        tg_wins = len([t for t in tg_trades if (t.paper_pnl_sol or 0) > 0])
+        tg_wr = round(tg_wins / len(tg_trades) * 100) if tg_trades else 0
+        tg_pnl = sum((t.paper_pnl_sol or 0) for t in tg_trades)
+        tg_avg_peak = (sum((t.peak_multiple or 1) for t in tg_trades) / len(tg_trades)) if tg_trades else 0
+
+        # Win/loss multiplier (for context, not as a target)
         avg_win_mult = 0.0
-        if win_trades:
-            mults = [t.peak_multiple or 1.0 for t in win_trades]
+        if paper_wins_list:
+            mults = [t.peak_multiple or 1.0 for t in paper_wins_list]
             avg_win_mult = sum(mults) / len(mults)
-        avg_loss_pct = 0.0
-        if loss_trades:
-            pcts = [abs(t.paper_pnl_sol or 0) / max(t.paper_sol_spent, 0.01) * 100 for t in loss_trades]
-            avg_loss_pct = sum(pcts) / len(pcts)
+
+        best_trade = max(all_closed_trades, key=lambda t: t.paper_pnl_sol or 0) if all_closed_trades else None
+        worst_trade = min(all_closed_trades, key=lambda t: t.paper_pnl_sol or 0) if all_closed_trades else None
 
         best_str = "None"
         if best_trade and best_trade.paper_pnl_sol:
@@ -1625,65 +1636,72 @@ async def _send_weekly_report(bot) -> None:
             c = conf_changes[0]
             conf_str = f"{c.old_value:g} -> {c.new_value:g} ({c.reason or ''})"[:50]
 
-        # ── Focus for next week ──────────────────────────────────────────
-        if win_rate >= 65:
-            focus = "Strong performance. Monitoring for consistency before live mode."
-            target = "Maintain 65%+ win rate"
-        elif win_rate >= 50:
-            focus = "Improving signal weights. Tightening entry on weak patterns."
-            target = f"Raise win rate from {win_rate}% to 60%+"
-        elif win_rate > 0:
-            focus = "Adjusting thresholds aggressively. Cutting weak patterns."
-            target = f"Raise win rate from {win_rate}% to 50%+"
+        # ── Focus for next week — based on EXPECTANCY, not WR ────────────
+        # Memecoin trading: 20-30% WR is the asset-class ceiling. Targeting
+        # higher WR forces cutting runners short = lower PnL. Real signals
+        # to optimize: expectancy/trade positive, edge ratio > 2.0,
+        # weekly drawdown bounded.
+        if expectancy > 0.05:
+            focus = "Strategy producing clear edge. Consider scaling probe size."
+            target = "Sustain positive expectancy for 4 weeks → ready for live"
+        elif expectancy > 0:
+            focus = "Strategy marginally profitable. Watch dead_token bleed and runner capture."
+            target = f"Raise expectancy from {expectancy:+.4f} to +0.05 SOL/trade"
+        elif expectancy >= -0.01:
+            focus = "Strategy near break-even. Bleed equals edge — fix biggest drag first."
+            target = f"Cut dead_token loss (-{abs(dead_pnl):.2f} SOL) or widen trail"
         else:
-            focus = "Collecting data. Need more paper trades for analysis."
-            target = "Execute 20+ paper trades for baseline data"
+            focus = "Strategy losing money. Review filters, tighten entries, reduce probe size."
+            target = "Get expectancy back above -0.01 SOL/trade within 2 weeks"
 
         # ── Build report ─────────────────────────────────────────────────
+        edge_str = f"{edge_ratio:.2f}x" if edge_ratio else "n/a"
+        expectancy_emoji = "🟢" if expectancy > 0 else "🔴"
+
         text = "\n".join([
-            f"📊 WEEKLY AI PERFORMANCE REPORT",
+            f"📊 WEEKLY PERFORMANCE REPORT",
             f"Week of {week_start} — {week_end}",
             "━━━━━━━━━━━━━━━━━━━━",
             "",
-            "🤖 SYSTEM ACTIVITY",
-            f"  Tokens in DB: {token_count}",
-            f"  Candidates evaluated: {candidates_week}",
-            f"  Paper trades executed: {paper_week}",
-            f"  Wallets discovered: {wallets_week}",
-            f"  Pattern engine runs: {patterns_updated}",
+            "💰 NET PERFORMANCE",
+            f"  Net PnL:    {paper_pnl:+.4f} SOL",
+            f"  Strategy:   {strat_pnl:+.4f} SOL ({len(strat_trades)} trades, {strat_wr}% WR)",
+            f"  Meta:       {meta_pnl:+.4f} SOL ({len(meta_trades)} cleanups)",
+            f"  └─ dead_token bleed: {dead_pnl:+.4f} SOL ({len(dead_trades)} closes)",
             "",
-            "📈 TRADING PERFORMANCE",
-            f"  Paper trades closed: {paper_closed}",
-            f"  Win rate: {win_rate}%",
-            f"  Avg win multiple: {avg_win_mult:.1f}x",
-            f"  Avg loss: {avg_loss_pct:.0f}%",
+            "📊 EDGE METRICS (what matters for memecoin)",
+            f"  {expectancy_emoji} Expectancy/trade: {expectancy:+.4f} SOL  ← key metric",
+            f"  Edge ratio (win/loss): {edge_str}  ← >2.0 = profitable strategy",
+            f"  Avg win: {avg_win_pnl:+.4f} SOL  |  Avg loss: {avg_loss_pnl:+.4f} SOL",
+            f"  Win rate: {win_rate}% (memecoin baseline, not a target)",
+            "",
+            "⚡ 4AM SUBSET (your alpha source)",
+            f"  Trades: {len(tg_trades)}  |  WR: {tg_wr}%  |  PnL: {tg_pnl:+.4f} SOL",
+            f"  Avg peak captured: {tg_avg_peak:.2f}x",
+            "",
+            "🏆 BEST / WORST",
             f"  Best: {best_str}",
             f"  Worst: {worst_str}",
-            f"  Paper P&L: {paper_pnl:+.4f} SOL",
             "",
-            "🧠 WHAT THE AI LEARNED",
+            "🤖 SYSTEM ACTIVITY",
+            f"  Tokens in DB: {token_count}  |  Candidates: {candidates_week}",
+            f"  Paper trades opened: {paper_week}  |  Wallets discovered: {wallets_week}",
+            "",
+            "🧠 LEARNING",
             f"  Top pattern: {top_pattern}",
             f"  Worst pattern: {worst_pattern}",
-            f"  Best signal: {best_signal} ({best_w:.0%} weight)",
-            f"  Weakest signal: {worst_signal} ({worst_w:.0%} weight)",
+            f"  Best signal: {best_signal} ({best_w:.0%})  |  Weakest: {worst_signal} ({worst_w:.0%})",
             "",
-            "👛 WALLET UPDATES",
-            f"  Wallets active: {wallets_week}",
-            f"  Top wallet: {top_wallet_str}",
-            "",
-            "⚙️ PARAMETER CHANGES",
-            f"  Confidence: {conf_str}",
-            f"  Scanner: {len(scanner_changes)} changes",
-            f"  Weights: {len(weight_changes)} changes",
-            f"  Total: {len(week_changes)} adjustments this week",
-            f"  Run /params to see full list",
+            "⚙️ TUNING THIS WEEK",
+            f"  {len(week_changes)} param adjustments  |  Confidence: {conf_str}",
+            f"  Run /params for full list",
             "",
             "🎯 NEXT WEEK FOCUS",
             f"  {focus}",
             f"  Target: {target}",
             "",
             "━━━━━━━━━━━━━━━━━━━━",
-            "Keep paper trading. Go live when WR hits 65%+ consistently.",
+            "Live readiness: positive expectancy for 4 weeks + max drawdown <15% + dead_token bleed under -2 SOL/wk.",
         ])
 
         await bot.send_message(CALLER_GROUP_ID, text)
