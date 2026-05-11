@@ -233,7 +233,7 @@ async def _check_open_trades(bot) -> None:
         "stale_exit_hours", "stale_exit_threshold",
         "expired_exit_hours", "expired_exit_threshold",
         "breakeven_trigger", "profit_trail_trigger", "profit_trail_pct",
-        "tg_signal_trail_pct",
+        "tg_signal_trail_pct", "dead_token_threshold_usd",
     )
 
     for pt in trades:
@@ -266,7 +266,8 @@ async def _check_open_trades(bot) -> None:
             # Dead trade cleanup: if MC collapsed below $5K, the token is
             # dead (rug pulled, liquidity gone). Close immediately to free
             # the slot for real trades. Don't let dead tokens block entries.
-            if current_mc < 5000 and current_mc > 0:
+            dead_threshold = float(cfg.get("dead_token_threshold_usd", 10000) or 10000)
+            if current_mc < dead_threshold and current_mc > 0:
                 sol = pt.paper_sol_spent or 0
                 remaining = float(getattr(pt, "remaining_pct", 100) or 100)
                 realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)

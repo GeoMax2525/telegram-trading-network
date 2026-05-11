@@ -3095,6 +3095,12 @@ AGENT_PARAM_DEFAULTS = {
     # patterns survive the cooldown wave. /setparam tg_signal_trail_pct.
     "tg_signal_trail_pct": 0.35,
 
+    # Dead-token close threshold (USD MC). Was hardcoded 5000; raised
+    # to 10000 because /weeklyreport showed 82 dead_token closes/week at
+    # avg -0.16 SOL each (-13 SOL total drag). Closing earlier at $10K
+    # cuts the loss-per-rug roughly in half. /setparam dead_token_threshold_usd.
+    "dead_token_threshold_usd": 10000.0,
+
     # Helius credit kill-switch. When 1.0, ALL Helius-using subsystems pause:
     # LaserStream WebSocket disconnects, wallet_analyst skips ticks,
     # scanner_agent's source 2 (insider wallet detection) skips, and per-
@@ -3791,6 +3797,59 @@ async def init_agent_params() -> int:
                 await session.commit()
     except Exception as exc:
         logger.warning("max_open_paper_trades lowering migration failed: %s", exc)
+
+    # One-shot: bump paper_probe_size 0.2 → 0.5 per user request to test
+    # bigger probes. Tighten block above only raises (so 0.2 → 0.5 needs
+    # to fire); flag prevents re-running. Manual revert: /setparam
+    # paper_probe_size 0.2.
+    try:
+        async with AsyncSessionLocal() as session:
+            probe_flag = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "probe_05_v1_done")
+            )).scalar_one_or_none()
+            if probe_flag is None or probe_flag.param_value < 1.0:
+                probe_row = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == "paper_probe_size")
+                )).scalar_one_or_none()
+                if probe_row and probe_row.param_value < 0.5:
+                    logger.info(
+                        "Bumping paper_probe_size: %.2f -> 0.5", probe_row.param_value,
+                    )
+                    probe_row.param_value = 0.5
+                    probe_row.updated_at = datetime.utcnow()
+                    added += 1
+                if probe_flag is None:
+                    session.add(AgentParam(param_name="probe_05_v1_done", param_value=1.0))
+                else:
+                    probe_flag.param_value = 1.0
+                    probe_flag.updated_at = datetime.utcnow()
+                await session.commit()
+    except Exception as exc:
+        logger.warning("probe size bump migration failed: %s", exc)
+
+    # One-shot: clear the stray "sol" agent_param that was set to 0.5 by
+    # accident via /setparam. Nothing reads it, but visible in /params.
+    try:
+        async with AsyncSessionLocal() as session:
+            sol_flag = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "sol_param_cleanup_done")
+            )).scalar_one_or_none()
+            if sol_flag is None or sol_flag.param_value < 1.0:
+                sol_row = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == "sol")
+                )).scalar_one_or_none()
+                if sol_row is not None:
+                    logger.info("Clearing stray 'sol' agent_param (was %.2f)", sol_row.param_value)
+                    await session.delete(sol_row)
+                    added += 1
+                if sol_flag is None:
+                    session.add(AgentParam(param_name="sol_param_cleanup_done", param_value=1.0))
+                else:
+                    sol_flag.param_value = 1.0
+                    sol_flag.updated_at = datetime.utcnow()
+                await session.commit()
+    except Exception as exc:
+        logger.warning("sol param cleanup failed: %s", exc)
 
     # One-shot: nuke all wallet data and let the new pipeline rebuild.
     # The old 530 "gmgn_smart" wallets have zero trade history and zero
