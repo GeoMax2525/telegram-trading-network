@@ -772,23 +772,27 @@ async def _build_hub_text(autotrade: bool) -> str:
 
     # ── Performance (strategy-only, meta excluded) ──────────────────
     candidates_today = ce_stats.get("scored_today", 0) or state.scanner_candidates_today
-    perf_today_pnl = paper_stats.get("today_strategy_pnl", 0.0)
-    perf_alltime_pnl = paper_stats.get("strategy_pnl", 0.0)
+    # "All Time" should reflect REAL profit (balance change since start),
+    # not strategy_pnl which excludes dead_token + other meta losses.
+    # User saw +17.67 strategy_pnl but real balance change was +2.46 —
+    # the gap is the dead_token bleed strategy_pnl hides.
+    real_alltime_pnl = real_balance - starting
+    perf_today_pnl = paper_stats.get("today_pnl", 0.0)  # total today incl. meta
     perf_wr = paper_stats.get("strategy_win_rate", 0)
     perf_closed = paper_stats.get("strategy_closed", 0)
     lines += [
         "",
         DIVIDER,
         "📊 PERFORMANCE",
-        f"Today: {perf_today_pnl:+.2f} SOL  |  All Time: {perf_alltime_pnl:+.2f} SOL",
+        f"Today: {perf_today_pnl:+.2f} SOL  |  All Time: {real_alltime_pnl:+.2f} SOL",
         f"Win Rate: {perf_wr}%  |  Closed: {perf_closed} bot  |  Candidates: {candidates_today}",
     ]
 
     # ── Paper trading breakdown (strategy-only, meta excluded) ──────
     p_open            = paper_stats.get("open_count", 0)
     p_today_n         = paper_stats.get("today_count", 0)
-    p_today_strat_pnl = paper_stats.get("today_strategy_pnl", 0.0)
-    p_today_strat_wr  = paper_stats.get("today_strategy_win_rate", 0)
+    p_today_pnl       = paper_stats.get("today_pnl", 0.0)
+    p_today_wr        = paper_stats.get("today_strategy_win_rate", 0)
     p_strat_wr        = paper_stats.get("strategy_win_rate", 0)
     p_strat_n         = paper_stats.get("strategy_closed", 0)
     p_strat_pnl       = paper_stats.get("strategy_pnl", 0.0)
@@ -798,10 +802,10 @@ async def _build_hub_text(autotrade: bool) -> str:
         "",
         DIVIDER,
         f"📋 PAPER TRADING ({p_open} open)",
-        f"Today: {p_today_n} trades  |  Win Rate: {p_today_strat_wr}%  |  {p_today_strat_pnl:+.2f} SOL",
-        f"Bot-closed: {p_strat_n} trades  |  {p_strat_wr}% WR  |  {p_strat_pnl:+.2f} SOL",
-        f"Manual: {p_meta_pnl:+.2f} SOL — not learned from",
-        f"All Time: {p_strat_wr}% WR  |  {p_strat_pnl:+.2f} SOL",
+        f"Today: {p_today_n} trades  |  Win Rate: {p_today_wr}%  |  {p_today_pnl:+.2f} SOL",
+        f"Bot-closed: {p_strat_n} trades  |  {p_strat_wr}% WR  |  Strategy: {p_strat_pnl:+.2f} SOL",
+        f"Meta (dead/stale/etc): {p_meta_pnl:+.2f} SOL",
+        f"All Time Profit (real): {real_alltime_pnl:+.2f} SOL",
     ]
 
     # ── Open trades ─────────────────────────────────────────────────
