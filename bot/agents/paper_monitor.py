@@ -275,11 +275,12 @@ async def _check_open_trades(bot) -> None:
                 mult = current_mc / (pt.entry_mc or 1)
                 pnl = round(realized + remaining_sol * (mult - 1), 4)
                 name = (pt.token_name or "?")[:18]
-                logger.info("Paper: DEAD TOKEN %s — MC=$%.0f, closing to free slot | pnl=%+.4f",
-                            name, current_mc, pnl)
+                source_tag = "⚡ 4AM" if "tg_signal" in (pt.pattern_type or "") else "🔍 Scanner"
+                logger.info("Paper: DEAD TOKEN %s — MC=$%.0f, source=%s, closing to free slot | pnl=%+.4f",
+                            name, current_mc, source_tag, pnl)
                 await _finalize_paper_close(
                     bot, pt, "dead_token", pnl, pt.peak_mc, pt.peak_multiple, [
-                        f"💀 PAPER TRADE — DEAD TOKEN",
+                        f"💀 PAPER TRADE — DEAD TOKEN ({source_tag})",
                         f"🪙 {name} | MC collapsed to ${current_mc:.0f}",
                         f"PnL: {pnl:+.4f} SOL",
                         "Balance: {bal:.2f} SOL",
