@@ -98,11 +98,18 @@ async def _finalize_paper_close(
     is_admin = pt.subscriber_id is None
     await _close_and_track(pt.id, reason, pnl, peak_mc, peak_mult, is_admin=is_admin)
 
+    # Source tag — append to every close card so user can see at-a-glance
+    # which source each trade came from. Critical for 4am-only experiment
+    # observability — without this, trade names alone don't reveal whether
+    # trade was tg_signal (4am) or scanner-discovered.
+    source_tag = "⚡ 4AM" if "tg_signal" in (pt.pattern_type or "") else "🔍 Scanner"
+    lines_with_source = lines + [f"Source: {source_tag}"]
+
     if is_admin:
         bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
         state.paper_balance = bal
         try:
-            text = "\n".join(line.format(bal=bal) for line in lines)
+            text = "\n".join(line.format(bal=bal) for line in lines_with_source)
             await bot.send_message(
                 CALLER_GROUP_ID, text,
                 message_thread_id=SCAN_TOPIC_ID,
@@ -115,7 +122,7 @@ async def _finalize_paper_close(
             pt.subscriber_id, pt.paper_sol_spent or 0.0, pnl,
         )
         try:
-            text = "\n".join(line.format(bal=bal) for line in lines)
+            text = "\n".join(line.format(bal=bal) for line in lines_with_source)
             await bot.send_message(pt.subscriber_id, text)
         except Exception:
             pass
