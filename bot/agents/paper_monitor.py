@@ -459,8 +459,9 @@ async def _check_open_trades(bot) -> None:
                         name, add_sol, current_mult, sol,
                     )
                     try:
+                        src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
                         await bot.send_message(CALLER_GROUP_ID, "\n".join([
-                            f"💪 PAPER TRADE — SCALE IN",
+                            f"💪 PAPER TRADE — SCALE IN ({src_tag})",
                             f"🪙 {name} | {current_mult:.1f}x confirmed | +{add_sol} SOL added",
                             f"Total position: {sol:.2f} SOL",
                         ]), message_thread_id=SCAN_TOPIC_ID)
@@ -501,8 +502,9 @@ async def _check_open_trades(bot) -> None:
                     name, current_mult, sell_sol, new_remaining,
                 )
                 try:
+                    src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
                     await bot.send_message(CALLER_GROUP_ID, "\n".join([
-                        f"📈 PAPER TRADE — SCALE OUT (30%)",
+                        f"📈 PAPER TRADE — SCALE OUT 30% ({src_tag})",
                         f"🪙 {name} | {current_mult:.1f}x | +{sell_sol:.4f} SOL",
                         f"Remaining: {new_remaining:.0f}% still running",
                     ]), message_thread_id=SCAN_TOPIC_ID)
@@ -530,8 +532,9 @@ async def _check_open_trades(bot) -> None:
                     name, current_mult, sell_sol, new_remaining,
                 )
                 try:
+                    src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
                     await bot.send_message(CALLER_GROUP_ID, "\n".join([
-                        f"📈 PAPER TRADE — SCALE OUT (30%)",
+                        f"📈 PAPER TRADE — SCALE OUT 25% ({src_tag})",
                         f"🪙 {name} | {current_mult:.1f}x | +{sell_sol:.4f} SOL",
                         f"Remaining: {new_remaining:.0f}% — trailing stop active",
                     ]), message_thread_id=SCAN_TOPIC_ID)
