@@ -1146,7 +1146,30 @@ async def _self_heal_threshold() -> None:
     Rules 1 & 4 — if no paper trades have opened in 2+ hours, gently
     lower conf_paper_threshold to explore; if 3+ hours, drop harder.
     Always clamped to [PAPER_THRESHOLD_FLOOR, PAPER_THRESHOLD_CEILING].
+
+    GUARD: respect manual /setparam overrides. If the operator changed
+    conf_paper_threshold within the last 72 hours (e.g. running an
+    experiment that intentionally raised it to 100 to disable scanner),
+    skip auto-tuning. Prevents Agent 6 from fighting the operator.
     """
+    # Check for recent manual override on this param. If found, skip.
+    try:
+        from database.models import get_recent_param_changes
+        recent = await get_recent_param_changes(50)
+        manual_override_cutoff = datetime.utcnow() - timedelta(hours=72)
+        for ch in recent:
+            if (ch.param_name == "conf_paper_threshold"
+                    and ch.changed_at and ch.changed_at >= manual_override_cutoff
+                    and ch.reason and "/setparam" in (ch.reason or "")):
+                logger.info(
+                    "Agent6: skipping threshold self-heal — manual /setparam "
+                    "override at %s ago (within 72h guard window)",
+                    ch.changed_at.strftime("%Y-%m-%d %H:%M"),
+                )
+                return
+    except Exception as exc:
+        logger.debug("Self-heal guard check failed: %s", exc)
+
     latest = await _latest_paper_open_time()
     now = datetime.utcnow()
 
