@@ -3103,7 +3103,33 @@ async def cmd_params(message: Message):
             reason = (c.reason or "")[:40]
             lines.append(f"  {c.param_name}: {c.old_value:g}->{c.new_value:g} | {reason} | {age}")
 
-    await message.reply("\n".join(lines), parse_mode=None)
+    # Chunk output — Telegram drops messages >4096 chars silently. With ~50
+    # params + groups + recent changes, /params easily exceeds limit. Use
+    # parse_mode="" so underscores in param names don't break markdown.
+    text = "\n".join(lines)
+    for chunk_start in range(0, len(text), 3800):
+        await message.reply(text[chunk_start:chunk_start + 3800], parse_mode="")
+
+
+# ── /getparam — quick single-param lookup ─────────────────────────────────
+
+@router.message(Command("getparam"))
+async def cmd_getparam(message: Message):
+    """Quick lookup of a single param value. Usage: /getparam <name>"""
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply(
+            "Usage: /getparam <name>\nExample: /getparam conf_paper_threshold",
+            parse_mode="",
+        )
+        return
+    name = parts[1].strip()
+    from database.models import get_param
+    val = await get_param(name)
+    if val is None:
+        await message.reply(f"{name}: NOT SET", parse_mode="")
+    else:
+        await message.reply(f"{name}: {val:g}", parse_mode="")
 
 
 # ── /deepanalyze <address> — Full launch fingerprint + wallet extraction ──────
