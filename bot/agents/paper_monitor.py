@@ -99,11 +99,24 @@ async def _finalize_paper_close(
     await _close_and_track(pt.id, reason, pnl, peak_mc, peak_mult, is_admin=is_admin)
 
     # Source tag — append to every close card so user can see at-a-glance
-    # which source each trade came from. Critical for 4am-only experiment
-    # observability — without this, trade names alone don't reveal whether
-    # trade was tg_signal (4am) or scanner-discovered.
+    # which source each trade came from. Also include trade age so user
+    # can tell pre-toggle from post-toggle: a 🔍 Scanner trade opened
+    # 12h ago is a pre-toggle leftover, while one opened 30s ago is a
+    # real bypass bug.
     source_tag = "⚡ 4AM" if "tg_signal" in (pt.pattern_type or "") else "🔍 Scanner"
-    lines_with_source = lines + [f"Source: {source_tag}"]
+    age_str = ""
+    if pt.opened_at:
+        age_secs = (datetime.utcnow() - pt.opened_at).total_seconds()
+        if age_secs < 60:
+            age_str = f"{int(age_secs)}s"
+        elif age_secs < 3600:
+            age_str = f"{int(age_secs / 60)}m"
+        elif age_secs < 86400:
+            age_str = f"{age_secs / 3600:.1f}h"
+        else:
+            age_str = f"{int(age_secs / 86400)}d"
+    age_part = f" | age {age_str}" if age_str else ""
+    lines_with_source = lines + [f"Source: {source_tag}{age_part}"]
 
     if is_admin:
         bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)

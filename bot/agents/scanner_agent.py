@@ -1471,6 +1471,26 @@ async def run_once() -> tuple[int, int]:
                 # entry_mc uses the FRESH re-fetched value (fresh_mc) so the
                 # peak_multiple/TP/SL math starts from current price, not
                 # the cached eval-time price.
+                #
+                # Belt-and-suspenders: re-verify scanner_enabled IMMEDIATELY
+                # before opening. The outer guard zeros `evaluated` but if a
+                # tg_signal candidate slipped into this regular path somehow,
+                # OR an Agent 6 race reset the toggle mid-cycle, the open
+                # would still fire. This second check is the structural
+                # barrier — refuses to open ANY non-tg_signal trade when
+                # scanner is disabled.
+                _final_pattern = scored.get("profile_tag") or scored.get("source") or ""
+                _is_tg = "tg_signal" in _final_pattern
+                if not _is_tg:
+                    _toggle = await get_params("scanner_enabled")
+                    if float(_toggle.get("scanner_enabled", 1.0) or 1.0) < 0.5:
+                        logger.warning(
+                            "Scanner: REFUSED to open %s — scanner_enabled=0 "
+                            "(belt-and-suspenders block)",
+                            scored.get("name", "?")[:20],
+                        )
+                        continue
+
                 pt = await open_paper_trade(
                     token_address=scored.get("mint", ""),
                     token_name=scored.get("name"),
