@@ -3110,6 +3110,17 @@ AGENT_PARAM_DEFAULTS = {
     # 100M/month plan was unsustainable.
     "helius_paused": 0.0,
 
+    # ── Per-source enable toggles ────────────────────────────────────────────
+    # Structural enable/disable for each trade source. Set to 0 to disable
+    # that source entirely (not just gate it via confidence threshold). Used
+    # to run clean isolated experiments (e.g. /4amonly = scanner_enabled=0).
+    #
+    # These are HARD gates — they bypass confidence_engine, conf_paper_threshold
+    # tuning, and Agent 6 self-heal. If scanner_enabled=0, NO scanner trade
+    # can open regardless of what other params do.
+    "scanner_enabled":     1.0,   # 0 = no DexScreener / insider / volume / harvester trades
+    "tg_scraper_enabled":  1.0,   # 0 = no 4am tg_signal auto-buys
+
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
     # before AI scoring. Non-learning: do not reference from learning_loop.
     # LP burn/lock gate was removed — rugcheck data proved too unreliable.

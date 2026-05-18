@@ -5035,6 +5035,155 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("status"))
+async def cmd_status(message: Message):
+    """One-shot snapshot of ALL bot subsystem toggles + key params.
+    Use to verify what's actually running before/after toggle changes.
+    Admin-only."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from database.models import (
+        AsyncSessionLocal, PaperTrade, get_all_params,
+    )
+    from sqlalchemy import select as _select, func as _func
+
+    params = await get_all_params()
+
+    def _on(name: str, default: float = 1.0) -> str:
+        v = float(params.get(name, default) or 0)
+        return "✅ ON" if v >= 0.5 else "❌ OFF"
+
+    def _val(name: str, default=None) -> str:
+        v = params.get(name, default)
+        return f"{v:g}" if v is not None else "(unset)"
+
+    async with AsyncSessionLocal() as session:
+        open_count = (await session.execute(
+            _select(_func.count(PaperTrade.id)).where(
+                PaperTrade.status == "open",
+                PaperTrade.subscriber_id.is_(None),
+            )
+        )).scalar() or 0
+
+        from datetime import datetime as _dt, timedelta as _td
+        today = _dt.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_count = (await session.execute(
+            _select(_func.count(PaperTrade.id)).where(
+                PaperTrade.opened_at >= today,
+                PaperTrade.subscriber_id.is_(None),
+            )
+        )).scalar() or 0
+
+        today_tg = (await session.execute(
+            _select(_func.count(PaperTrade.id)).where(
+                PaperTrade.opened_at >= today,
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.pattern_type.like("%tg_signal%"),
+            )
+        )).scalar() or 0
+
+    today_scanner = today_count - today_tg
+
+    DIVIDER = "━" * 28
+    lines = [
+        DIVIDER,
+        "🔍 BOT STATUS SNAPSHOT",
+        DIVIDER,
+        "",
+        "📡 SOURCES (hard toggles)",
+        f"  Scanner sources:  {_on('scanner_enabled')}",
+        f"  4am tg_scraper:   {_on('tg_scraper_enabled')}",
+        f"  Helius (laser/etc): {'❌ PAUSED' if _on('helius_paused', 0.0) == '✅ ON' else '✅ ON'}",
+        "",
+        "💰 TRADE PARAMS",
+        f"  Probe size:       {_val('paper_probe_size', 0.2)} SOL",
+        f"  Max open:         {_val('max_open_paper_trades', 5)}",
+        f"  Conf threshold:   {_val('conf_paper_threshold', 45)}",
+        f"  Dead-token MC:    ${_val('dead_token_threshold_usd', 10000)}",
+        "",
+        "⚡ 4AM SPECIFIC",
+        f"  TP cap:           {_val('tg_signal_tp_x', 8.0)}x",
+        f"  Trail width:      {_val('tg_signal_trail_pct', 0.35)}",
+        f"  Trail trigger:    {_val('tg_signal_trail_trigger', 3.0)}x peak",
+        f"  Re-entry cooldown: {_val('tg_signal_cooldown_hours', 4)}h",
+        "",
+        "📊 ACTIVITY TODAY",
+        f"  Opened total:     {today_count}",
+        f"  - 4am:            {today_tg}",
+        f"  - Scanner:        {today_scanner}",
+        f"  Currently open:   {open_count}",
+        DIVIDER,
+        "",
+        "Shortcuts:",
+        "  /4amonly    — disable scanner, only 4am trades",
+        "  /scanneronly — disable 4am, only scanner trades",
+        "  /alltrades  — enable both (default)",
+        "  /tradesoff  — disable both (no new trades open)",
+    ]
+    await message.reply("\n".join(lines), parse_mode="")
+
+
+@router.message(Command("4amonly"))
+async def cmd_4amonly(message: Message):
+    """Disable scanner, leave 4am on. One-tap experiment mode."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await set_param("scanner_enabled", 0.0, f"/4amonly by admin {message.from_user.id}")
+    await set_param("tg_scraper_enabled", 1.0, f"/4amonly by admin {message.from_user.id}")
+    await message.reply(
+        "⚡ <b>4AM ONLY mode</b>\n\n"
+        "Scanner trades disabled. 4am tg_signal trades active.\n"
+        "Run /status to verify.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("scanneronly"))
+async def cmd_scanneronly(message: Message):
+    """Disable 4am, leave scanner on."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await set_param("scanner_enabled", 1.0, f"/scanneronly by admin {message.from_user.id}")
+    await set_param("tg_scraper_enabled", 0.0, f"/scanneronly by admin {message.from_user.id}")
+    await message.reply(
+        "🔍 <b>SCANNER ONLY mode</b>\n\n"
+        "4am trades disabled. Scanner sources active.\n"
+        "Run /status to verify.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("alltrades"))
+async def cmd_alltrades(message: Message):
+    """Enable both 4am and scanner — default operating mode."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await set_param("scanner_enabled", 1.0, f"/alltrades by admin {message.from_user.id}")
+    await set_param("tg_scraper_enabled", 1.0, f"/alltrades by admin {message.from_user.id}")
+    await message.reply(
+        "✅ <b>ALL TRADES enabled</b>\n\n"
+        "Both 4am and scanner sources active. Default mode.\n"
+        "Run /status to verify.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("tradesoff"))
+async def cmd_tradesoff(message: Message):
+    """Disable both — no new trades open. Existing trades continue."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await set_param("scanner_enabled", 0.0, f"/tradesoff by admin {message.from_user.id}")
+    await set_param("tg_scraper_enabled", 0.0, f"/tradesoff by admin {message.from_user.id}")
+    await message.reply(
+        "⛔ <b>ALL TRADES disabled</b>\n\n"
+        "No new trades will open from any source.\n"
+        "Existing open trades continue to be monitored.\n"
+        "Run /status to verify.",
+        parse_mode="HTML",
+    )
+
+
 @router.message(Command("pausehelius"))
 async def cmd_pausehelius(message: Message):
     """Helius credit kill-switch ON. Pauses LaserStream, wallet_analyst,

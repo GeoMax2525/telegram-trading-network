@@ -310,6 +310,16 @@ async def _handle_message(event, channel_name: str) -> None:
             open_paper_trade, get_params, compute_paper_balance,
         )
 
+        # Hard enable gate — if operator has disabled TG via /4amoff or
+        # /setparam tg_scraper_enabled 0, skip the fast-path entirely.
+        # This is a STRUCTURAL block; not subject to threshold or Agent 6.
+        enable_cfg = await get_params("tg_scraper_enabled")
+        tg_enabled = float(enable_cfg.get("tg_scraper_enabled", 1.0) or 1.0) >= 0.5
+        if not tg_enabled:
+            skip_reason = "tg_scraper_disabled"
+            logger.info("TG scraper SKIPPED %s — tg_scraper_enabled=0", mint[:12])
+            return  # don't even fall back to scanner injection
+
         pair = await fetch_token_data(mint, allow_any_dex=True, bypass_cache=True)
         if pair is None:
             skip_reason = "dexscreener_no_pair"

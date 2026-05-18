@@ -1128,6 +1128,16 @@ async def run_once() -> tuple[int, int]:
         return_exceptions=True,
     )
 
+    # Hard gates — check enable toggles BEFORE processing any candidates
+    enable_cfg = await get_params("scanner_enabled", "tg_scraper_enabled")
+    scanner_on = float(enable_cfg.get("scanner_enabled", 1.0) or 1.0) >= 0.5
+    tg_on = float(enable_cfg.get("tg_scraper_enabled", 1.0) or 1.0) >= 0.5
+
+    if not tg_on:
+        tg_candidates = []  # skip the TG auto-buy loop entirely
+    if not scanner_on:
+        evaluated = []  # skip the regular scanner trade-open loop entirely
+
     # TG signals AUTO-BUY — skip ALL scoring, buy immediately with probe size.
     # The 4am channel has already filtered these. Trust the signal completely.
     for tg in tg_candidates:
