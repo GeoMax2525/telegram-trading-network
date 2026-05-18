@@ -4069,6 +4069,7 @@ async def cmd_setparam(message: Message):
             "⚠️ Usage: /setparam <name> <value>\n\n"
             "Example: /setparam conf_paper_threshold 45\n"
             "Use /params to see current values.",
+            parse_mode="",
         )
         return
 
@@ -4076,7 +4077,7 @@ async def cmd_setparam(message: Message):
     try:
         value = float(raw_value)
     except ValueError:
-        await message.reply(f"⚠️ Could not parse {raw_value} as a number.")
+        await message.reply(f"⚠️ Could not parse {raw_value} as a number.", parse_mode="")
         return
 
     from database.models import AsyncSessionLocal, AgentParam, select as _select
@@ -4089,7 +4090,10 @@ async def cmd_setparam(message: Message):
     await set_param(name, value, f"Manual override via /setparam by admin {message.from_user.id}")
 
     old_str = f"{old_value}" if old_value is not None else "(new)"
-    await message.reply(f"✅ {name}: {old_str} → {value}")
+    # parse_mode="" — underscores in param names would otherwise trigger
+    # markdown italic rendering and silently drop them. User got bitten
+    # by "/setparam confpaperthreshold" example previously.
+    await message.reply(f"✅ {name}: {old_str} → {value}", parse_mode="")
     logger.info("setparam: %s %s -> %s by admin %d",
                 name, old_value, value, message.from_user.id)
 
