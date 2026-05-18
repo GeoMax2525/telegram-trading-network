@@ -1134,9 +1134,19 @@ async def run_once() -> tuple[int, int]:
     tg_on = float(enable_cfg.get("tg_scraper_enabled", 1.0) or 1.0) >= 0.5
 
     if not tg_on:
-        tg_candidates = []  # skip the TG auto-buy loop entirely
+        logger.warning(
+            "Scanner: tg_scraper_enabled=0 — BLOCKED %d TG candidates",
+            len(tg_candidates),
+        )
+        tg_candidates = []
     if not scanner_on:
-        evaluated = []  # skip the regular scanner trade-open loop entirely
+        # Loud logging so Railway shows when the gate fires
+        evaluated_real = [e for e in (evaluated or []) if e and not isinstance(e, Exception)]
+        logger.warning(
+            "Scanner: scanner_enabled=0 — BLOCKED %d evaluated regular candidates",
+            len(evaluated_real),
+        )
+        evaluated = []
 
     # TG signals AUTO-BUY — skip ALL scoring, buy immediately with probe size.
     # The 4am channel has already filtered these. Trust the signal completely.
@@ -1265,6 +1275,21 @@ async def run_once() -> tuple[int, int]:
         # Open paper trade if Agent 5 flagged it
         if scored.get("paper_trade"):
             mint_addr = scored.get("mint", "")
+
+            # LOOP-TIME re-check of scanner_enabled toggle. Catches the case
+            # where the toggle changed BETWEEN the cycle-start guard above
+            # and this iteration (Agent 6 race, /setparam from operator,
+            # etc.). Fresh DB read every iteration is cheap; correctness
+            # over performance for this gate.
+            _final_pattern_check = (scored.get("profile_tag") or scored.get("source") or "")
+            if "tg_signal" not in _final_pattern_check:
+                _gate = await get_params("scanner_enabled")
+                if float(_gate.get("scanner_enabled", 1.0) or 1.0) < 0.5:
+                    logger.warning(
+                        "Scanner: LOOP-TIME REFUSAL %s (source=%s) — scanner_enabled=0",
+                        scored.get("name", "?")[:20], scored.get("source", "?"),
+                    )
+                    continue
 
             # Session cooldown — stop trading after 5 consecutive losses
             # But cap at 15 minutes max
