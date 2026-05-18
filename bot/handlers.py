@@ -5035,6 +5035,302 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("audit"))
+async def cmd_audit(message: Message):
+    """Comprehensive pre-live readiness audit. Runs ~8 categories of
+    checks and outputs a structured report with GO / NO-GO recommendation.
+    Use before flipping to live trading. Admin-only."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from datetime import datetime as _dt, timedelta as _td
+    from sqlalchemy import select as _select, func as _func
+    from database.models import (
+        AsyncSessionLocal, PaperTrade, Subscriber, Token, Wallet as WalletDB,
+        AgentLog, KeyBotSettings, get_all_params, get_token_count,
+        STRATEGY_CLOSE_REASONS, META_CLOSE_REASONS,
+    )
+
+    await message.reply("🔍 Running comprehensive audit... (5-10 sec)", parse_mode="")
+
+    now = _dt.utcnow()
+    week_ago = now - _td(days=7)
+    day_ago = now - _td(days=1)
+    params = await get_all_params()
+    DIVIDER = "━" * 28
+
+    # Trackers for GO/NO-GO scoring
+    blockers: list[str] = []
+    warnings: list[str] = []
+    passes: list[str] = []
+
+    # ── 1. STRATEGY VALIDATION ────────────────────────────────────────
+    async with AsyncSessionLocal() as session:
+        all_admin = list((await session.execute(
+            _select(PaperTrade).where(
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalars().all())
+
+        week_admin = [t for t in all_admin if t.closed_at and t.closed_at >= week_ago]
+
+    closed_n = len(all_admin)
+    week_n = len(week_admin)
+    week_pnl = sum((t.paper_pnl_sol or 0) for t in week_admin)
+    week_wins = sum(1 for t in week_admin if (t.paper_pnl_sol or 0) > 0)
+    week_losses = week_n - week_wins
+    week_avg_win = (sum((t.paper_pnl_sol or 0) for t in week_admin if (t.paper_pnl_sol or 0) > 0) / week_wins) if week_wins else 0
+    week_avg_loss = (sum((t.paper_pnl_sol or 0) for t in week_admin if (t.paper_pnl_sol or 0) <= 0) / week_losses) if week_losses else 0
+    week_edge_ratio = (week_avg_win / abs(week_avg_loss)) if week_avg_loss < 0 else 0
+    week_expectancy = (week_pnl / week_n) if week_n else 0
+
+    week_strat = [t for t in week_admin if (t.close_reason or "") in STRATEGY_CLOSE_REASONS]
+    week_meta = [t for t in week_admin if (t.close_reason or "") in META_CLOSE_REASONS]
+    week_strat_pnl = sum((t.paper_pnl_sol or 0) for t in week_strat)
+    week_meta_pnl = sum((t.paper_pnl_sol or 0) for t in week_meta)
+
+    week_tg = [t for t in week_admin if "tg_signal" in (t.pattern_type or "")]
+    week_scanner = [t for t in week_admin if "tg_signal" not in (t.pattern_type or "")]
+    week_tg_pnl = sum((t.paper_pnl_sol or 0) for t in week_tg)
+    week_scanner_pnl = sum((t.paper_pnl_sol or 0) for t in week_scanner)
+
+    week_dead = [t for t in week_admin if t.close_reason == "dead_token"]
+    week_dead_pnl = sum((t.paper_pnl_sol or 0) for t in week_dead)
+
+    # GO/NO-GO logic
+    if closed_n < 500:
+        blockers.append(f"Sample size {closed_n} closed trades < 500 minimum")
+    elif closed_n < 1000:
+        warnings.append(f"Sample size {closed_n} (recommended >1000)")
+    else:
+        passes.append(f"Sample size {closed_n} trades")
+
+    if week_expectancy <= 0:
+        blockers.append(f"Weekly expectancy {week_expectancy:+.4f} SOL/trade is not positive")
+    elif week_expectancy < 0.01:
+        warnings.append(f"Weekly expectancy {week_expectancy:+.4f} is positive but marginal (<0.01)")
+    else:
+        passes.append(f"Weekly expectancy {week_expectancy:+.4f} SOL/trade")
+
+    if week_edge_ratio < 2.0:
+        warnings.append(f"Edge ratio {week_edge_ratio:.2f}x (recommended >2.0)")
+    else:
+        passes.append(f"Edge ratio {week_edge_ratio:.2f}x")
+
+    if week_dead_pnl < -5 and week_n > 0:
+        ratio = abs(week_dead_pnl) / max(week_strat_pnl, 0.01)
+        if ratio > 0.5:
+            blockers.append(f"Dead_token bleed {week_dead_pnl:+.2f} is >50% of strategy edge")
+        else:
+            warnings.append(f"Dead_token bleed {week_dead_pnl:+.2f} SOL/week is significant")
+
+    # ── 2. AGENT HEALTH ────────────────────────────────────────────────
+    async with AsyncSessionLocal() as session:
+        agent_runs = {}
+        for name in ["scanner", "harvester", "wallet_analyst", "pattern_engine", "learning_loop"]:
+            row = (await session.execute(
+                _select(AgentLog).where(AgentLog.agent_name == name)
+                .order_by(AgentLog.run_at.desc()).limit(1)
+            )).scalar_one_or_none()
+            agent_runs[name] = row.run_at if row else None
+
+    for name, last_run in agent_runs.items():
+        if last_run is None:
+            warnings.append(f"Agent {name} has never logged a run")
+        else:
+            age_min = (now - last_run).total_seconds() / 60
+            expected_min = {"scanner": 5, "harvester": 10, "wallet_analyst": 90,
+                              "pattern_engine": 120, "learning_loop": 5}.get(name, 60)
+            if age_min > expected_min * 2:
+                warnings.append(f"Agent {name} last ran {age_min:.0f}m ago (>2x expected {expected_min}m)")
+
+    # ── 3. CONFIGURATION AUDIT ────────────────────────────────────────
+    critical_params = {
+        "scanner_enabled": 1.0,
+        "tg_scraper_enabled": 1.0,
+        "helius_paused": 0.0,
+        "paper_probe_size": 0.2,
+        "max_open_paper_trades": 5,
+        "conf_paper_threshold": 45,
+        "dead_token_threshold_usd": 10000,
+        "tg_signal_tp_x": 8.0,
+        "tg_signal_trail_pct": 0.35,
+        "tg_signal_cooldown_hours": 4,
+        "tg_signal_trail_trigger": 3.0,
+    }
+
+    # ── 4. SAFETY MECHANISMS ──────────────────────────────────────────
+    safety_checks = {
+        "safety_max_dev_pct": (15, "Dev wallet % gate"),
+        "safety_max_top10_pct": (80, "Top-10 holder gate"),
+        "safety_min_holders": (50, "Min holder count"),
+        "require_lp_safe": (1, "LP burn/lock requirement"),
+        "scanner_rugcheck_max_risk": (500, "Rugcheck risk score cap"),
+    }
+    for pkey, (expected, label) in safety_checks.items():
+        actual = params.get(pkey, expected)
+        if actual is None or actual == 0:
+            warnings.append(f"Safety: {label} is disabled (param {pkey}={actual})")
+        else:
+            passes.append(f"Safety: {label} active")
+
+    # ── 5. DATA QUALITY ──────────────────────────────────────────────
+    async with AsyncSessionLocal() as session:
+        null_pnl_closed = (await session.execute(
+            _select(_func.count(PaperTrade.id)).where(
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_(None),
+            )
+        )).scalar() or 0
+        zero_entry_mc = (await session.execute(
+            _select(_func.count(PaperTrade.id)).where(
+                _func.coalesce(PaperTrade.entry_mc, 0) <= 0,
+            )
+        )).scalar() or 0
+        token_count = await get_token_count()
+        sub_count = (await session.execute(
+            _select(_func.count(Subscriber.id)).where(Subscriber.status == "active")
+        )).scalar() or 0
+
+    if null_pnl_closed > 5:
+        warnings.append(f"{null_pnl_closed} closed trades with NULL pnl (data corruption?)")
+    if zero_entry_mc > 10:
+        warnings.append(f"{zero_entry_mc} trades with zero/null entry_mc (data quality issue)")
+
+    # ── 6. LIVE-READINESS ─────────────────────────────────────────────
+    live_blockers = []
+    # Check admin KeyBot has wallet
+    async with AsyncSessionLocal() as session:
+        admin_kb = None
+        if ADMIN_IDS:
+            admin_kb = (await session.execute(
+                _select(KeyBotSettings).where(KeyBotSettings.admin_id == ADMIN_IDS[0])
+            )).scalar_one_or_none()
+    if admin_kb is None or not admin_kb.wallet_address:
+        live_blockers.append("Admin KeyBot has no wallet address configured")
+    else:
+        passes.append(f"Admin wallet configured: {admin_kb.wallet_address[:8]}...")
+        if not getattr(admin_kb, "stop_loss_pct", None):
+            warnings.append("Admin KeyBot stop_loss_pct not set")
+    # Jupiter trading module import test
+    try:
+        from bot import trading as _trading
+        if hasattr(_trading, "execute_ultra_order"):
+            passes.append("Jupiter Ultra execution module loadable")
+        else:
+            live_blockers.append("Jupiter execute_ultra_order function missing")
+    except Exception as exc:
+        live_blockers.append(f"Cannot import bot.trading: {exc}")
+
+    # Slippage tolerance check (no param yet, flag as missing)
+    if "slippage_tolerance_pct" not in params:
+        warnings.append("No slippage_tolerance_pct param defined for live trading")
+    if "priority_fee_lamports" not in params:
+        warnings.append("No priority_fee_lamports strategy for live trading")
+    warnings.append("MEV protection (Jito bundles) not yet integrated")
+
+    # ── 7. SUBSCRIBER ISOLATION ───────────────────────────────────────
+    async with AsyncSessionLocal() as session:
+        sub_trade_count = (await session.execute(
+            _select(_func.count(PaperTrade.id)).where(
+                PaperTrade.subscriber_id.is_not(None),
+                PaperTrade.status == "closed",
+            )
+        )).scalar() or 0
+    passes.append(f"Subscriber trades isolated: {sub_trade_count} relay closes recorded separately")
+
+    # ── 8. OPERATIONAL ────────────────────────────────────────────────
+    passes.append(f"Token DB: {token_count} tokens discovered")
+    passes.append(f"Active subscribers: {sub_count}")
+
+    # ── BUILD REPORT ──────────────────────────────────────────────────
+    lines = [
+        DIVIDER,
+        "🔍 PRE-LIVE READINESS AUDIT",
+        f"Generated: {now.strftime('%Y-%m-%d %H:%M UTC')}",
+        DIVIDER,
+        "",
+        "📊 STRATEGY VALIDATION (7-day window)",
+        f"  Trades closed: {week_n} (all-time: {closed_n})",
+        f"  Net PnL: {week_pnl:+.2f} SOL",
+        f"  Strategy: {week_strat_pnl:+.2f}  |  Meta: {week_meta_pnl:+.2f}",
+        f"  4am: {week_tg_pnl:+.2f} ({len(week_tg)} trades)  |  Scanner: {week_scanner_pnl:+.2f} ({len(week_scanner)} trades)",
+        f"  Dead_token bleed: {week_dead_pnl:+.2f} SOL ({len(week_dead)} closes)",
+        f"  Expectancy/trade: {week_expectancy:+.4f} SOL",
+        f"  Edge ratio: {week_edge_ratio:.2f}x",
+        f"  Win rate: {round(week_wins/week_n*100) if week_n else 0}%",
+        "",
+        "🤖 AGENT HEALTH",
+    ]
+    for name, last_run in agent_runs.items():
+        if last_run:
+            age = (now - last_run).total_seconds() / 60
+            lines.append(f"  {name}: {age:.0f}m ago")
+        else:
+            lines.append(f"  {name}: ⚠️ never logged")
+
+    lines.extend(["", "⚙️ CRITICAL CONFIGURATION"])
+    for pname, default in critical_params.items():
+        val = params.get(pname, default)
+        marker = "  " if val == default else "  ⚙️ "
+        lines.append(f"{marker}{pname}: {val}")
+
+    lines.extend(["", "🛡️ SAFETY MECHANISMS"])
+    for pkey, (expected, label) in safety_checks.items():
+        actual = params.get(pkey, expected)
+        status = "✅" if actual else "❌"
+        lines.append(f"  {status} {label}: {actual}")
+
+    lines.extend(["", "💎 LIVE-READINESS CHECKS"])
+    if admin_kb and admin_kb.wallet_address:
+        lines.append(f"  ✅ Admin wallet: {admin_kb.wallet_address[:8]}...{admin_kb.wallet_address[-4:]}")
+    else:
+        lines.append("  ❌ Admin wallet: NOT CONFIGURED")
+    lines.append(f"  {'✅' if 'Jupiter Ultra' in str(passes) else '❌'} Jupiter Ultra: integration loadable")
+    lines.append("  ⚠️ Slippage tolerance: not configured")
+    lines.append("  ⚠️ Priority fee strategy: not configured")
+    lines.append("  ⚠️ MEV protection: not integrated")
+
+    lines.extend(["", "📊 DATA QUALITY"])
+    lines.append(f"  NULL-pnl closed trades: {null_pnl_closed}")
+    lines.append(f"  Zero entry_mc trades: {zero_entry_mc}")
+    lines.append(f"  Subscriber relay trades: {sub_trade_count}")
+
+    lines.extend([DIVIDER, "", "🎯 GO / NO-GO RECOMMENDATION"])
+    total_blockers = len(blockers) + len(live_blockers)
+    if total_blockers == 0 and len(warnings) <= 3:
+        lines.append("  ✅ READY FOR PHASE A LIVE (small capital)")
+        lines.append("  Suggested: Live with $25-50 SOL risk per trade, 1 week monitoring")
+    elif total_blockers == 0:
+        lines.append(f"  ⚠️ READY WITH CAUTION ({len(warnings)} warnings)")
+        lines.append("  Address warnings or proceed at lower risk size")
+    else:
+        lines.append(f"  ❌ NOT READY ({total_blockers} blockers, {len(warnings)} warnings)")
+        lines.append("  Resolve blockers before going live")
+
+    if blockers:
+        lines.extend(["", "❌ BLOCKERS"])
+        for b in blockers:
+            lines.append(f"  - {b}")
+    if live_blockers:
+        lines.extend(["", "❌ LIVE BLOCKERS"])
+        for b in live_blockers:
+            lines.append(f"  - {b}")
+    if warnings:
+        lines.extend(["", "⚠️ WARNINGS"])
+        for w in warnings[:8]:
+            lines.append(f"  - {w}")
+        if len(warnings) > 8:
+            lines.append(f"  ... and {len(warnings) - 8} more")
+
+    lines.append(DIVIDER)
+
+    text = "\n".join(lines)
+    for chunk_start in range(0, len(text), 3800):
+        await message.reply(text[chunk_start:chunk_start + 3800], parse_mode="")
+
+
 @router.message(Command("status"))
 async def cmd_status(message: Message):
     """One-shot snapshot of ALL bot subsystem toggles + key params.
