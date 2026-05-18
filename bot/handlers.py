@@ -5605,64 +5605,230 @@ async def cmd_agent6force(message: Message):
 
 @router.message(Command("healthcheck"))
 async def cmd_healthcheck(message: Message):
+    """Real-time health probe across every subsystem. Distinguishes
+    "agent running but not logging" from "agent dead". Probes external
+    APIs (DexScreener, Helius). Cross-references state.last_run vs
+    AgentLog entries to catch logging bugs."""
     if message.chat.id != CALLER_GROUP_ID and message.chat.type != "private":
         return
+    if message.from_user.id not in ADMIN_IDS:
+        return
 
+    import asyncio as _asyncio
+    import time as _time
+    from datetime import timedelta as _td
+    from sqlalchemy import text as _text, select as _select
     from database.models import (
-        AsyncSessionLocal,
-        get_total_closed_count,
-        get_open_paper_trades,
-        get_token_count,
+        AsyncSessionLocal, AgentLog, PaperTrade,
+        get_total_closed_count, get_open_paper_trades,
+        get_token_count, get_all_params,
     )
-    from sqlalchemy import text as _text
+    from bot import state as _state
 
     now = datetime.utcnow()
-    db_ok = False
+    DIVIDER = "━" * 28
+    probe_start = _time.perf_counter()
+
+    # ── 1. DB CONNECTIVITY ────────────────────────────────────────────
+    db_read_ok = False
+    db_write_ok = False
+    db_latency_ms = 0
     try:
+        t0 = _time.perf_counter()
         async with AsyncSessionLocal() as session:
             await session.execute(_text("SELECT 1"))
-        db_ok = True
+        db_latency_ms = round((_time.perf_counter() - t0) * 1000)
+        db_read_ok = True
+
+        # Write probe (touch a sentinel param)
+        from database.models import set_param, get_param
+        await set_param("_healthcheck_ts", float(int(now.timestamp())), reason="healthcheck probe")
+        readback = await get_param("_healthcheck_ts")
+        db_write_ok = readback is not None
     except Exception as exc:
         logger.error("healthcheck DB probe failed: %s", exc)
 
+    # ── 2. AGENT LIVENESS (state vs AgentLog cross-check) ─────────────
+    agent_status = {}
+    async with AsyncSessionLocal() as session:
+        for name in ["scanner", "harvester", "wallet_analyst", "pattern_engine", "learning_loop"]:
+            row = (await session.execute(
+                _select(AgentLog).where(AgentLog.agent_name == name)
+                .order_by(AgentLog.run_at.desc()).limit(1)
+            )).scalar_one_or_none()
+            agent_status[name] = {
+                "log_last": row.run_at if row else None,
+            }
+
+    # In-memory state for the loops that report via state
+    state_runs = {
+        "scanner": getattr(_state, "scanner_last_run", None),
+        "learning_loop": getattr(_state, "learning_loop_last_run", None),
+    }
+
+    # ── 3. EXTERNAL API PROBES ────────────────────────────────────────
+    ds_ok = False
+    ds_latency_ms = 0
+    try:
+        t0 = _time.perf_counter()
+        from bot.scanner import fetch_current_market_cap
+        # Probe with SOL native mint — always has data
+        sol_mc = await fetch_current_market_cap(
+            "So11111111111111111111111111111111111111112",
+            bypass_cache=True,
+        )
+        ds_latency_ms = round((_time.perf_counter() - t0) * 1000)
+        ds_ok = sol_mc is not None and sol_mc > 0
+    except Exception as exc:
+        logger.warning("healthcheck DexScreener probe failed: %s", exc)
+
+    tg_telethon_ok = False
+    try:
+        import os as _os
+        tg_telethon_ok = bool(_os.getenv("TG_SESSION_STRING"))
+    except Exception:
+        pass
+
+    # ── 4. PIPELINE INTEGRITY ─────────────────────────────────────────
+    async with AsyncSessionLocal() as session:
+        null_pnl_closed = (await session.execute(
+            _select(_text("count(*)")).select_from(PaperTrade)
+            .where(PaperTrade.status == "closed", PaperTrade.paper_pnl_sol.is_(None))
+        )).scalar() or 0
+
+    # ── 5. ACTIVITY (last hour) ───────────────────────────────────────
+    hour_ago = now - _td(hours=1)
+    async with AsyncSessionLocal() as session:
+        opens_last_hour = (await session.execute(
+            _select(_text("count(*)")).select_from(PaperTrade)
+            .where(PaperTrade.opened_at >= hour_ago,
+                   PaperTrade.subscriber_id.is_(None))
+        )).scalar() or 0
+        closes_last_hour = (await session.execute(
+            _select(_text("count(*)")).select_from(PaperTrade)
+            .where(PaperTrade.closed_at >= hour_ago,
+                   PaperTrade.subscriber_id.is_(None))
+        )).scalar() or 0
+
+    # ── 6. TOGGLE STATE ───────────────────────────────────────────────
+    params = await get_all_params()
+    scanner_on = float(params.get("scanner_enabled", 1.0) or 1.0) >= 0.5
+    tg_on = float(params.get("tg_scraper_enabled", 1.0) or 1.0) >= 0.5
+    helius_paused = float(params.get("helius_paused", 0.0) or 0.0) >= 0.5
+
+    # ── 7. AGGREGATE HEALTH ──────────────────────────────────────────
     open_paper = await get_open_paper_trades()
     closed_count = await get_total_closed_count()
     token_count = await get_token_count()
-    balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+    balance = await compute_paper_balance(_state.PAPER_STARTING_BALANCE)
 
     def _ago(ts):
         if ts is None:
-            return "never"
-        mins = int((now - ts).total_seconds() / 60)
-        if mins < 1:
-            return "just now"
+            return "NEVER"
+        secs = (now - ts).total_seconds()
+        if secs < 60:
+            return f"{int(secs)}s ago"
+        mins = int(secs / 60)
         if mins < 60:
             return f"{mins}m ago"
-        return f"{mins // 60}h{mins % 60:02d}m ago"
+        h = mins // 60
+        m = mins % 60
+        if h < 24:
+            return f"{h}h{m:02d}m ago"
+        return f"{h // 24}d ago"
 
-    scanner_age = _ago(state.scanner_last_run)
-    learning_age = _ago(state.learning_loop_last_run)
+    # Verdict per agent — running vs dead
+    def _agent_verdict(name, expected_max_min):
+        log_age = agent_status[name]["log_last"]
+        state_age = state_runs.get(name)
+        any_recent = None
+        if log_age and (now - log_age) < _td(minutes=expected_max_min * 3):
+            any_recent = log_age
+        if state_age and (now - state_age) < _td(minutes=expected_max_min * 3):
+            if any_recent is None or state_age > any_recent:
+                any_recent = state_age
+        if any_recent is None:
+            # both stale or missing — likely dead OR logging-only broken
+            if state_age is not None and (now - state_age) < _td(hours=24):
+                return "⚠️ logging stale (state OK)"
+            return "❌ DEAD/STALE"
+        return f"✅ {_ago(any_recent)}"
+
+    agent_verdicts = {
+        "scanner": _agent_verdict("scanner", 5),
+        "harvester": _agent_verdict("harvester", 10),
+        "wallet_analyst": _agent_verdict("wallet_analyst", 60),
+        "pattern_engine": _agent_verdict("pattern_engine", 120),
+        "learning_loop": _agent_verdict("learning_loop", 5),
+    }
+
+    # Overall verdict
+    issues = []
+    if not db_read_ok:
+        issues.append("DB read FAILED")
+    if not db_write_ok:
+        issues.append("DB write FAILED")
+    if not ds_ok:
+        issues.append("DexScreener unreachable")
+    dead_agents = [n for n, v in agent_verdicts.items() if "DEAD" in v]
+    if dead_agents:
+        issues.append(f"Dead agents: {', '.join(dead_agents)}")
+    if null_pnl_closed > 5:
+        issues.append(f"{null_pnl_closed} closed trades with NULL pnl")
+
+    total_probe_ms = round((_time.perf_counter() - probe_start) * 1000)
 
     lines = [
-        "🩺 *HEALTHCHECK*",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"DB: {'✅' if db_ok else '❌ UNREACHABLE'}",
-        f"Mode: {state.trade_mode} | Autotrade: {state.autotrade_enabled}",
-        f"Paper balance: {balance:.4f} SOL / {state.PAPER_STARTING_BALANCE:.0f} SOL",
-        f"Open paper: {len(open_paper)} | Closed: {closed_count}",
-        f"Tokens tracked: {token_count}",
+        DIVIDER,
+        "🩺 BOT HEALTHCHECK",
+        f"Probed: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}  ({total_probe_ms}ms)",
+        DIVIDER,
         "",
-        "*Agent liveness*",
-        f"Scanner last run: {scanner_age} ({state.scanner_status})",
-        f"Learning loop last run: {learning_age}",
-        f"Market regime: {state.market_regime} | SOL 24h: {state.sol_24h_change:+.1f}%",
+        "💾 DATABASE",
+        f"  Read:   {'✅ ' + str(db_latency_ms) + 'ms' if db_read_ok else '❌ FAILED'}",
+        f"  Write:  {'✅ OK' if db_write_ok else '❌ FAILED'}",
         "",
-        f"_Checked {now.strftime('%H:%M:%S')} UTC_",
+        "🌐 EXTERNAL APIS",
+        f"  DexScreener:  {'✅ ' + str(ds_latency_ms) + 'ms' if ds_ok else '❌ UNREACHABLE'}",
+        f"  Telethon:     {'✅ session present' if tg_telethon_ok else '⚠️ no TG_SESSION_STRING'}",
+        f"  Helius:       {'⏸ PAUSED' if helius_paused else '✅ active'}",
+        "",
+        "🤖 AGENT LIVENESS",
     ]
-    try:
-        await message.reply("\n".join(lines), parse_mode="Markdown")
-    except Exception:
-        await message.reply("\n".join(lines).replace("*", "").replace("", ""), parse_mode=None)
+    for name, verdict in agent_verdicts.items():
+        lines.append(f"  {name}: {verdict}")
+    lines.append("")
+    lines.append("🔄 ACTIVITY (last 1h)")
+    lines.append(f"  Trades opened: {opens_last_hour}")
+    lines.append(f"  Trades closed: {closes_last_hour}")
+    lines.append("")
+    lines.append("🎚️ TOGGLES")
+    lines.append(f"  Scanner: {'✅ ON' if scanner_on else '❌ OFF'}")
+    lines.append(f"  4am tg_scraper: {'✅ ON' if tg_on else '❌ OFF'}")
+    lines.append("")
+    lines.append("📊 LEDGER")
+    lines.append(f"  Balance: {balance:.4f} SOL / {_state.PAPER_STARTING_BALANCE:.0f}")
+    lines.append(f"  Open: {len(open_paper)}  |  Closed all-time: {closed_count}")
+    lines.append(f"  Tokens in DB: {token_count}")
+    lines.append(f"  NULL-pnl anomaly count: {null_pnl_closed}")
+    lines.append("")
+    lines.append("🌡️ MARKET")
+    lines.append(f"  Regime: {_state.market_regime}  |  SOL 24h: {_state.sol_24h_change:+.1f}%")
+
+    lines.append("")
+    lines.append(DIVIDER)
+    lines.append("🎯 OVERALL")
+    if not issues:
+        lines.append("  ✅ HEALTHY — all systems nominal")
+    else:
+        lines.append(f"  ⚠️ {len(issues)} ISSUE(S):")
+        for i in issues:
+            lines.append(f"     - {i}")
+    lines.append(DIVIDER)
+
+    text = "\n".join(lines)
+    for chunk_start in range(0, len(text), 3800):
+        await message.reply(text[chunk_start:chunk_start + 3800], parse_mode="")
 
 
 # ── /agent_status — Per-agent last run table ─────────────────────────────────
