@@ -1338,12 +1338,12 @@ async def cb_hub(callback: CallbackQuery):
             state.trade_mode = "paper"
             state.autotrade_enabled = False
             await set_param("trade_mode", 1, "Toggled on via hub")
-            # Re-enable both source toggles on ON click — they were cascaded
-            # off above so restore them to the default (both ON). Operator
-            # can /4amonly or /scanneronly afterward if they want one path.
-            await set_param("scanner_enabled", 1.0, "Hub: Trade Mode ON (cascade)")
-            await set_param("tg_scraper_enabled", 1.0, "Hub: Trade Mode ON (cascade)")
-            await callback.answer("📋 Paper trading ON ✅ (both sources enabled)")
+            # Do NOT cascade source toggles on ON. User may have set
+            # /4amonly or /scanneronly intentionally; clobbering those
+            # forces them to re-run the command after every toggle.
+            # If both toggles happen to be 0 from a prior OFF cascade,
+            # user should run /4amonly or /alltrades to pick a mode.
+            await callback.answer("📋 Paper trading ON ✅ (run /4amonly or /alltrades to pick sources)")
         try:
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(
