@@ -320,6 +320,18 @@ async def _handle_message(event, channel_name: str) -> None:
             logger.info("TG scraper SKIPPED %s — tg_scraper_enabled=0", mint[:12])
             return  # don't even fall back to scanner injection
 
+        # Trade-mode gate — if operator set Trade Mode: OFF via /hub toggle,
+        # don't open ANY new trades. The /hub toggle was bypassed by tg
+        # fast-path before (only checked tg_scraper_enabled). Now respects
+        # both. Live mode is also blocked here for paper trades.
+        if _state.trade_mode != "paper":
+            skip_reason = f"trade_mode={_state.trade_mode} (not paper)"
+            logger.info(
+                "TG scraper SKIPPED %s — trade_mode=%s (not paper)",
+                mint[:12], _state.trade_mode,
+            )
+            return
+
         pair = await fetch_token_data(mint, allow_any_dex=True, bypass_cache=True)
         if pair is None:
             skip_reason = "dexscreener_no_pair"

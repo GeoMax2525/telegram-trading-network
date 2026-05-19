@@ -1328,12 +1328,22 @@ async def cb_hub(callback: CallbackQuery):
             state.trade_mode = "off"
             state.autotrade_enabled = False
             await set_param("trade_mode", 0, "Toggled off via hub")
-            await callback.answer("📋 Paper trading OFF")
+            # Trade Mode: OFF must also kill source toggles. Previously they
+            # stayed ON, so 4am + scanner trades kept opening despite the hub
+            # showing "OFF". One button → all sources stop.
+            await set_param("scanner_enabled", 0.0, "Hub: Trade Mode OFF (cascade)")
+            await set_param("tg_scraper_enabled", 0.0, "Hub: Trade Mode OFF (cascade)")
+            await callback.answer("📋 Paper trading OFF (all sources disabled)")
         else:
             state.trade_mode = "paper"
             state.autotrade_enabled = False
             await set_param("trade_mode", 1, "Toggled on via hub")
-            await callback.answer("📋 Paper trading ON ✅")
+            # Re-enable both source toggles on ON click — they were cascaded
+            # off above so restore them to the default (both ON). Operator
+            # can /4amonly or /scanneronly afterward if they want one path.
+            await set_param("scanner_enabled", 1.0, "Hub: Trade Mode ON (cascade)")
+            await set_param("tg_scraper_enabled", 1.0, "Hub: Trade Mode ON (cascade)")
+            await callback.answer("📋 Paper trading ON ✅ (both sources enabled)")
         try:
             text = await _build_hub_text(state.autotrade_enabled)
             await callback.message.edit_text(

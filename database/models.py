@@ -2442,6 +2442,17 @@ async def get_chart_pattern_win_rates() -> list[dict]:
 
 # ── Paper Trade helpers ──────────────────────────────────────────────────────
 
+class PaperTradeBlocked(RuntimeError):
+    """Raised inside open_paper_trade when a hard source toggle (scanner_enabled
+    or tg_scraper_enabled) is OFF. This is the LAST-LINE gate that catches any
+    bypass — all call sites route through open_paper_trade, so if either toggle
+    is off, this exception fires regardless of what upstream guards missed.
+
+    Callers wrap open_paper_trade in try/except and will log this normally;
+    the WARNING log inside open_paper_trade itself is the canonical signal
+    that the gate fired."""
+
+
 async def open_paper_trade(
     token_address: str, token_name: str | None,
     entry_mc: float | None, entry_price: float | None,
@@ -2449,6 +2460,33 @@ async def open_paper_trade(
     pattern_type: str | None, tp_x: float, sl_pct: float,
     trade_reasoning: str | None = None,
 ) -> "PaperTrade":
+    # ── LAST-LINE source toggle gate ──────────────────────────────────────
+    # Operator-controlled hard kill switches. Even if upstream agents,
+    # caches, or race conditions let a candidate slip through, this gate
+    # at the DB-write chokepoint will refuse the insert. Tagged-source
+    # check is permissive: anything containing "tg_signal" in pattern_type
+    # routes through the 4am gate; everything else routes through the
+    # scanner gate.
+    _pt_str = (pattern_type or "").lower()
+    _is_tg = "tg_signal" in _pt_str
+    _gate = await get_params("scanner_enabled", "tg_scraper_enabled")
+    if _is_tg:
+        if float(_gate.get("tg_scraper_enabled", 1.0) or 1.0) < 0.5:
+            logger.warning(
+                "open_paper_trade GATE BLOCK: tg_scraper_enabled=0 refused tg trade "
+                "%s mint=%s pattern=%s", (token_name or "?")[:24],
+                (token_address or "?")[:12], pattern_type,
+            )
+            raise PaperTradeBlocked("tg_scraper_enabled=0")
+    else:
+        if float(_gate.get("scanner_enabled", 1.0) or 1.0) < 0.5:
+            logger.warning(
+                "open_paper_trade GATE BLOCK: scanner_enabled=0 refused scanner trade "
+                "%s mint=%s pattern=%s", (token_name or "?")[:24],
+                (token_address or "?")[:12], pattern_type,
+            )
+            raise PaperTradeBlocked("scanner_enabled=0")
+
     async with AsyncSessionLocal() as session:
         pt = PaperTrade(
             token_address=token_address, token_name=token_name,

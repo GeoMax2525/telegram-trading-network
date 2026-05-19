@@ -1133,6 +1133,16 @@ async def run_once() -> tuple[int, int]:
     scanner_on = float(enable_cfg.get("scanner_enabled", 1.0) or 1.0) >= 0.5
     tg_on = float(enable_cfg.get("tg_scraper_enabled", 1.0) or 1.0) >= 0.5
 
+    # Trade-mode gate — /hub "Trade Mode: OFF" means NO new trades regardless
+    # of source toggles. Effectively force-disables both gates above.
+    if state.trade_mode != "paper":
+        logger.warning(
+            "Scanner: trade_mode=%s (not paper) — BLOCKING all opens this cycle "
+            "(tg=%d, evaluated=%d)", state.trade_mode,
+            len(tg_candidates), len([e for e in (evaluated or []) if isinstance(e, dict)]),
+        )
+        tg_candidates = []
+        evaluated = []
     if not tg_on:
         logger.warning(
             "Scanner: tg_scraper_enabled=0 — BLOCKED %d TG candidates",
