@@ -5045,6 +5045,85 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("pnloutliers"))
+async def cmd_pnloutliers(message: Message):
+    """List the top N paper_pnl_sol rows (by abs value) to find rows that
+    poison the Strategy/Meta aggregates. Use when /hub shows nonsense numbers
+    like Meta +1.2M SOL. Default top 10; pass /pnloutliers 20 for more.
+
+    Admin-only. Does NOT modify any data — read-only diagnostic."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from sqlalchemy import select as _select
+    from database.models import AsyncSessionLocal, PaperTrade
+
+    # Parse optional limit arg: /pnloutliers 20
+    parts = (message.text or "").split()
+    try:
+        limit = int(parts[1]) if len(parts) > 1 else 10
+    except ValueError:
+        limit = 10
+    limit = max(1, min(limit, 50))
+
+    async with AsyncSessionLocal() as session:
+        rows = list((await session.execute(
+            _select(PaperTrade).where(
+                PaperTrade.paper_pnl_sol.is_not(None),
+                PaperTrade.subscriber_id.is_(None),
+            )
+        )).scalars().all())
+
+    # Sort by absolute pnl descending — poisoned rows surface first
+    rows.sort(key=lambda r: abs(r.paper_pnl_sol or 0), reverse=True)
+    top = rows[:limit]
+
+    if not top:
+        await message.reply("No closed paper trades with pnl found.", parse_mode="")
+        return
+
+    lines = [
+        f"🔎 TOP {len(top)} PnL OUTLIERS (HQ only)",
+        "━" * 28,
+    ]
+    for r in top:
+        name = (r.token_name or "?")[:20]
+        pnl = r.paper_pnl_sol or 0
+        spent = r.paper_sol_spent or 0
+        entry = r.entry_mc or 0
+        peak = r.peak_mc or 0
+        peak_mult = r.peak_multiple or 0
+        reason = r.close_reason or "?"
+        opened = r.opened_at.strftime("%m-%d %H:%M") if r.opened_at else "?"
+        closed = r.closed_at.strftime("%m-%d %H:%M") if r.closed_at else "?"
+        lines.append(
+            f"id={r.id} {name}\n"
+            f"  pnl={pnl:+.4f}  spent={spent:.4f}  reason={reason}\n"
+            f"  entry_mc={entry:.0f}  peak_mc={peak:.0f}  peak_x={peak_mult:.2f}\n"
+            f"  opened={opened}  closed={closed}"
+        )
+
+    text = "\n".join(lines)
+    # Telegram cap is 4096 — chunk if needed
+    if len(text) > 4000:
+        chunks = []
+        cur = []
+        cur_len = 0
+        for ln in lines:
+            if cur_len + len(ln) > 3800:
+                chunks.append("\n".join(cur))
+                cur = [ln]
+                cur_len = len(ln)
+            else:
+                cur.append(ln)
+                cur_len += len(ln) + 1
+        if cur:
+            chunks.append("\n".join(cur))
+        for c in chunks:
+            await message.reply(c, parse_mode="")
+    else:
+        await message.reply(text, parse_mode="")
+
+
 @router.message(Command("audit"))
 async def cmd_audit(message: Message):
     """Comprehensive pre-live readiness audit. Runs ~8 categories of
