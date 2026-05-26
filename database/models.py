@@ -4028,12 +4028,20 @@ async def get_params(*names: str) -> dict[str, float]:
 
 
 async def get_all_params() -> dict[str, float]:
-    """Get all params."""
+    """Get all params, with env-lock priority over DB. Ensures every
+    consumer (/healthcheck, /audit, /params, etc.) sees the same value
+    the bot actually USES at runtime — not the stale DB value when an
+    env lock is overriding it."""
     async with AsyncSessionLocal() as session:
         rows = (await session.execute(select(AgentParam))).scalars().all()
     result = dict(AGENT_PARAM_DEFAULTS)
     for r in rows:
         result[r.param_name] = r.param_value
+    # Apply env-var overrides last so they win over both defaults and DB
+    for param_name in _ENV_LOCKED_PARAMS:
+        override = _env_override(param_name)
+        if override is not None:
+            result[param_name] = override
     return result
 
 
