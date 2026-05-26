@@ -18,6 +18,7 @@ Tables:
 """
 
 import logging
+import os
 from datetime import datetime, timedelta
 
 from sqlalchemy import (
@@ -3937,8 +3938,61 @@ async def init_agent_params() -> int:
     return added
 
 
+# ── ENV-LOCKED PARAMS ───────────────────────────────────────────────────
+# Hard-lock specific operator-controlled toggles via Railway env vars.
+# When an env var is set, it OVERRIDES the database value at every read.
+# This survives:
+#   - Postgres restores from old snapshots
+#   - Container restarts
+#   - Agent 6 / learning_loop accidentally writing to these (it doesn't,
+#     but defense-in-depth)
+#   - Any other code path that calls set_param() on these
+#
+# Set on Railway → Variables tab:
+#   SCANNER_LOCK=off          (forces scanner_enabled to 0)
+#   SCANNER_LOCK=on           (forces scanner_enabled to 1)
+#   SCANNER_LOCK=             (unset → fall through to DB, no lock)
+#   TG_SCRAPER_LOCK=on/off    (same mechanic for the 4am path)
+#
+# Use case: clean experiments. /4amonly = "SCANNER_LOCK=off + TG_SCRAPER_LOCK=on"
+# survives every kind of state corruption.
+_ENV_LOCKED_PARAMS = {
+    "scanner_enabled": "SCANNER_LOCK",
+    "tg_scraper_enabled": "TG_SCRAPER_LOCK",
+}
+
+
+def _env_override(param_name: str) -> float | None:
+    """If the operator has set an env-var lock for this param, return
+    the locked value. Else None (caller falls through to DB)."""
+    env_var = _ENV_LOCKED_PARAMS.get(param_name)
+    if not env_var:
+        return None
+    raw = os.getenv(env_var, "").strip().lower()
+    if raw in ("on", "1", "true", "yes", "y"):
+        return 1.0
+    if raw in ("off", "0", "false", "no", "n"):
+        return 0.0
+    return None  # env var not set or unrecognized — no lock
+
+
+def get_active_locks() -> dict[str, float]:
+    """Return {param_name: locked_value} for every param currently
+    pinned by an env var. Used by /status and /locks to show operator
+    what's actively locked."""
+    locked = {}
+    for param, _env in _ENV_LOCKED_PARAMS.items():
+        override = _env_override(param)
+        if override is not None:
+            locked[param] = override
+    return locked
+
+
 async def get_param(name: str) -> float:
-    """Get a single param value, falls back to default."""
+    """Get a single param value, with env-lock priority over DB."""
+    override = _env_override(name)
+    if override is not None:
+        return override
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(AgentParam.param_value).where(AgentParam.param_name == name)
@@ -3950,17 +4004,26 @@ async def get_param(name: str) -> float:
 
 
 async def get_params(*names: str) -> dict[str, float]:
-    """Get multiple params at once."""
+    """Get multiple params at once, with env-lock priority over DB."""
     result = {}
-    async with AsyncSessionLocal() as session:
-        rows = (await session.execute(
-            select(AgentParam).where(AgentParam.param_name.in_(names))
-        )).scalars().all()
-        for r in rows:
-            result[r.param_name] = r.param_value
+    # Apply env-var overrides first; these are non-negotiable
+    db_needed: list[str] = []
     for n in names:
-        if n not in result:
-            result[n] = AGENT_PARAM_DEFAULTS.get(n, 0.0)
+        override = _env_override(n)
+        if override is not None:
+            result[n] = override
+        else:
+            db_needed.append(n)
+    if db_needed:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name.in_(db_needed))
+            )).scalars().all()
+            for r in rows:
+                result[r.param_name] = r.param_value
+        for n in db_needed:
+            if n not in result:
+                result[n] = AGENT_PARAM_DEFAULTS.get(n, 0.0)
     return result
 
 
@@ -3976,7 +4039,21 @@ async def get_all_params() -> dict[str, float]:
 
 async def set_param(name: str, value: float, reason: str | None = None,
                     trades: int | None = None, win_rate: float | None = None) -> None:
-    """Set a param value and log the change."""
+    """Set a param value and log the change.
+
+    If the param is env-locked (SCANNER_LOCK / TG_SCRAPER_LOCK set on Railway),
+    the WRITE still goes through to keep the DB in sync, but readers will
+    continue to see the locked env value. We log a warning so the operator
+    can see the lock is overriding their (or Agent 6's) intent.
+    """
+    override = _env_override(name)
+    if override is not None and abs(override - value) > 0.0001:
+        logger.warning(
+            "set_param(%s=%s) ignored at READ-TIME — env-locked to %s "
+            "(reason: %s). DB row still updated for audit.",
+            name, value, override, reason or "",
+        )
+
     old_value = await get_param(name)
     if abs(old_value - value) < 0.0001:
         return  # no change

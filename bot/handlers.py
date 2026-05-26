@@ -5428,13 +5428,19 @@ async def cmd_status(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     from database.models import (
-        AsyncSessionLocal, PaperTrade, get_all_params,
+        AsyncSessionLocal, PaperTrade, get_active_locks, get_all_params,
     )
     from sqlalchemy import select as _select, func as _func
 
     params = await get_all_params()
+    active_locks = get_active_locks()
 
     def _on(name: str, default: float = 1.0) -> str:
+        # If the param is env-locked, show the locked value with a 🔒
+        # so the operator immediately sees "this can't drift, it's pinned".
+        if name in active_locks:
+            v = active_locks[name]
+            return "🔒 ON (env-locked)" if v >= 0.5 else "🔒 OFF (env-locked)"
         v = float(params.get(name, default) or 0)
         return "✅ ON" if v >= 0.5 else "❌ OFF"
 
@@ -5505,6 +5511,17 @@ async def cmd_status(message: Message):
         "  /alltrades  — enable both (default)",
         "  /tradesoff  — disable both (no new trades open)",
     ]
+    if active_locks:
+        lines += [
+            "",
+            "🔒 ENV LOCKS active — these toggles cannot drift:",
+        ]
+        for k, v in active_locks.items():
+            lines.append(f"  {k} = {'ON' if v >= 0.5 else 'OFF'}")
+        lines.append(
+            "  To remove: clear the matching Railway env var "
+            "(SCANNER_LOCK / TG_SCRAPER_LOCK) and redeploy."
+        )
     await message.reply("\n".join(lines), parse_mode="")
 
 
