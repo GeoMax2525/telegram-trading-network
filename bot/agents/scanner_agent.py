@@ -1133,6 +1133,27 @@ async def run_once() -> tuple[int, int]:
     scanner_on = float(enable_cfg.get("scanner_enabled", 1.0) or 1.0) >= 0.5
     tg_on = float(enable_cfg.get("tg_scraper_enabled", 1.0) or 1.0) >= 0.5
 
+    # Belt-and-suspenders: read env-var locks DIRECTLY here (not through
+    # get_params) so even if get_params somehow returns wrong data, the
+    # operator's Railway env vars still win. Bulletproof against module
+    # caching, stale deploys, multiple replicas with code drift, etc.
+    import os as _os
+    _scanner_lock = _os.getenv("SCANNER_LOCK", "").strip().lower()
+    _tg_lock = _os.getenv("TG_SCRAPER_LOCK", "").strip().lower()
+    if _scanner_lock in ("off", "0", "false", "no", "n"):
+        if scanner_on:
+            logger.warning(
+                "Scanner: env-var SCANNER_LOCK=%s overriding DB scanner_enabled=1",
+                _scanner_lock,
+            )
+        scanner_on = False
+    elif _scanner_lock in ("on", "1", "true", "yes", "y"):
+        scanner_on = True
+    if _tg_lock in ("off", "0", "false", "no", "n"):
+        tg_on = False
+    elif _tg_lock in ("on", "1", "true", "yes", "y"):
+        tg_on = True
+
     # Trade-mode gate — /hub "Trade Mode: OFF" means NO new trades regardless
     # of source toggles. Effectively force-disables both gates above.
     if state.trade_mode != "paper":
@@ -1517,6 +1538,15 @@ async def run_once() -> tuple[int, int]:
                 _final_pattern = scored.get("profile_tag") or scored.get("source") or ""
                 _is_tg = "tg_signal" in _final_pattern
                 if not _is_tg:
+                    # Direct env-var check first (bypass get_params caching/staleness)
+                    import os as _os2
+                    _env_lock = _os2.getenv("SCANNER_LOCK", "").strip().lower()
+                    if _env_lock in ("off", "0", "false", "no", "n"):
+                        logger.warning(
+                            "Scanner: REFUSED to open %s — SCANNER_LOCK=%s (env)",
+                            scored.get("name", "?")[:20], _env_lock,
+                        )
+                        continue
                     _toggle = await get_params("scanner_enabled")
                     if float(_toggle.get("scanner_enabled", 1.0) or 1.0) < 0.5:
                         logger.warning(
