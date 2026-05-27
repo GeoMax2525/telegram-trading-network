@@ -5045,6 +5045,58 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("fixtrade"))
+async def cmd_fixtrade(message: Message):
+    """Zero out the PnL on a corrupt trade row and reset its close_reason
+    to 'data_error'. Use when /hub balance is off because of a bad MC
+    reading that produced a phantom huge win/loss.
+
+    Usage:  /fixtrade <trade_id>
+    Sets paper_pnl_sol=0, peak_multiple=1, close_reason='data_error'.
+    Balance is computed from sum of pnl, so this corrects /hub balance too.
+    Admin-only."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply(
+            "Usage: /fixtrade <trade_id>\n"
+            "Find suspect ids with /pnloutliers first.",
+            parse_mode="",
+        )
+        return
+    try:
+        trade_id = int(parts[1])
+    except ValueError:
+        await message.reply("Trade id must be a number.", parse_mode="")
+        return
+
+    from sqlalchemy import select as _select
+    from database.models import AsyncSessionLocal, PaperTrade
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(
+            _select(PaperTrade).where(PaperTrade.id == trade_id)
+        )).scalar_one_or_none()
+        if row is None:
+            await message.reply(f"No trade with id={trade_id}.", parse_mode="")
+            return
+        before_pnl = row.paper_pnl_sol
+        before_mult = row.peak_multiple
+        row.paper_pnl_sol = 0.0
+        row.peak_multiple = 1.0
+        row.close_reason = "data_error"
+        await session.commit()
+
+    await message.reply(
+        f"Fixed trade {trade_id} ({(row.token_name or '?')[:20]}):\n"
+        f"  paper_pnl_sol: {before_pnl:+.4f} → 0.0000\n"
+        f"  peak_multiple: {before_mult} → 1.0\n"
+        f"  close_reason: data_error\n"
+        f"Balance will recompute on next /hub.",
+        parse_mode="",
+    )
+
+
 @router.message(Command("pnloutliers"))
 async def cmd_pnloutliers(message: Message):
     """List the top N paper_pnl_sol rows (by abs value) to find rows that

@@ -319,6 +319,27 @@ async def _check_open_trades(bot) -> None:
                 )
                 continue
             current_mult = current_mc / entry_mc
+
+            # ── SANITY CAP on corrupt MC readings ──────────────────────
+            # DexScreener occasionally returns absurd MC values for new
+            # pump.fun tokens (off by 1000x due to indexing race / supply
+            # confusion). Without a cap, a single bad reading triggers
+            # the trail-profit logic and produces phantom +500 SOL wins.
+            # Real memecoins rarely hit 100x in our trade window; 500x
+            # in a single tick is essentially always bad data.
+            SUSPICIOUS_MULT_CAP = 100.0
+            prev_peak = pt.peak_multiple or 1.0
+            if (current_mult > SUSPICIOUS_MULT_CAP
+                    and current_mult > prev_peak * 3.0):
+                logger.warning(
+                    "Paper monitor SUSPICIOUS MC: id=%s %s current_mc=%.0f "
+                    "entry_mc=%.0f mult=%.1fx (prev_peak=%.1fx). Skipping "
+                    "tick — likely DexScreener data corruption.",
+                    pt.id, (pt.token_name or "?")[:24],
+                    current_mc, entry_mc, current_mult, prev_peak,
+                )
+                continue  # skip this tick, retry next poll with fresh data
+
             is_tg_signal = "tg_signal" in (pt.pattern_type or "")
             peak_mc = max(pt.peak_mc or 0, current_mc)
             peak_mult = max(pt.peak_multiple or 1.0, current_mult)
