@@ -5081,21 +5081,21 @@ async def cmd_resetagent6(message: Message):
 
     from sqlalchemy import delete as _delete, update as _update, func as _func, select as _select
     from database.models import (
-        AsyncSessionLocal, AgentParam, AgentWeights, AiTradeParams,
+        AsyncSessionLocal, AgentParam, AgentWeights, AITradeParams,
         seed_ai_trade_params,
     )
 
     async with AsyncSessionLocal() as session:
         # Count before
         n_atp = (await session.execute(
-            _select(_func.count(AiTradeParams.id))
+            _select(_func.count(AITradeParams.id))
         )).scalar() or 0
         n_aw = (await session.execute(
             _select(_func.count(AgentWeights.id))
         )).scalar() or 0
 
         # Wipe ai_trade_params completely
-        await session.execute(_delete(AiTradeParams))
+        await session.execute(_delete(AITradeParams))
         # Wipe learned agent_weights
         await session.execute(_delete(AgentWeights))
         # Clear running learning snapshots so Agent 6 starts fresh
