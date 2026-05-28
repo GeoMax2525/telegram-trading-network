@@ -5045,8 +5045,99 @@ async def cmd_manualmode(message: Message):
     )
 
 
-@router.message(Command("fixtrade"))
-async def cmd_fixtrade(message: Message):
+@router.message(Command("resetpaper"))
+async def cmd_resetpaper(message: Message):
+    """Nuclear reset: closes all open paper trades, marks ALL historical
+    paper trades as close_reason='reset' (excludes them from balance and
+    stats), and effectively returns the paper account to 20 SOL.
+
+    Trade rows are kept in the DB for historical reference — they're not
+    deleted, just tagged so balance/stats math excludes them.
+
+    Use after major data corruption (phantom rows, balance drift) when
+    you need a verifiable clean slate.
+
+    Requires confirmation: /resetpaper CONFIRM
+    """
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2 or parts[1].upper() != "CONFIRM":
+        await message.reply(
+            "⚠️  This will reset paper account to 20 SOL.\n"
+            "\n"
+            "• ALL open trades will close at PnL=0\n"
+            "• ALL historical trade rows tagged close_reason='reset'\n"
+            "• Balance returns to 20 SOL\n"
+            "• Stats (today/week/all-time) reset to 0\n"
+            "• Trade rows kept in DB for reference\n"
+            "\n"
+            "If you really want this:\n"
+            "<code>/resetpaper CONFIRM</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    from sqlalchemy import select as _select, update as _update, func as _func
+    from database.models import AsyncSessionLocal, PaperTrade
+
+    async with AsyncSessionLocal() as session:
+        # Count before
+        total_before = (await session.execute(
+            _select(_func.count(PaperTrade.id)).where(
+                PaperTrade.subscriber_id.is_(None),
+            )
+        )).scalar() or 0
+        open_before = (await session.execute(
+            _select(_func.count(PaperTrade.id)).where(
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.status == "open",
+            )
+        )).scalar() or 0
+        pnl_sum_before = (await session.execute(
+            _select(_func.coalesce(_func.sum(PaperTrade.paper_pnl_sol), 0.0)).where(
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalar() or 0.0
+
+        # Mark all HQ trades as reset — preserves rows but excludes from
+        # balance/strategy/meta aggregates
+        from datetime import datetime as _dt
+        await session.execute(
+            _update(PaperTrade)
+            .where(PaperTrade.subscriber_id.is_(None))
+            .values(
+                status="closed",
+                close_reason="reset",
+                paper_pnl_sol=0.0,
+                closed_at=_dt.utcnow(),
+            )
+        )
+        await session.commit()
+
+    # Reset state counters
+    _state.paper_trades_today = 0
+    _state.paper_wins_today = 0
+    _state.paper_balance = await compute_paper_balance(_state.PAPER_STARTING_BALANCE)
+
+    await message.reply(
+        f"✅  <b>PAPER ACCOUNT RESET</b>\n"
+        f"\n"
+        f"Before:\n"
+        f"  Total trades:  {total_before}\n"
+        f"  Open trades:   {open_before}\n"
+        f"  PnL sum:       {pnl_sum_before:+.4f} SOL\n"
+        f"\n"
+        f"After:\n"
+        f"  All {total_before} rows tagged close_reason='reset'\n"
+        f"  Balance:       {_state.paper_balance:.4f} SOL\n"
+        f"\n"
+        f"Trade rows preserved for reference. Stats clean.\n"
+        f"Bot resumes trading normally on next 4am signal.",
+        parse_mode="HTML",
+    )
     """Zero out the PnL on a corrupt trade row and reset its close_reason
     to 'data_error'. Use when /hub balance is off because of a bad MC
     reading that produced a phantom huge win/loss.
