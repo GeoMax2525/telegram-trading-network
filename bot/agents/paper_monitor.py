@@ -492,15 +492,15 @@ async def _check_open_trades(bot) -> None:
                 continue
 
             # Profit trailing stop: once peak crosses the profit trail
-            # trigger, follow the peak down by profit_trail_pct.
-            # PHASE 2: 4am trades use DYNAMIC trail width that tightens
-            # as peak grows — wide early to breathe, tight late to lock.
+            # trigger, follow the peak down by trail width.
+            # PHASE 2: ALL trades (4am AND scanner) use DYNAMIC trail
+            # width that tightens as peak grows. Wide early to breathe,
+            # tight late to lock. Same logic regardless of source.
             if is_tg_signal:
                 pt_trigger = float(cfg.get("tg_signal_trail_trigger", 2.0) or 2.0)
-                pt_pct = _dynamic_trail_pct(peak_mult)
             else:
                 pt_trigger = float(cfg.get("profit_trail_trigger", 2.0) or 2.0)
-                pt_pct     = float(cfg.get("profit_trail_pct",     0.15) or 0.15)
+            pt_pct = _dynamic_trail_pct(peak_mult)
             if peak_mult >= pt_trigger:
                 trail_stop_mult = peak_mult * (1.0 - pt_pct)
                 if current_mult <= trail_stop_mult:
@@ -660,15 +660,14 @@ async def _check_open_trades(bot) -> None:
                 )
                 continue
 
-            # Trailing stop — 4am signals get DYNAMIC trail (Phase 2)
+            # Trailing stop — PHASE 2: ALL trades use dynamic trail width
             if resolved and resolved["trail_enabled"]:
                 if is_tg_signal:
-                    # PHASE 2: trigger at 2x peak, dynamic trail width
                     trigger_mult = float(cfg.get("tg_signal_trail_trigger", 2.0) or 2.0)
-                    trail_pct = _dynamic_trail_pct(peak_mult)
                 else:
                     trigger_mult = 1.0 + float(resolved["trail_trigger"])
-                    trail_pct = float(resolved["trail_pct"])
+                # Dynamic trail width applies universally
+                trail_pct = _dynamic_trail_pct(peak_mult)
 
                 if peak_mult >= trigger_mult:
                     trail_stop_mult = peak_mult * (1.0 - trail_pct)
