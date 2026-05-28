@@ -320,6 +320,17 @@ async def _check_open_trades(bot) -> None:
                 continue
             current_mult = current_mc / entry_mc
 
+            # ── PHASE 2: Dynamic trail width ────────────────────────────
+            # Trail tightens as gain grows. Wide early lets the move
+            # breathe (memecoins are noisy); tight late locks the meat.
+            # Research consensus (ATR-style trailing, multiple sources).
+            def _dynamic_trail_pct(peak_m: float) -> float:
+                if peak_m < 5.0:    return 0.50  # 2-5x: room to breathe
+                if peak_m < 10.0:   return 0.40  # 5-10x: tighten
+                if peak_m < 25.0:   return 0.30  # 10-25x: lock more
+                if peak_m < 50.0:   return 0.22  # 25-50x
+                return 0.18                       # 50x+: protect moonshot
+
             # ── SANITY CAP on corrupt MC readings ──────────────────────
             # DexScreener occasionally returns absurd MC values for new
             # pump.fun tokens (off by 1000x due to indexing race / supply
@@ -411,6 +422,54 @@ async def _check_open_trades(bot) -> None:
                 # closes, not wins or losses. Keeping the group quiet.
                 continue
 
+            # ── PHASE 2: HARD TIMEOUT (4h max, exit regardless of mult) ─
+            # Memecoins don't pump after 4h post-entry except in rare
+            # cases. The existing "expired" check above only fires if
+            # mult < 1.20 — this catches the 4h timeout regardless of
+            # current price so capital doesn't get stuck riding a
+            # consolidating token forever.
+            hard_timeout_h = float(cfg.get("hard_timeout_hours", 4.0) or 4.0)
+            if age_hours >= hard_timeout_h:
+                remaining_sol = sol * (remaining / 100.0)
+                pnl = round(realized + remaining_sol * (current_mult - 1), 4)
+                logger.info(
+                    "Paper: HARD-TIMEOUT %s — age=%.1fh mult=%.2fx pnl=%+.4f tags=%s",
+                    name, age_hours, current_mult, pnl, ",".join(tags) or "-",
+                )
+                msg_icon = "✅" if pnl > 0 else "❌"
+                await _finalize_paper_close(
+                    bot, pt, "hard_timeout", pnl, peak_mc, peak_mult, [
+                        f"{msg_icon} PAPER TRADE — HARD TIMEOUT (4h)",
+                        f"🪙 {name} | {current_mult:.1f}x | {pnl:+.4f} SOL",
+                        f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
+                        "Balance: {bal:.2f} SOL",
+                    ],
+                )
+                continue
+
+            # ── PHASE 2: TIME STOP (no movement after 10 min) ──────────
+            # If trade hasn't moved meaningfully after 10 minutes, exit.
+            # Memecoins die fast; stale capital is dead capital. Keeps
+            # the bot recycling into fresher opportunities.
+            time_stop_min = float(cfg.get("time_stop_minutes", 10.0) or 10.0)
+            time_stop_thr = float(cfg.get("time_stop_threshold", 1.50) or 1.50)
+            if (age_hours >= (time_stop_min / 60.0)
+                    and peak_mult < time_stop_thr
+                    and current_mult < time_stop_thr):
+                remaining_sol = sol * (remaining / 100.0)
+                pnl = round(realized + remaining_sol * (current_mult - 1), 4)
+                logger.info(
+                    "Paper: TIME-STOP %s — age=%.1fm peak=%.2fx now=%.2fx pnl=%+.4f tags=%s",
+                    name, age_hours * 60, peak_mult, current_mult, pnl,
+                    ",".join(tags) or "-",
+                )
+                # Silent close — too many alerts would spam, and time
+                # stops aren't wins or losses worth celebrating
+                await _finalize_silent_close(
+                    pt, "time_stop", pnl, peak_mc, peak_mult,
+                )
+                continue
+
             # ── Profit protection ────────────────────────────────────────
             # Break-even SL: once peak crossed the breakeven trigger,
             # never let the trade close below 1.0x from here on.
@@ -434,11 +493,11 @@ async def _check_open_trades(bot) -> None:
 
             # Profit trailing stop: once peak crosses the profit trail
             # trigger, follow the peak down by profit_trail_pct.
-            # 4am trades get wider settings to let runners run; trail %
-            # is /setparam-tunable via tg_signal_trail_pct.
+            # PHASE 2: 4am trades use DYNAMIC trail width that tightens
+            # as peak grows — wide early to breathe, tight late to lock.
             if is_tg_signal:
-                pt_trigger = 3.0   # 4am: don't trail until 3x
-                pt_pct = float(cfg.get("tg_signal_trail_pct", 0.35) or 0.35)
+                pt_trigger = float(cfg.get("tg_signal_trail_trigger", 2.0) or 2.0)
+                pt_pct = _dynamic_trail_pct(peak_mult)
             else:
                 pt_trigger = float(cfg.get("profit_trail_trigger", 2.0) or 2.0)
                 pt_pct     = float(cfg.get("profit_trail_pct",     0.15) or 0.15)
@@ -513,12 +572,18 @@ async def _check_open_trades(bot) -> None:
             # Scale-out partial sells are HQ-only — subscriber relay rows
             # ride the full position to TP/SL/trail. Realized PnL on relay
             # rows would also bypass _refund_subscriber_balance.
+            # PHASE 2: 4-tranche ladder exits.
+            # 40% at 2x (recovers initial cost)
+            # 25% at 5x (lock big chunk)
+            # 15% at 10x (lock most of meat)
+            # 20% rides on dynamic trail (the moonbag)
             scale_out_done = False
             if pt.subscriber_id is not None:
                 pass  # skip scale-out for subscribers
-            elif remaining > 70 and current_mult >= 2.0:
-                # First scale: sell 30% at 2x — recover initial + profit
-                sell_pct = 30.0
+            elif remaining > 80 and current_mult >= 2.0:
+                # First scale: 40% at 2x (Phase 2: was 30%)
+                # Recovers initial cost + 40% profit on the slice sold
+                sell_pct = 40.0
                 sell_sol = sol * (sell_pct / 100.0) * (current_mult - 1)
                 new_remaining = remaining - sell_pct
                 new_realized = realized + sell_sol
@@ -532,13 +597,13 @@ async def _check_open_trades(bot) -> None:
                 except Exception:
                     pass
                 logger.info(
-                    "Paper SCALE OUT %s: sold 30%% at %.1fx | +%.4f SOL | remaining %.0f%%",
+                    "Paper SCALE OUT %s: sold 40%% at %.1fx | +%.4f SOL | remaining %.0f%%",
                     name, current_mult, sell_sol, new_remaining,
                 )
                 try:
                     src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
                     await bot.send_message(CALLER_GROUP_ID, "\n".join([
-                        f"📈 PAPER TRADE — SCALE OUT 30% ({src_tag})",
+                        f"📈 PAPER TRADE — SCALE OUT 40% ({src_tag})",
                         f"🪙 {name} | {current_mult:.1f}x | +{sell_sol:.4f} SOL",
                         f"Remaining: {new_remaining:.0f}% still running",
                     ]), message_thread_id=SCAN_TOPIC_ID)
@@ -546,7 +611,7 @@ async def _check_open_trades(bot) -> None:
                     pass
                 scale_out_done = True
 
-            elif pt.subscriber_id is None and remaining > 40 and remaining <= 70 and current_mult >= 5.0:
+            elif pt.subscriber_id is None and remaining > 50 and remaining <= 80 and current_mult >= 5.0:
                 # Second scale: sell 25% at 5x — let runners actually run
                 sell_pct = 25.0
                 sell_sol = sol * (sell_pct / 100.0) * (current_mult - 1)
@@ -595,12 +660,12 @@ async def _check_open_trades(bot) -> None:
                 )
                 continue
 
-            # Trailing stop — 4am signals get wider trail + later activation
+            # Trailing stop — 4am signals get DYNAMIC trail (Phase 2)
             if resolved and resolved["trail_enabled"]:
                 if is_tg_signal:
-                    # 4am trades: activate at 3x peak, trail width from param
-                    trigger_mult = 3.0   # activate at 3x peak
-                    trail_pct = float(cfg.get("tg_signal_trail_pct", 0.35) or 0.35)
+                    # PHASE 2: trigger at 2x peak, dynamic trail width
+                    trigger_mult = float(cfg.get("tg_signal_trail_trigger", 2.0) or 2.0)
+                    trail_pct = _dynamic_trail_pct(peak_mult)
                 else:
                     trigger_mult = 1.0 + float(resolved["trail_trigger"])
                     trail_pct = float(resolved["trail_pct"])
