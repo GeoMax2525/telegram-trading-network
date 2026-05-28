@@ -5196,6 +5196,16 @@ async def cmd_resetpaper(message: Message):
                 closed_at=_dt.utcnow(),
             )
         )
+        # Also clear paper_balance_offset — this is hidden state that
+        # was previously set to cancel out phantom pnl rows. Once pnl
+        # is reset, leaving the offset makes balance go wildly negative.
+        from database.models import AgentParam as _AP
+        offset_row = (await session.execute(
+            _select(_AP).where(_AP.param_name == "paper_balance_offset")
+        )).scalar_one_or_none()
+        if offset_row is not None:
+            offset_row.param_value = 0.0
+            offset_row.updated_at = _dt.utcnow()
         await session.commit()
 
     # Reset state counters
