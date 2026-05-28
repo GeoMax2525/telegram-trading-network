@@ -5045,6 +5045,87 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("resetagent6"))
+async def cmd_resetagent6(message: Message):
+    """Reset Agent 6's learning data so it starts fresh against the new
+    strategy. Wipes learned TP/SL/position rows in ai_trade_params,
+    confidence weights, and the running win-rate snapshot. Agent 6 will
+    re-learn from new trades going forward.
+
+    Use AFTER /resetpaper, before deploying new exit logic — eliminates
+    legacy bias from the old strategy.
+
+    Requires confirmation: /resetagent6 CONFIRM
+    """
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2 or parts[1].upper() != "CONFIRM":
+        await message.reply(
+            "⚠️  This will reset Agent 6's learning data.\n"
+            "\n"
+            "Action:\n"
+            "• Re-seeds ai_trade_params to fresh defaults (TP/SL/size)\n"
+            "• Zeros learned win_rate and sample_size on every pattern\n"
+            "• Clears last_wr_snapshot — Agent 6 starts fresh measurement\n"
+            "• Resets agent_weights to defaults\n"
+            "\n"
+            "Use after /resetpaper, before Phase 2 ships. Cleans legacy\n"
+            "bias from old exit strategy so the new logic learns clean.\n"
+            "\n"
+            "Confirm: <code>/resetagent6 CONFIRM</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    from sqlalchemy import delete as _delete, update as _update, func as _func, select as _select
+    from database.models import (
+        AsyncSessionLocal, AgentParam, AgentWeights, AiTradeParams,
+        seed_ai_trade_params,
+    )
+
+    async with AsyncSessionLocal() as session:
+        # Count before
+        n_atp = (await session.execute(
+            _select(_func.count(AiTradeParams.id))
+        )).scalar() or 0
+        n_aw = (await session.execute(
+            _select(_func.count(AgentWeights.id))
+        )).scalar() or 0
+
+        # Wipe ai_trade_params completely
+        await session.execute(_delete(AiTradeParams))
+        # Wipe learned agent_weights
+        await session.execute(_delete(AgentWeights))
+        # Clear running learning snapshots so Agent 6 starts fresh
+        for k in ("last_wr_snapshot_at", "last_wr_snapshot_wr"):
+            await session.execute(
+                _delete(AgentParam).where(AgentParam.param_name == k)
+            )
+        await session.commit()
+
+    # Re-seed ai_trade_params with defaults (so the bot doesn't crash on missing rows)
+    seeded = await seed_ai_trade_params()
+
+    await message.reply(
+        f"✅  <b>AGENT 6 RESET</b>\n"
+        f"\n"
+        f"Cleared:\n"
+        f"  ai_trade_params:  {n_atp} learned rows\n"
+        f"  agent_weights:    {n_aw} learned weight rows\n"
+        f"  wr snapshots:     wiped\n"
+        f"\n"
+        f"Re-seeded:\n"
+        f"  ai_trade_params:  {seeded} fresh default rows\n"
+        f"\n"
+        f"Agent 6 will re-learn from new trades. Combined with the fresh\n"
+        f"20 SOL balance, this is a verifiably clean baseline for the new\n"
+        f"exit logic.",
+        parse_mode="HTML",
+    )
+
+
 @router.message(Command("resetpaper"))
 async def cmd_resetpaper(message: Message):
     """Nuclear reset: closes all open paper trades, marks ALL historical
