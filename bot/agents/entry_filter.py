@@ -35,8 +35,18 @@ from database.models import get_params
 logger = logging.getLogger(__name__)
 
 # Default thresholds (tunable via /setparam)
+#
+# IMPORTANT: entry_filter_enabled defaults to 0 (OFF) for tg_signal trades.
+# The original 4am architecture was built to TRUST the source — the channel
+# does its own vetting before posting, and the bot snipes fast based on
+# that trust. Adding on-chain filters here would reject legitimate fresh
+# launches (high early concentration is normal, mint authority often still
+# active for first few minutes, liquidity builds over time).
+#
+# Operator opts in if they want to test: /setparam entry_filter_enabled 1
+# This makes Phase 4 an A/B test, not a default behavior change.
 DEFAULTS = {
-    "entry_filter_enabled":        1.0,
+    "entry_filter_enabled":        0.0,  # OFF by default — preserve 4am trust
     "entry_min_liquidity_usd":  8000.0,
     "entry_max_top10_pct":        30.0,
     "entry_check_mint_authority":  1.0,
