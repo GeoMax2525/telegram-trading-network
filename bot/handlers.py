@@ -5045,6 +5045,81 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("filtertest"))
+async def cmd_filtertest(message: Message):
+    """Test the Phase 4 entry filter against an arbitrary mint.
+    Useful for diagnosing why a specific signal got rejected.
+
+    Usage: /filtertest <mint_address>
+    """
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply(
+            "Usage: <code>/filtertest &lt;mint_address&gt;</code>\n"
+            "\n"
+            "Runs Phase 4 entry filter checks and shows what passed/failed.",
+            parse_mode="HTML",
+        )
+        return
+    mint = parts[1].strip()
+    if len(mint) < 32 or len(mint) > 44:
+        await message.reply("That doesn't look like a Solana mint address.", parse_mode="")
+        return
+
+    from bot.scanner import fetch_token_data, parse_token_metrics
+    from bot.agents.entry_filter import check_entry_filters
+    from database.models import get_params
+
+    await message.reply(f"🔍 Testing entry filter for <code>{mint}</code>…", parse_mode="HTML")
+
+    pair = await fetch_token_data(mint, allow_any_dex=True)
+    if pair is None:
+        await message.reply("❌ DexScreener returned no pair data.", parse_mode="")
+        return
+
+    metrics = parse_token_metrics(pair)
+    passed, reason = await check_entry_filters(mint, pair)
+
+    cfg = await get_params(
+        "entry_filter_enabled",
+        "entry_min_liquidity_usd",
+        "entry_max_top10_pct",
+        "entry_check_mint_authority",
+        "entry_check_top_holders",
+    )
+
+    DIV = "━" * 28
+    icon = "✅" if passed else "❌"
+    text = (
+        f"{DIV}\n"
+        f"{icon}  ENTRY FILTER TEST\n"
+        f"{DIV}\n"
+        f"\n"
+        f"Mint: <code>{mint}</code>\n"
+        f"Token: {metrics.get('name', '?')}\n"
+        f"\n"
+        f"<b>Result:</b> {'PASSED — would open' if passed else 'REJECTED'}\n"
+    )
+    if reason:
+        text += f"<b>Reason:</b> {reason}\n"
+    text += (
+        f"\n"
+        f"<b>Token state</b>\n"
+        f"  Liquidity USD:  ${float((pair.get('liquidity') or {}).get('usd') or 0):.0f}\n"
+        f"  MC:             ${metrics.get('market_cap', 0):.0f}\n"
+        f"\n"
+        f"<b>Active thresholds</b>\n"
+        f"  enabled:                {cfg.get('entry_filter_enabled')}\n"
+        f"  min liquidity USD:      {cfg.get('entry_min_liquidity_usd')}\n"
+        f"  max top10 % :           {cfg.get('entry_max_top10_pct')}\n"
+        f"  check mint authority:   {cfg.get('entry_check_mint_authority')}\n"
+        f"  check top holders:      {cfg.get('entry_check_top_holders')}\n"
+    )
+    await message.reply(text, parse_mode="HTML")
+
+
 @router.message(Command("regime"))
 async def cmd_regime(message: Message):
     """Show current Solana memecoin market regime + signal breakdown.

@@ -364,6 +364,21 @@ async def _handle_message(event, channel_name: str) -> None:
                 regime_mult = get_probe_size_multiplier()
                 tg_paper_sol = round(tg_paper_sol * regime_mult, 4)
 
+                # PHASE 4: on-chain entry filter — top10 concentration,
+                # liquidity floor, mint authority. 4am signals usually
+                # bypass these (they only fire from Telegram channel),
+                # so this is the only filter standing between the bot
+                # and a rug. Tunable via /setparam.
+                from bot.agents.entry_filter import check_entry_filters
+                ef_passed, ef_reason = await check_entry_filters(mint, pair)
+                if not ef_passed:
+                    skip_reason = f"entry_filter:{ef_reason}"
+                    logger.info(
+                        "TG scraper SKIPPED %s — entry filter rejected: %s",
+                        mint[:12], ef_reason,
+                    )
+                    return
+
                 bal = await compute_paper_balance(_state.PAPER_STARTING_BALANCE)
                 if bal < tg_paper_sol + 0.05:
                     skip_reason = f"insufficient_balance({bal:.3f}<{tg_paper_sol + 0.05:.3f})"

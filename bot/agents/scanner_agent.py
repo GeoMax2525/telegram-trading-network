@@ -1235,6 +1235,16 @@ async def run_once() -> tuple[int, int]:
                 continue
             tg_paper_sol = round(tg_paper_sol * get_probe_size_multiplier(), 4)
 
+            # PHASE 4: on-chain entry filter for scanner-injected TG signals
+            from bot.agents.entry_filter import check_entry_filters
+            ef_passed, ef_reason = await check_entry_filters(mint, pair)
+            if not ef_passed:
+                logger.info(
+                    "Scanner: TG skip %s — entry filter rejected: %s",
+                    mint[:12], ef_reason,
+                )
+                continue
+
             if state.paper_balance < tg_paper_sol + 0.05:
                 continue
 
