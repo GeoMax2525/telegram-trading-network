@@ -13,6 +13,78 @@ close only via TP hit, trailing stop, or fixed SL (or manually via
 
 import asyncio
 import logging
+
+# Phase 5: trade close commentary — fire-and-forget Claude calls
+_close_commentary_tasks: set = set()
+
+
+def _spawn_close_commentary(bot, pt, pnl: float, peak_mult: float, close_reason: str) -> None:
+    """Spawn an async Claude commentary task that doesn't block the close
+    broadcast. Posts a follow-up message with Claude's read of why this
+    trade ended the way it did. Silent no-op if no API key."""
+    try:
+        from bot.agents.claude_reasoning import claude_available
+        if not claude_available():
+            return
+        task = asyncio.create_task(
+            _send_close_commentary(bot, pt, pnl, peak_mult, close_reason)
+        )
+        _close_commentary_tasks.add(task)
+        task.add_done_callback(_close_commentary_tasks.discard)
+    except Exception:
+        pass  # never block close on commentary
+
+
+async def _send_close_commentary(bot, pt, pnl: float, peak_mult: float, close_reason: str) -> None:
+    """Generate and send a Claude-written 'why this happened' paragraph
+    as a follow-up to the close card."""
+    try:
+        from bot.agents.claude_reasoning import (
+            HAIKU_MODEL, call_claude, claude_available,
+        )
+        from bot.config import CALLER_GROUP_ID, SCAN_TOPIC_ID
+        if not claude_available():
+            return
+
+        is_tg = "tg_signal" in (pt.pattern_type or "")
+        source = "4am tg_signal" if is_tg else "scanner"
+        name = pt.token_name or "?"
+
+        from datetime import datetime as _dt
+        age_min = 0.0
+        if pt.opened_at:
+            age_min = (_dt.utcnow() - pt.opened_at).total_seconds() / 60.0
+
+        system = """You are a senior memecoin trader writing a one-paragraph postmortem on a closed paper trade for "Revolt Agent Hub". Write 2-3 sentences max. Be specific and honest — say what happened (chart distribution, momentum fade, rug pattern, hit TP) and what the bot did right or wrong. No fluff. No hedging. No markdown."""
+
+        user = (
+            f"Trade closed: {name}\n"
+            f"Source: {source}\n"
+            f"Close reason: {close_reason}\n"
+            f"Entry MC: ${pt.entry_mc:,.0f}\n"
+            f"Peak: {peak_mult:.2f}x\n"
+            f"PnL: {pnl:+.4f} SOL on {pt.paper_sol_spent:.3f} SOL position\n"
+            f"Held: {age_min:.1f} min\n"
+            f"\n"
+            f"Write the 2-3 sentence postmortem."
+        )
+
+        text = await call_claude(
+            system=system, user=user, model=HAIKU_MODEL, max_tokens=200,
+        )
+        if not text or not bot:
+            return
+
+        text = text.strip()
+        await bot.send_message(
+            CALLER_GROUP_ID,
+            f"🧠 {text}",
+            message_thread_id=SCAN_TOPIC_ID,
+        )
+    except Exception as exc:
+        # Logged but never raised — close commentary is best-effort
+        logger.debug("close commentary failed for %s: %s",
+                     (pt.token_name or '?')[:20], exc)
 from datetime import datetime, timedelta
 
 from bot import state
@@ -129,6 +201,9 @@ async def _finalize_paper_close(
             )
         except Exception:
             pass
+        # Phase 5: fire-and-forget Claude postmortem (HQ only, not subscriber DMs).
+        # Silent no-op if ANTHROPIC_API_KEY isn't set.
+        _spawn_close_commentary(bot, pt, pnl, peak_mult or 1.0, reason)
         return bal
     else:
         bal = await _refund_subscriber_balance(

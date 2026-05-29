@@ -193,6 +193,17 @@ async def main() -> None:
     asyncio.create_task(regime_tracker_loop())
     logger.info("Regime tracker: queued for startup")
 
+    # Phase 5: Claude warm path — per-position reasoning every 5 min
+    # Silently no-ops if ANTHROPIC_API_KEY isn't set
+    from bot.agents.claude_warm import claude_warm_loop
+    asyncio.create_task(claude_warm_loop())
+    logger.info("Claude warm path: queued for startup")
+
+    # Phase 5: Claude cold path — daily strategy review at 9 AM UTC
+    from bot.agents.claude_cold import claude_cold_loop
+    asyncio.create_task(claude_cold_loop())
+    logger.info("Claude cold path: queued for startup")
+
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     # Set bot reference for signal relay
     set_relay_bot(bot)

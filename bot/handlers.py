@@ -5045,6 +5045,115 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("strategy_review"))
+@router.message(Command("review"))
+async def cmd_strategy_review(message: Message):
+    """Show the latest Claude daily strategy review.
+
+    Without args: shows the most recent review.
+    With 'run' arg: triggers a fresh review immediately (not scheduled).
+    """
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from bot.agents.claude_cold import get_latest_review, run_daily_review
+    from bot.agents.claude_reasoning import claude_available
+
+    if not claude_available():
+        await message.reply(
+            "❌  ANTHROPIC_API_KEY not set. Add it to Railway Variables, "
+            "redeploy, then try again.",
+            parse_mode="",
+        )
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) > 1 and parts[1].lower() == "run":
+        await message.reply("🧠  Running fresh Claude review now (10-30s)…", parse_mode="")
+        review = await run_daily_review()
+        if not review:
+            await message.reply("Claude review failed. Check Railway logs.", parse_mode="")
+            return
+    else:
+        review = await get_latest_review()
+
+    if not review:
+        await message.reply(
+            "No review available yet. Run <code>/strategy_review run</code> "
+            "to trigger one now, or wait for the next 9 AM UTC scheduled run.",
+            parse_mode="HTML",
+        )
+        return
+
+    DIV = "━" * 28
+    summary = review.get("summary") or "(no summary)"
+    recs = review.get("recommendations") or []
+    no_change = review.get("no_change_explanation")
+    generated = review.get("generated_at", "?")
+    trade_count = review.get("trade_count", 0)
+
+    lines = [
+        DIV,
+        "🧠  CLAUDE STRATEGY REVIEW",
+        DIV,
+        "",
+        f"<i>Generated: {generated}</i>",
+        f"<i>Based on: {trade_count} closed trades</i>",
+        "",
+        "<b>Summary</b>",
+        F.esc(summary) if 'F' in dir() else summary.replace('<', '&lt;').replace('>', '&gt;'),
+        "",
+    ]
+
+    if recs:
+        lines.append("<b>Recommendations</b>")
+        for i, r in enumerate(recs, 1):
+            safe_tag = "🟢 SAFE" if r.get("auto_safe") else "⚠️ REVIEW"
+            lines.append(
+                f"\n{i}. <code>{r.get('param','?')}</code>: "
+                f"{r.get('current','?')} → <b>{r.get('proposed','?')}</b>"
+            )
+            lines.append(f"   {safe_tag}  ·  confidence: {r.get('confidence','?')}")
+            lines.append(f"   <i>{r.get('reason','?')}</i>")
+        lines += [
+            "",
+            "Apply with:",
+            "  <code>/apply_review safe</code>   — only auto_safe changes",
+            "  <code>/apply_review all</code>    — apply everything (use with caution)",
+        ]
+    else:
+        lines.append(f"<i>No changes recommended.</i>")
+        if no_change:
+            lines.append(f"<i>{no_change}</i>")
+
+    text = "\n".join(lines)
+    await message.reply(text, parse_mode="HTML")
+
+
+@router.message(Command("apply_review"))
+async def cmd_apply_review(message: Message):
+    """Apply Claude's most recent strategy review.
+
+    Usage:
+      /apply_review safe   — apply only auto_safe changes (recommended)
+      /apply_review all    — apply all recommendations
+    """
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from bot.agents.claude_cold import apply_review
+
+    parts = (message.text or "").split()
+    mode = parts[1].lower() if len(parts) > 1 else "safe"
+    safe_only = (mode != "all")
+
+    applied, log = await apply_review(safe_only=safe_only)
+
+    lines = [
+        f"✅ APPLIED {applied} changes" if applied else "ℹ️  No changes applied",
+        "",
+    ] + log
+    await message.reply("\n".join(lines), parse_mode="")
+
+
 @router.message(Command("filtertest"))
 async def cmd_filtertest(message: Message):
     """Test the Phase 4 entry filter against an arbitrary mint.

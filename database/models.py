@@ -22,7 +22,7 @@ import os
 from datetime import datetime, timedelta
 
 from sqlalchemy import (
-    Column, Integer, String, Float, Boolean, DateTime, BigInteger,
+    Column, Integer, String, Float, Boolean, DateTime, BigInteger, Text,
     select, func, text, update,
 )
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -329,6 +329,22 @@ class ParamChange(Base):
     trades_analyzed = Column(Integer,    nullable=True)
     win_rate        = Column(Float,      nullable=True)
     changed_at      = Column(DateTime,   default=datetime.utcnow, nullable=False)
+
+
+class ClaudeReview(Base):
+    """Phase 5 cold path: stores daily Claude strategy reviews as JSON.
+
+    Each row is one review (24h window). review_json holds the full
+    structured response. /strategy_review reads the latest row;
+    /apply_review applies recommendations and sets applied=True."""
+    __tablename__ = "claude_reviews"
+
+    id           = Column(Integer,  primary_key=True, autoincrement=True)
+    generated_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    trade_count  = Column(Integer,  nullable=True)
+    review_json  = Column(Text,     nullable=False)
+    applied      = Column(Boolean,  default=False, nullable=False)
+    applied_at   = Column(DateTime, nullable=True)
 
 
 # ── Paper Trades table ────────────────────────────────────────────────────────
