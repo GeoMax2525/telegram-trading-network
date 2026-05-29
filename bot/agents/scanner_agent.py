@@ -1222,6 +1222,19 @@ async def run_once() -> tuple[int, int]:
             state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
             tg_probe_cfg = await get_params("paper_probe_size")
             tg_paper_sol = float(tg_probe_cfg.get("paper_probe_size") or 0.2)
+
+            # PHASE 3: regime-aware probe sizing for scanner-injected TG signals
+            from bot.agents.regime_tracker import (
+                get_probe_size_multiplier, should_skip_in_cold,
+            )
+            if should_skip_in_cold():
+                logger.info(
+                    "Scanner: TG skip %s — regime=COLD, operator paused",
+                    mint[:12],
+                )
+                continue
+            tg_paper_sol = round(tg_paper_sol * get_probe_size_multiplier(), 4)
+
             if state.paper_balance < tg_paper_sol + 0.05:
                 continue
 
@@ -1468,6 +1481,18 @@ async def run_once() -> tuple[int, int]:
             # Net: +1.28 SOL even at 20% WR.
             probe_cfg = await get_params("paper_probe_size")
             paper_sol = float(probe_cfg.get("paper_probe_size") or 0.2)
+
+            # PHASE 3: regime-aware probe sizing + cold-pause for scanner trades
+            from bot.agents.regime_tracker import (
+                get_probe_size_multiplier, should_skip_in_cold,
+            )
+            if should_skip_in_cold():
+                logger.info(
+                    "Scanner: skip %s — regime=COLD, operator paused",
+                    scored.get("name", "?")[:20],
+                )
+                continue
+            paper_sol = round(paper_sol * get_probe_size_multiplier(), 4)
 
             logger.info(
                 "Scanner: PAPER TRADE %s conf=%.0f sol=%.4f bal=%.4f",
