@@ -187,6 +187,12 @@ async def main() -> None:
     asyncio.create_task(laserstream_loop())
     logger.info("LaserStream: queued for startup")
 
+    # Regime tracker — Solana memecoin market state (HOT/NEUTRAL/COLD)
+    # Polls every 5 min, drives downstream probe sizing decisions
+    from bot.agents.regime_tracker import regime_tracker_loop
+    asyncio.create_task(regime_tracker_loop())
+    logger.info("Regime tracker: queued for startup")
+
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     # Set bot reference for signal relay
     set_relay_bot(bot)

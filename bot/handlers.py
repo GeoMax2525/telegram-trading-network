@@ -5045,6 +5045,67 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("regime"))
+async def cmd_regime(message: Message):
+    """Show current Solana memecoin market regime + signal breakdown.
+    Useful for verifying the regime tracker is reading sensible data."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from bot import state as _state
+    from bot.agents.regime_tracker import (
+        get_probe_size_multiplier, should_skip_in_cold,
+    )
+
+    regime = getattr(_state, "meme_regime", None)
+    if regime is None:
+        await message.reply(
+            "Regime tracker hasn't completed first poll yet. Try again in ~5 min.",
+            parse_mode="",
+        )
+        return
+
+    score = getattr(_state, "meme_regime_score", 0)
+    vol_ratio = getattr(_state, "meme_regime_volume_ratio", 0.0)
+    sol_24h = getattr(_state, "meme_regime_sol_24h", 0.0)
+    updated = getattr(_state, "meme_regime_updated_at", None)
+
+    icon = {"HOT": "🔥", "COLD": "🧊", "NEUTRAL": "⚪"}.get(regime, "⚪")
+    probe_mult = get_probe_size_multiplier()
+    cold_skip = should_skip_in_cold()
+
+    age = "?"
+    if updated:
+        from datetime import datetime as _dt
+        age_sec = (_dt.utcnow() - updated).total_seconds()
+        age = f"{int(age_sec)}s ago" if age_sec < 60 else f"{int(age_sec / 60)}m ago"
+
+    DIV = "━" * 28
+    text = (
+        f"{DIV}\n"
+        f"🌡️ MARKET REGIME\n"
+        f"{DIV}\n"
+        f"\n"
+        f"Current: {icon} <b>{regime}</b>  (score {score:+d})\n"
+        f"Updated: {age}\n"
+        f"\n"
+        f"Signals:\n"
+        f"  Volume ratio:  {vol_ratio:.2f}x EMA\n"
+        f"  SOL 24h:       {sol_24h:+.2f}%\n"
+        f"\n"
+        f"Bot adjustments active:\n"
+        f"  Probe size mult:  {probe_mult:.2f}x\n"
+        f"  Cold-pause:       {'ON (skipping COLD trades)' if cold_skip else 'OFF'}\n"
+        f"\n"
+        f"Tunable via /setparam:\n"
+        f"  regime_hot_vol_ratio (current 1.5)\n"
+        f"  regime_cold_vol_ratio (current 0.7)\n"
+        f"  regime_hot_sol_24h (current 5.0)\n"
+        f"  regime_cold_sol_24h (current -5.0)\n"
+        f"  regime_cold_skip_trades (0/1)\n"
+    )
+    await message.reply(text, parse_mode="HTML")
+
+
 @router.message(Command("resetagent6"))
 async def cmd_resetagent6(message: Message):
     """Reset Agent 6's learning data so it starts fresh against the new
@@ -5756,6 +5817,20 @@ async def cmd_status(message: Message):
             "  To remove: clear the matching Railway env var "
             "(SCANNER_LOCK / TG_SCRAPER_LOCK) and redeploy."
         )
+
+    # PHASE 3: market regime status
+    from bot import state as _state
+    regime = getattr(_state, "meme_regime", None)
+    if regime is not None:
+        icon = {"HOT": "🔥", "COLD": "🧊", "NEUTRAL": "⚪"}.get(regime, "⚪")
+        vol_ratio = getattr(_state, "meme_regime_volume_ratio", 0.0)
+        sol_24h = getattr(_state, "meme_regime_sol_24h", 0.0)
+        lines += [
+            "",
+            f"🌡️ MARKET REGIME  {icon} {regime}",
+            f"  Vol ratio: {vol_ratio:.2f}x  ·  SOL 24h: {sol_24h:+.1f}%",
+            "  (/regime for full breakdown)",
+        ]
     await message.reply("\n".join(lines), parse_mode="")
 
 

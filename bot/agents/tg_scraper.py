@@ -347,6 +347,23 @@ async def _handle_message(event, channel_name: str) -> None:
                 tg_paper_sol = float(tg_cfg.get("paper_probe_size") or 0.2)
                 tg_tp_x = float(tg_cfg.get("tg_signal_tp_x") or 8.0)
 
+                # PHASE 3: scale probe size by current market regime.
+                # HOT meta → bigger probes (1.5x), COLD → smaller (0.5x).
+                # Skip the trade entirely if operator has enabled
+                # cold-pause via /setparam regime_cold_skip_trades 1.
+                from bot.agents.regime_tracker import (
+                    get_probe_size_multiplier, should_skip_in_cold,
+                )
+                if should_skip_in_cold():
+                    skip_reason = "regime_cold_paused"
+                    logger.info(
+                        "TG scraper SKIPPED %s — regime=COLD, paused per operator",
+                        mint[:12],
+                    )
+                    return
+                regime_mult = get_probe_size_multiplier()
+                tg_paper_sol = round(tg_paper_sol * regime_mult, 4)
+
                 bal = await compute_paper_balance(_state.PAPER_STARTING_BALANCE)
                 if bal < tg_paper_sol + 0.05:
                     skip_reason = f"insufficient_balance({bal:.3f}<{tg_paper_sol + 0.05:.3f})"
