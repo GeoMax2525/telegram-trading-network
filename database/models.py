@@ -347,6 +347,35 @@ class ClaudeReview(Base):
     applied_at   = Column(DateTime, nullable=True)
 
 
+class ClaudeEntryDecision(Base):
+    """Phase 5.5 Stage 1: log every Claude entry decision (go or no-go).
+
+    One row per signal Claude evaluated. The context_json holds the full
+    blob shown to Claude (for debugging and learning). Outcome is joined
+    in via token_address when we close the trade — letting us see whether
+    Claude's GO calls actually pay off."""
+    __tablename__ = "claude_entry_decisions"
+
+    id              = Column(Integer,  primary_key=True, autoincrement=True)
+    decided_at      = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    token_name      = Column(String(64),  nullable=True)
+    token_address   = Column(String(64),  nullable=True, index=True)
+    channel_name    = Column(String(64),  nullable=True)
+    entry_mc        = Column(Float,    nullable=True)
+    go              = Column(Boolean,  nullable=False)
+    reason          = Column(String(256), nullable=True)
+    confidence      = Column(String(16),  nullable=True)
+    size_sol        = Column(Float,    nullable=True)
+    tp_x            = Column(Float,    nullable=True)
+    sl_pct          = Column(Float,    nullable=True)
+    trail_trigger   = Column(Float,    nullable=True)
+    trail_pct       = Column(Float,    nullable=True)
+    notes           = Column(String(512), nullable=True)
+    latency_ms      = Column(Integer,  nullable=True)
+    cost_usd        = Column(Float,    nullable=True)
+    context_json    = Column(Text,     nullable=True)
+
+
 # ── Paper Trades table ────────────────────────────────────────────────────────
 
 class PaperTrade(Base):

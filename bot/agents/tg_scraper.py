@@ -383,6 +383,58 @@ async def _handle_message(event, channel_name: str) -> None:
                 if bal < tg_paper_sol + 0.05:
                     skip_reason = f"insufficient_balance({bal:.3f}<{tg_paper_sol + 0.05:.3f})"
                 else:
+                    # Phase 5.5 Stage 1: Claude strategist decides entry.
+                    # If active and reachable, Claude can:
+                    #   - say NO and skip this signal
+                    #   - say YES and override size_sol / tp_x / sl_pct
+                    # If Claude unavailable / times out / over budget,
+                    # the rule defaults below run unchanged.
+                    tg_sl_pct = 20.0
+                    tg_trade_reasoning = f"AUTO-BUY [fast-path] from {channel_name}"
+                    try:
+                        from bot.agents.claude_strategist import decide_entry
+                        decision = await decide_entry(
+                            token_name=token_name,
+                            mint=mint,
+                            entry_mc=entry_mc,
+                            metrics=metrics,
+                            channel_name=channel_name,
+                            defaults={
+                                "size_sol":      tg_paper_sol,
+                                "tp_x":          tg_tp_x,
+                                "sl_pct":        tg_sl_pct,
+                                "trail_trigger": 2.0,
+                                "trail_pct":     22.0,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning("Claude strategist failed for %s: %s — using rule defaults", token_name[:20], exc)
+                        decision = None
+
+                    if decision is not None and not decision["go"]:
+                        skip_reason = f"claude_no:{decision['reason'][:80]}"
+                        logger.info(
+                            "TG scraper SKIPPED %s — Claude NO: %s",
+                            mint[:12], decision["reason"],
+                        )
+                        return
+
+                    if decision is not None:
+                        tg_paper_sol = decision["size_sol"]
+                        tg_tp_x = decision["tp_x"]
+                        tg_sl_pct = decision["sl_pct"]
+                        tg_trade_reasoning = (
+                            f"AUTO-BUY [fast-path,claude] from {channel_name} | "
+                            f"{decision['reason']} | NOTES: {decision['notes']}"
+                        )[:512]
+                        # Re-check balance with Claude's possibly-larger size
+                        if bal < tg_paper_sol + 0.05:
+                            skip_reason = (
+                                f"insufficient_balance_after_claude"
+                                f"({bal:.3f}<{tg_paper_sol + 0.05:.3f})"
+                            )
+                            return
+
                     pt = await open_paper_trade(
                         token_address=mint,
                         token_name=token_name,
@@ -392,8 +444,8 @@ async def _handle_message(event, channel_name: str) -> None:
                         confidence=80.0,
                         pattern_type="tg_signal",
                         tp_x=tg_tp_x,
-                        sl_pct=20.0,
-                        trade_reasoning=f"AUTO-BUY [fast-path] from {channel_name}",
+                        sl_pct=tg_sl_pct,
+                        trade_reasoning=tg_trade_reasoning,
                     )
                     _state.paper_balance = await compute_paper_balance(_state.PAPER_STARTING_BALANCE)
                     _state.paper_trades_today += 1

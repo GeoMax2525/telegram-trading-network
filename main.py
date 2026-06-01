@@ -91,7 +91,8 @@ async def peak_tracker_loop() -> None:
 # ── Midnight daily-loss reset ─────────────────────────────────────────────────
 
 async def daily_loss_reset_loop() -> None:
-    """Sleeps until midnight UTC, then resets daily_loss_today_sol for all users."""
+    """Sleeps until midnight UTC, then resets daily_loss_today_sol for all users
+    and Claude's daily spend counter."""
     while True:
         now            = datetime.utcnow()
         next_midnight  = (now + timedelta(days=1)).replace(
@@ -105,6 +106,12 @@ async def daily_loss_reset_loop() -> None:
             logger.info("Daily loss reset: cleared losses for %d user(s)", count)
         except Exception as exc:
             logger.error("Daily loss reset failed: %s", exc)
+        try:
+            from bot.agents.claude_strategist import reset_daily_spend
+            await reset_daily_spend()
+            logger.info("Claude daily spend counter reset to $0")
+        except Exception as exc:
+            logger.error("Claude spend reset failed: %s", exc)
 
 
 # ── Main coroutine ────────────────────────────────────────────────────────────

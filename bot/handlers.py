@@ -5045,6 +5045,93 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("claude_spend"))
+async def cmd_claude_spend(message: Message):
+    """Show today's Claude API spend, daily budget, and remaining headroom."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from bot.agents.claude_reasoning import claude_available
+    from database.models import get_param
+
+    spend = float(await get_param("claude_spend_today_usd") or 0.0)
+    budget = float(await get_param("claude_daily_budget_usd") or 5.0)
+    pct = (spend / budget * 100) if budget > 0 else 0
+    strategist_on = float(await get_param("claude_strategist_enabled") or 0.0) >= 0.5
+    warm_on = float(await get_param("claude_warm_enabled") or 1.0) >= 0.5
+
+    lines = [
+        "━" * 28,
+        "💰 CLAUDE SPEND TODAY",
+        "━" * 28,
+        f"Spent:  ${spend:.4f}",
+        f"Budget: ${budget:.2f}",
+        f"Used:   {pct:.0f}%",
+        f"Left:   ${max(0, budget - spend):.4f}",
+        "",
+        "TOGGLES",
+        f"  API key set:        {'✅' if claude_available() else '❌'}",
+        f"  Strategist (entry): {'✅ ON' if strategist_on else '⏸ OFF'}",
+        f"  Warm path:          {'✅ ON' if warm_on else '⏸ OFF'}",
+        "",
+        "Change budget: /setparam claude_daily_budget_usd 10",
+        "Toggle entry:  /setparam claude_strategist_enabled 1",
+        "Reset spend:   /setparam claude_spend_today_usd 0",
+    ]
+    await message.reply("\n".join(lines), parse_mode="")
+
+
+@router.message(Command("claude_log"))
+async def cmd_claude_log(message: Message):
+    """Show recent Claude entry decisions (GO and NO-GO).
+
+    Usage: /claude_log [N]   default N=10, max 30
+    """
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from sqlalchemy import select
+    from database.models import AsyncSessionLocal, ClaudeEntryDecision
+
+    parts = (message.text or "").split()
+    try:
+        n = int(parts[1]) if len(parts) > 1 else 10
+    except ValueError:
+        n = 10
+    n = max(1, min(n, 30))
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(ClaudeEntryDecision)
+            .order_by(ClaudeEntryDecision.decided_at.desc())
+            .limit(n)
+        )).scalars().all()
+
+    if not rows:
+        await message.reply(
+            "No Claude entry decisions logged yet. Strategist enabled? "
+            "Check with /claude_spend.",
+            parse_mode="",
+        )
+        return
+
+    lines = ["━" * 28, f"🤖 LAST {len(rows)} CLAUDE ENTRY DECISIONS", "━" * 28]
+    for r in rows:
+        tag = "✅ GO" if r.go else "❌ NO"
+        mc_str = f"${(r.entry_mc or 0)/1000:.0f}K"
+        ts = r.decided_at.strftime("%m-%d %H:%M")
+        lines.append("")
+        lines.append(f"{tag}  {(r.token_name or '?')[:24]}  {mc_str}  ({ts})")
+        lines.append(f"   conf: {r.confidence or '?'}  ·  ${r.cost_usd or 0:.4f}  ·  {r.latency_ms or 0}ms")
+        if r.go:
+            lines.append(f"   size={r.size_sol:.2f}  tp={r.tp_x:.1f}x  sl={r.sl_pct:.0f}%  trail={r.trail_pct:.0f}%")
+        lines.append(f"   why: {(r.reason or '?')[:90]}")
+        if r.go and r.notes:
+            lines.append(f"   watching: {r.notes[:90]}")
+
+    text = "\n".join(lines)
+    # Telegram message limit is 4096 chars
+    await message.reply(text[:4000], parse_mode="")
+
+
 @router.message(Command("community_test"))
 async def cmd_community_test(message: Message):
     """Send a test post to the community channel to verify wiring.
