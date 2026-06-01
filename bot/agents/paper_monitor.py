@@ -81,6 +81,13 @@ async def _send_close_commentary(bot, pt, pnl: float, peak_mult: float, close_re
             f"🧠 {text}",
             message_thread_id=SCAN_TOPIC_ID,
         )
+
+        # Mirror commentary to community channel (silent no-op if not configured)
+        try:
+            from bot.community_feed import post_commentary
+            await post_commentary(bot, text)
+        except Exception as exc:
+            logger.debug("community_feed commentary mirror failed: %s", exc)
     except Exception as exc:
         # Logged but never raised — close commentary is best-effort
         logger.debug("close commentary failed for %s: %s",
@@ -201,7 +208,30 @@ async def _finalize_paper_close(
             )
         except Exception:
             pass
-        # Phase 5: fire-and-forget Claude postmortem (HQ only, not subscriber DMs).
+
+        # Mirror close to community channel (silent no-op if not configured).
+        # We post a CLEAN community-formatted card, not the HQ verbose one —
+        # the operator card has session streak, balance, and other op detail
+        # the community doesn't need.
+        try:
+            from bot.community_feed import post_trade_close
+            _age_min = 0.0
+            if pt.opened_at:
+                _age_min = (datetime.utcnow() - pt.opened_at).total_seconds() / 60.0
+            await post_trade_close(
+                bot,
+                token_name=pt.token_name or "?",
+                pnl_sol=pnl,
+                peak_mult=float(peak_mult or 1.0),
+                close_reason=reason,
+                paper_sol_spent=float(pt.paper_sol_spent or 0.0),
+                pattern_type=pt.pattern_type or "",
+                age_min=_age_min,
+            )
+        except Exception as exc:
+            logger.debug("community_feed close mirror failed: %s", exc)
+
+        # Phase 5: fire-and-forget Claude postmortem (HQ + community).
         # Silent no-op if ANTHROPIC_API_KEY isn't set.
         _spawn_close_commentary(bot, pt, pnl, peak_mult or 1.0, reason)
         return bal

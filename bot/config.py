@@ -23,6 +23,12 @@ MAIN_GROUP_ID: int = int(os.getenv("MAIN_GROUP_ID", "0"))
 # Set SCAN_TOPIC_ID in Railway env vars (see instructions for finding it).
 SCAN_TOPIC_ID: int | None = int(os.getenv("SCAN_TOPIC_ID", "0")) or None
 
+# Public community channel where the bot posts a live trade feed
+# (opens, closes, Claude postmortems). Broadcast-only — bot must be
+# admin in this channel with "Post Messages" permission.
+# Set COMMUNITY_CHANNEL_ID in Railway env vars. Leave unset to disable.
+COMMUNITY_CHANNEL_ID: int = int(os.getenv("COMMUNITY_CHANNEL_ID", "0"))
+
 # Comma-separated Telegram user IDs with admin privileges
 ADMIN_IDS: list[int] = [
     int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().lstrip("-").isdigit()

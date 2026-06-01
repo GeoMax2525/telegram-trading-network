@@ -205,6 +205,9 @@ async def main() -> None:
     logger.info("Claude cold path: queued for startup")
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
+    # Expose bot reference so background tasks (scanner, tg_scraper,
+    # community feed) can post without needing to be passed bot explicitly.
+    _state.bot = bot
     # Set bot reference for signal relay
     set_relay_bot(bot)
 

@@ -1608,7 +1608,25 @@ async def run_once() -> tuple[int, int]:
                 state.paper_trades_today += 1
                 logger.info("Scanner: paper trade id=%s bal=%.4f SOL", pt.id, state.paper_balance)
 
-                # Relay trade to subscribers (30s delay, runs in background)
+                # Mirror open to community channel (silent no-op if not configured)
+                try:
+                    from bot.community_feed import post_trade_open
+                    _bot = getattr(state, "bot", None)
+                    if _bot is not None:
+                        await post_trade_open(
+                            _bot,
+                            token_name=scored.get("name", "?"),
+                            token_address=scored.get("mint", ""),
+                            entry_mc=fresh_mc,
+                            paper_sol=paper_sol,
+                            pattern_type=scored.get("profile_tag") or scored.get("source") or "",
+                            tp_x=tp_for_open,
+                            sl_pct=sl_for_open,
+                        )
+                except Exception as exc:
+                    logger.debug("community_feed open mirror failed: %s", exc)
+
+                # Relay trade to subscribers (runs in background; delay=RELAY_DELAY)
                 try:
                     from bot.signal_relay import relay_trade_to_subscribers
                     await relay_trade_to_subscribers(

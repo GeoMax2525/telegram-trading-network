@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 
 # Global bot reference — set from main.py
 _bot: Bot | None = None
-RELAY_DELAY = 30  # seconds after admin trade before subscriber trades
+# No delay needed while everything is paper. The 30s buffer was originally
+# meant to let an admin's REAL fill land before subscribers piled into
+# the same liquidity. Restore to 30s when going live.
+RELAY_DELAY = 0  # seconds after admin trade before subscriber trades
 
 # External group for CA posting via Telethon (your account)
 EXTERNAL_GROUP_ID = -1002170009255
@@ -108,8 +111,10 @@ async def _relay_delayed(
     trade_reasoning: str | None,
     confidence: float,
 ):
-    """Wait 30 seconds then copy trade to all subscribers."""
-    await asyncio.sleep(RELAY_DELAY)
+    """Copy trade to all subscribers. Delay is RELAY_DELAY seconds (0 in
+    paper mode; raise to 30s when going live so admin fill lands first)."""
+    if RELAY_DELAY > 0:
+        await asyncio.sleep(RELAY_DELAY)
 
     subs = await get_all_active_subscribers()
     if not subs:
@@ -275,8 +280,8 @@ async def _relay_delayed(
             logger.warning("Relay failed for subscriber %s: %s", sub.telegram_id, exc)
 
     if opened:
-        logger.info("Signal relay: opened trade on %s for %d subscribers (30s delay)",
-                     token_name[:20], opened)
+        logger.info("Signal relay: opened trade on %s for %d subscribers (delay=%ds)",
+                     token_name[:20], opened, RELAY_DELAY)
 
 
 async def notify_subscribers_close(
