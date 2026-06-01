@@ -200,8 +200,8 @@ async def _finalize_paper_close(
     if is_admin:
         bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
         state.paper_balance = bal
+        text = "\n".join(line.format(bal=bal) for line in lines_with_source)
         try:
-            text = "\n".join(line.format(bal=bal) for line in lines_with_source)
             await bot.send_message(
                 CALLER_GROUP_ID, text,
                 message_thread_id=SCAN_TOPIC_ID,
@@ -209,25 +209,11 @@ async def _finalize_paper_close(
         except Exception:
             pass
 
-        # Mirror close to community channel (silent no-op if not configured).
-        # We post a CLEAN community-formatted card, not the HQ verbose one —
-        # the operator card has session streak, balance, and other op detail
-        # the community doesn't need.
+        # Mirror the EXACT HQ close text to the community channel.
+        # Silent no-op if COMMUNITY_CHANNEL_ID not configured.
         try:
-            from bot.community_feed import post_trade_close
-            _age_min = 0.0
-            if pt.opened_at:
-                _age_min = (datetime.utcnow() - pt.opened_at).total_seconds() / 60.0
-            await post_trade_close(
-                bot,
-                token_name=pt.token_name or "?",
-                pnl_sol=pnl,
-                peak_mult=float(peak_mult or 1.0),
-                close_reason=reason,
-                paper_sol_spent=float(pt.paper_sol_spent or 0.0),
-                pattern_type=pt.pattern_type or "",
-                age_min=_age_min,
-            )
+            from bot.community_feed import post_to_community
+            await post_to_community(bot, text)
         except Exception as exc:
             logger.debug("community_feed close mirror failed: %s", exc)
 
@@ -656,25 +642,22 @@ async def _check_open_trades(bot) -> None:
                         "Paper SCALE IN %s: added %.2f SOL at %.1fx | total position: %.2f SOL",
                         name, add_sol, current_mult, sol,
                     )
+                    src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
+                    _scale_in_text = "\n".join([
+                        f"💪 PAPER TRADE — SCALE IN ({src_tag})",
+                        f"🪙 {name} | {current_mult:.1f}x confirmed | +{add_sol} SOL added",
+                        f"Total position: {sol:.2f} SOL",
+                    ])
                     try:
-                        src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
-                        await bot.send_message(CALLER_GROUP_ID, "\n".join([
-                            f"💪 PAPER TRADE — SCALE IN ({src_tag})",
-                            f"🪙 {name} | {current_mult:.1f}x confirmed | +{add_sol} SOL added",
-                            f"Total position: {sol:.2f} SOL",
-                        ]), message_thread_id=SCAN_TOPIC_ID)
+                        await bot.send_message(
+                            CALLER_GROUP_ID, _scale_in_text,
+                            message_thread_id=SCAN_TOPIC_ID,
+                        )
                     except Exception:
                         pass
                     try:
-                        from bot.community_feed import post_scale_in
-                        await post_scale_in(
-                            bot,
-                            token_name=name,
-                            pattern_type=pt.pattern_type or "",
-                            current_mult=current_mult,
-                            add_sol=add_sol,
-                            total_sol=sol,
-                        )
+                        from bot.community_feed import post_to_community
+                        await post_to_community(bot, _scale_in_text)
                     except Exception as exc:
                         logger.debug("community_feed scale-in mirror failed: %s", exc)
 
@@ -717,26 +700,22 @@ async def _check_open_trades(bot) -> None:
                     "Paper SCALE OUT %s: sold 40%% at %.1fx | +%.4f SOL | remaining %.0f%%",
                     name, current_mult, sell_sol, new_remaining,
                 )
+                src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
+                _scale_out_text = "\n".join([
+                    f"📈 PAPER TRADE — SCALE OUT 40% ({src_tag})",
+                    f"🪙 {name} | {current_mult:.1f}x | +{sell_sol:.4f} SOL",
+                    f"Remaining: {new_remaining:.0f}% still running",
+                ])
                 try:
-                    src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
-                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
-                        f"📈 PAPER TRADE — SCALE OUT 40% ({src_tag})",
-                        f"🪙 {name} | {current_mult:.1f}x | +{sell_sol:.4f} SOL",
-                        f"Remaining: {new_remaining:.0f}% still running",
-                    ]), message_thread_id=SCAN_TOPIC_ID)
+                    await bot.send_message(
+                        CALLER_GROUP_ID, _scale_out_text,
+                        message_thread_id=SCAN_TOPIC_ID,
+                    )
                 except Exception:
                     pass
                 try:
-                    from bot.community_feed import post_scale_out
-                    await post_scale_out(
-                        bot,
-                        token_name=name,
-                        pattern_type=pt.pattern_type or "",
-                        current_mult=current_mult,
-                        sell_pct=40.0,
-                        realized_sol=sell_sol,
-                        remaining_pct=new_remaining,
-                    )
+                    from bot.community_feed import post_to_community
+                    await post_to_community(bot, _scale_out_text)
                 except Exception as exc:
                     logger.debug("community_feed scale-out 40 mirror failed: %s", exc)
                 scale_out_done = True
@@ -760,26 +739,22 @@ async def _check_open_trades(bot) -> None:
                     "Paper SCALE OUT %s: sold 30%% at %.1fx | +%.4f SOL | remaining %.0f%%",
                     name, current_mult, sell_sol, new_remaining,
                 )
+                src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
+                _scale_out_text = "\n".join([
+                    f"📈 PAPER TRADE — SCALE OUT 25% ({src_tag})",
+                    f"🪙 {name} | {current_mult:.1f}x | +{sell_sol:.4f} SOL",
+                    f"Remaining: {new_remaining:.0f}% — trailing stop active",
+                ])
                 try:
-                    src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
-                    await bot.send_message(CALLER_GROUP_ID, "\n".join([
-                        f"📈 PAPER TRADE — SCALE OUT 25% ({src_tag})",
-                        f"🪙 {name} | {current_mult:.1f}x | +{sell_sol:.4f} SOL",
-                        f"Remaining: {new_remaining:.0f}% — trailing stop active",
-                    ]), message_thread_id=SCAN_TOPIC_ID)
+                    await bot.send_message(
+                        CALLER_GROUP_ID, _scale_out_text,
+                        message_thread_id=SCAN_TOPIC_ID,
+                    )
                 except Exception:
                     pass
                 try:
-                    from bot.community_feed import post_scale_out
-                    await post_scale_out(
-                        bot,
-                        token_name=name,
-                        pattern_type=pt.pattern_type or "",
-                        current_mult=current_mult,
-                        sell_pct=25.0,
-                        realized_sol=sell_sol,
-                        remaining_pct=new_remaining,
-                    )
+                    from bot.community_feed import post_to_community
+                    await post_to_community(bot, _scale_out_text)
                 except Exception as exc:
                     logger.debug("community_feed scale-out 25 mirror failed: %s", exc)
                 scale_out_done = True

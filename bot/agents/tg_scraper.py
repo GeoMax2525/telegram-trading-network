@@ -403,24 +403,6 @@ async def _handle_message(event, channel_name: str) -> None:
                         token_name[:20], entry_mc, tg_paper_sol, _state.paper_balance,
                     )
 
-                    # Mirror open to community channel (silent no-op if not configured)
-                    try:
-                        from bot.community_feed import post_trade_open
-                        _bot = getattr(_state, "bot", None)
-                        if _bot is not None:
-                            await post_trade_open(
-                                _bot,
-                                token_name=token_name,
-                                token_address=mint,
-                                entry_mc=entry_mc,
-                                paper_sol=tg_paper_sol,
-                                pattern_type="tg_signal",
-                                tp_x=tg_tp_x,
-                                sl_pct=20.0,
-                            )
-                    except Exception as exc:
-                        logger.debug("community_feed open mirror failed: %s", exc)
-
                     # Relay to subscribers (background task — doesn't block)
                     try:
                         from bot.signal_relay import relay_trade_to_subscribers

@@ -5050,14 +5050,10 @@ async def cmd_community_test(message: Message):
     """Send a test post to the community channel to verify wiring.
 
     Confirms COMMUNITY_CHANNEL_ID is set and the bot has Post Messages
-    permission on the channel. Posts a sample open card, close card,
-    and Claude commentary line."""
+    permission on the channel."""
     if message.from_user.id not in ADMIN_IDS:
         return
-    from bot.community_feed import (
-        community_enabled, post_to_community, post_trade_open,
-        post_trade_close, post_commentary,
-    )
+    from bot.community_feed import community_enabled, post_to_community
     from bot.config import COMMUNITY_CHANNEL_ID
 
     if not community_enabled():
@@ -5072,37 +5068,18 @@ async def cmd_community_test(message: Message):
     try:
         await post_to_community(
             bot,
-            f"🔧 community feed test — wiring check from /community_test\n"
-            f"Channel ID: {COMMUNITY_CHANNEL_ID}",
-        )
-        await post_trade_open(
-            bot,
-            token_name="TEST_TOKEN",
-            token_address="So11111111111111111111111111111111111111112",
-            entry_mc=15000,
-            paper_sol=0.5,
-            pattern_type="tg_signal",
-            tp_x=5.0,
-            sl_pct=20.0,
-        )
-        await post_trade_close(
-            bot,
-            token_name="TEST_TOKEN",
-            pnl_sol=1.234,
-            peak_mult=3.5,
-            close_reason="tp_hit",
-            paper_sol_spent=0.5,
-            pattern_type="tg_signal",
-            age_min=12.0,
-        )
-        await post_commentary(
-            bot,
-            "Sample postmortem: bot caught the runner, took profit on the "
-            "first ladder rung, trailed the rest until momentum faded.",
+            "\n".join([
+                "🔧 community feed test",
+                f"Channel ID: {COMMUNITY_CHANNEL_ID}",
+                "",
+                "If you see this, the mirror is working. Real trade events "
+                "(scale-in, scale-out, close, postmortem) will appear here "
+                "with the same text as HQ.",
+            ]),
         )
         await message.reply(
-            f"✅ Sent 4 test posts to channel {COMMUNITY_CHANNEL_ID}. "
-            f"If you see them there, wiring is good. If not, check that "
+            f"✅ Sent test post to channel {COMMUNITY_CHANNEL_ID}. "
+            f"If you see it there, wiring is good. If not, check that "
             f"@LowKeyAlphaAi_bot is an admin on the channel with "
             f"Post Messages permission.",
             parse_mode="",
