@@ -138,3 +138,60 @@ async def post_commentary(bot, commentary_text: str) -> None:
     if not community_enabled() or not commentary_text:
         return
     await post_to_community(bot, f"🧠 {commentary_text}")
+
+
+async def post_scale_in(
+    bot,
+    *,
+    token_name: str,
+    pattern_type: str,
+    current_mult: float,
+    add_sol: float,
+    total_sol: float,
+) -> None:
+    """Position got added to at 1.5x confirmation. Show the community
+    we doubled down on the runner."""
+    if not community_enabled():
+        return
+    source = "⚡ 4AM" if "tg_signal" in (pattern_type or "") else "🔍 Scanner"
+    safe_name = (token_name or "?").replace("<", "").replace(">", "")[:40]
+    text = (
+        f"💪 SCALED IN — {safe_name}\n"
+        f"\n"
+        f"Source: {source}\n"
+        f"Confirmed at: {current_mult:.1f}x\n"
+        f"Added: +{add_sol:.2f} SOL\n"
+        f"Total position: {total_sol:.2f} SOL\n"
+        f"\n"
+        f"Bot doubled down — sees more upside."
+    )
+    await post_to_community(bot, text)
+
+
+async def post_scale_out(
+    bot,
+    *,
+    token_name: str,
+    pattern_type: str,
+    current_mult: float,
+    sell_pct: float,
+    realized_sol: float,
+    remaining_pct: float,
+) -> None:
+    """Partial exit at a ladder milestone. Tell the community what got
+    locked and how much is still running."""
+    if not community_enabled():
+        return
+    source = "⚡ 4AM" if "tg_signal" in (pattern_type or "") else "🔍 Scanner"
+    safe_name = (token_name or "?").replace("<", "").replace(">", "")[:40]
+    text = (
+        f"📈 TOOK PROFIT — {safe_name}\n"
+        f"\n"
+        f"Source: {source}\n"
+        f"Sold: {sell_pct:.0f}% at {current_mult:.1f}x\n"
+        f"Locked: +{realized_sol:.4f} SOL\n"
+        f"Still running: {remaining_pct:.0f}% of position\n"
+        f"\n"
+        f"Bot locks profit on the way up. Trail covers the rest."
+    )
+    await post_to_community(bot, text)

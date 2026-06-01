@@ -665,6 +665,18 @@ async def _check_open_trades(bot) -> None:
                         ]), message_thread_id=SCAN_TOPIC_ID)
                     except Exception:
                         pass
+                    try:
+                        from bot.community_feed import post_scale_in
+                        await post_scale_in(
+                            bot,
+                            token_name=name,
+                            pattern_type=pt.pattern_type or "",
+                            current_mult=current_mult,
+                            add_sol=add_sol,
+                            total_sol=sol,
+                        )
+                    except Exception as exc:
+                        logger.debug("community_feed scale-in mirror failed: %s", exc)
 
             # ── Scale OUT: sell partial at milestones ────────────────────
             # 30% at 2x, 25% at 5x, trail the remaining 45%
@@ -714,6 +726,19 @@ async def _check_open_trades(bot) -> None:
                     ]), message_thread_id=SCAN_TOPIC_ID)
                 except Exception:
                     pass
+                try:
+                    from bot.community_feed import post_scale_out
+                    await post_scale_out(
+                        bot,
+                        token_name=name,
+                        pattern_type=pt.pattern_type or "",
+                        current_mult=current_mult,
+                        sell_pct=40.0,
+                        realized_sol=sell_sol,
+                        remaining_pct=new_remaining,
+                    )
+                except Exception as exc:
+                    logger.debug("community_feed scale-out 40 mirror failed: %s", exc)
                 scale_out_done = True
 
             elif pt.subscriber_id is None and remaining > 50 and remaining <= 80 and current_mult >= 5.0:
@@ -744,6 +769,19 @@ async def _check_open_trades(bot) -> None:
                     ]), message_thread_id=SCAN_TOPIC_ID)
                 except Exception:
                     pass
+                try:
+                    from bot.community_feed import post_scale_out
+                    await post_scale_out(
+                        bot,
+                        token_name=name,
+                        pattern_type=pt.pattern_type or "",
+                        current_mult=current_mult,
+                        sell_pct=25.0,
+                        realized_sol=sell_sol,
+                        remaining_pct=new_remaining,
+                    )
+                except Exception as exc:
+                    logger.debug("community_feed scale-out 25 mirror failed: %s", exc)
                 scale_out_done = True
 
             # Check TP — only on remaining position
