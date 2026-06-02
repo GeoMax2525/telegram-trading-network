@@ -482,13 +482,16 @@ async def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="💰 Reset Balance", callback_data="hub:reset_confirm"),
     )
 
-    # Row 6: Mini App dashboard (only if PUBLIC_URL is configured)
+    # Row 6: Dashboard link (Mini App in DMs, browser link in groups).
+    # Telegram rejects WebApp inline buttons outside private chats, so /hub
+    # in Callers HQ uses a plain url button that opens the dashboard in the
+    # browser. DM the bot for the in-app Mini App experience.
     import os as _os
     public_url = _os.getenv("PUBLIC_URL", "").rstrip("/")
     if public_url:
         builder.row(InlineKeyboardButton(
             text="🛸 OPEN DASHBOARD",
-            web_app=WebAppInfo(url=public_url + "/"),
+            url=public_url + "/",
         ))
     return builder.as_markup()
 
@@ -1282,17 +1285,21 @@ async def cmd_dashboard(message: Message):
             parse_mode="HTML",
         )
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
+    # WebApp Mini App only works in private chats; in groups use a url button.
+    if message.chat.type == "private":
+        btn = InlineKeyboardButton(
             text="🛸 OPEN DASHBOARD",
             web_app=WebAppInfo(url=public_url + "/"),
         )
-    ]])
-    await message.reply(
-        "<b>REVOLT // TRADING HUB</b>\nTap to open the live dashboard.",
-        parse_mode="HTML",
-        reply_markup=kb,
-    )
+        body = "<b>REVOLT // TRADING HUB</b>\nTap to open the live dashboard inside Telegram."
+    else:
+        btn = InlineKeyboardButton(
+            text="🛸 OPEN DASHBOARD",
+            url=public_url + "/",
+        )
+        body = "<b>REVOLT // TRADING HUB</b>\nTap to open the live dashboard (DM the bot for the in-app Mini App)."
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn]])
+    await message.reply(body, parse_mode="HTML", reply_markup=kb)
 
 
 @router.message(Command("hub"))
