@@ -687,6 +687,54 @@
     .vc-toggle { width: 32px; height: 32px; }
     .vc-toggle svg { width: 14px; height: 14px; }
   }
+
+  /* Voice picker panel */
+  #voice-picker {
+    position: fixed;
+    right: 76px; bottom: 88px;
+    z-index: 60;
+    width: 280px;
+    max-height: 60vh;
+    overflow-y: auto;
+    background: rgba(3,6,12,0.95);
+    border: 1px solid var(--cyan);
+    box-shadow: 0 0 24px var(--cyan-soft);
+    padding: 10px;
+    backdrop-filter: blur(8px);
+    opacity: 0; transform: translateX(10px);
+    pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s;
+  }
+  #voice-picker.open { opacity: 1; transform: translateX(0); pointer-events: auto; }
+  #voice-picker h4 {
+    margin: 0 0 8px 0;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 10px;
+    letter-spacing: 0.22em;
+    color: var(--cyan);
+  }
+  #voice-picker .voice-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 8px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: #cfe5ff;
+    transition: all 0.15s;
+  }
+  #voice-picker .voice-row:hover { background: rgba(0,240,255,0.08); border-color: var(--line); }
+  #voice-picker .voice-row.selected { background: rgba(0,240,255,0.18); border-color: var(--cyan); color: var(--cyan); }
+  #voice-picker .voice-row .vname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; padding-right: 8px; }
+  #voice-picker .voice-row .vlang { opacity: 0.55; font-size: 9px; flex-shrink: 0; }
+  #voice-picker .voice-row .vbadge { font-size: 8px; padding: 1px 4px; margin-left: 4px; border: 1px solid; flex-shrink: 0; }
+  #voice-picker .voice-row .vbadge.natural { color: var(--lime); border-color: var(--lime-soft); }
+  #voice-picker .voice-row .vbadge.enhanced { color: var(--magenta); border-color: var(--magenta-soft); }
+  @media (max-width: 480px) {
+    #voice-picker { right: 56px; bottom: 156px; width: 240px; }
+  }
 </style>
 </head>
 
@@ -938,6 +986,18 @@
     </svg>
     <span class="vc-tip">MUTE</span>
   </button>
+  <button class="vc-toggle relative" id="vc-voice" data-tip="voice" aria-label="Pick voice" title="Choose voice">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 18v-6a9 9 0 0 1 18 0v6"/>
+      <path d="M21 19a2 2 0 0 1-2 2h-1v-7h3z"/>
+      <path d="M3 19a2 2 0 0 0 2 2h1v-7H3z"/>
+    </svg>
+    <span class="vc-tip">PICK · VOICE</span>
+  </button>
+</div>
+<div id="voice-picker">
+  <h4>// VOICE · ENGINE</h4>
+  <div id="voice-list"></div>
 </div>
 
 <button id="voice-fab" aria-label="Voice command" title="Voice command (tap or hold)">
@@ -1553,22 +1613,51 @@ function syncToggleUI() {
 syncToggleUI();
 
 // ── TTS voice picker ──
+// Modern Edge/Chrome ship "Online (Natural)" neural voices that sound nearly
+// human. Older "Microsoft David / Zira" are robotic. Apple "Daniel/Alex" and
+// the Enhanced variants are excellent. Prefer in this order.
 let _jarvisVoice = null;
+let _availableVoices = [];
+
+function scoreVoice(v) {
+  const n = (v.name || '').toLowerCase();
+  let s = 0;
+  // Top tier: neural / online natural
+  if (/online \(natural\)/.test(n))                s += 1000;
+  if (/\bnatural\b/.test(n))                        s += 600;
+  if (/\bneural\b/.test(n))                         s += 600;
+  if (/\bpremium\b/.test(n))                        s += 500;
+  if (/\benhanced\b/.test(n))                       s += 400;
+  if (/\bsiri\b/.test(n))                           s += 350;
+  // Voice character (prefer mature male names commonly used for assistants)
+  if (/(christopher|guy|brian|andrew|eric|davis|tony|brandon|jason|ryan)/.test(n)) s += 300;
+  if (/(daniel|alex|fred|rishi|aaron)/.test(n))     s += 250;
+  if (/(google uk english male|google us english)/.test(n)) s += 250;
+  if (/\bmale\b/.test(n))                           s += 80;
+  // Bias toward English
+  if (/^en[-_]gb/i.test(v.lang))                    s += 40;
+  if (/^en[-_]us/i.test(v.lang))                    s += 30;
+  if (/^en/i.test(v.lang))                          s += 20;
+  // Penalize ancient SAPI voices
+  if (/\b(david|zira|mark|hazel|catherine|huihui|microsoft david)\b/.test(n) && !/online/.test(n)) s -= 200;
+  // Penalize child-like / robotic names
+  if (/(robot|cellos|whisper|bahh|good news|bad news|junior|kid)/.test(n)) s -= 500;
+  return s;
+}
+
 function pickJarvisVoice() {
   if (!TTS) return;
   const voices = TTS.getVoices();
   if (!voices.length) return;
-  // Prefer male UK / Daniel / Microsoft David / Google UK English Male
-  const pref = [
-    /daniel/i, /uk english male/i, /microsoft david/i, /google uk english male/i,
-    /uk\b.*male/i, /en-gb.*male/i,
-    /(male)/i, /en-gb/i, /en[-_]us/i,
-  ];
-  for (const re of pref) {
-    const m = voices.find(v => re.test(v.name) || re.test(v.lang));
-    if (m) { _jarvisVoice = m; return; }
+  _availableVoices = voices.slice().sort((a, b) => scoreVoice(b) - scoreVoice(a));
+  // Honor user override if saved AND still available
+  const savedName = localStorage.getItem('revolt.voice');
+  if (savedName) {
+    const match = voices.find(v => v.name === savedName);
+    if (match) { _jarvisVoice = match; rebuildVoicePicker(); return; }
   }
-  _jarvisVoice = voices.find(v => /^en/i.test(v.lang)) || voices[0];
+  _jarvisVoice = _availableVoices[0] || voices[0];
+  rebuildVoicePicker();
 }
 if (TTS) {
   pickJarvisVoice();
@@ -1578,18 +1667,30 @@ if (TTS) {
 let _ttsSpeaking = false;
 function speak(text, opts = {}) {
   if (!TTS || LS.mute || !text) return;
-  // Cancel any in-flight speech so new urgent alerts aren't queued forever
   if (opts.priority === 'high') TTS.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.voice = _jarvisVoice || null;
-  u.lang  = (u.voice && u.voice.lang) || 'en-GB';
-  u.rate  = opts.rate  || 0.96;
-  u.pitch = opts.pitch || 0.85;
-  u.volume = 1.0;
-  u.onstart = () => { _ttsSpeaking = true; };
-  u.onend   = () => { _ttsSpeaking = false; };
-  u.onerror = () => { _ttsSpeaking = false; };
-  TTS.speak(u);
+
+  // Break long text on sentence boundaries — speechSynthesis sounds more
+  // natural with shorter utterances (proper breath pauses, voice persists
+  // across them on most engines).
+  const parts = String(text)
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  parts.forEach((chunk, i) => {
+    const u = new SpeechSynthesisUtterance(chunk.trim());
+    u.voice = _jarvisVoice || null;
+    u.lang  = (u.voice && u.voice.lang) || 'en-US';
+    u.rate  = opts.rate  || 1.0;        // natural cadence
+    u.pitch = opts.pitch || 1.0;        // natural pitch
+    u.volume = 1.0;
+    if (i === 0) u.onstart = () => { _ttsSpeaking = true; };
+    if (i === parts.length - 1) {
+      u.onend = () => { _ttsSpeaking = false; };
+      u.onerror = () => { _ttsSpeaking = false; };
+    }
+    TTS.speak(u);
+  });
 }
 
 // ── Toast ──
@@ -1886,6 +1987,60 @@ vcMute.addEventListener('click', () => {
   LS.mute = !LS.mute;
   syncToggleUI();
   if (!LS.mute) speak("Voice restored, sir.");
+});
+
+// ── Voice picker UI ──
+const voicePicker = document.getElementById('voice-picker');
+const voiceList   = document.getElementById('voice-list');
+const vcVoice     = document.getElementById('vc-voice');
+
+function rebuildVoicePicker() {
+  if (!voiceList) return;
+  // Show top ~14 voices by score, filtered to English-ish
+  const top = _availableVoices
+    .filter(v => /^en/i.test(v.lang) || scoreVoice(v) >= 300)
+    .slice(0, 14);
+  voiceList.innerHTML = '';
+  top.forEach((v) => {
+    const isNatural  = /online \(natural\)|\bnatural\b|\bneural\b/i.test(v.name);
+    const isEnhanced = /enhanced|premium|siri/i.test(v.name);
+    const row = document.createElement('div');
+    row.className = 'voice-row' + (v.name === (_jarvisVoice && _jarvisVoice.name) ? ' selected' : '');
+    row.innerHTML = `
+      <span class="vname" title="${v.name}">${v.name}</span>
+      <span class="vlang">${v.lang || ''}</span>
+      ${isNatural ? '<span class="vbadge natural">NEURAL</span>' : ''}
+      ${isEnhanced ? '<span class="vbadge enhanced">HD</span>' : ''}
+    `;
+    row.addEventListener('click', () => {
+      _jarvisVoice = v;
+      localStorage.setItem('revolt.voice', v.name);
+      voiceList.querySelectorAll('.voice-row').forEach(r => r.classList.remove('selected'));
+      row.classList.add('selected');
+      // Test the selected voice with a sample sentence
+      const wasMute = LS.mute;
+      LS.mute = false;
+      speak("Hello sir. I'm Revolt. All systems are running smoothly.", { priority: 'high' });
+      if (wasMute) setTimeout(() => { LS.mute = true; syncToggleUI(); }, 100);
+    });
+    voiceList.appendChild(row);
+  });
+  if (!top.length) {
+    voiceList.innerHTML = '<div class="opacity-50 px-2 py-2">No voices available yet. Try Chrome or Edge.</div>';
+  }
+}
+
+vcVoice.addEventListener('click', () => {
+  const open = voicePicker.classList.toggle('open');
+  vcVoice.classList.toggle('on', open);
+  if (open) rebuildVoicePicker();
+});
+// Close picker when clicking outside
+document.addEventListener('click', (e) => {
+  if (!voicePicker.classList.contains('open')) return;
+  if (e.target.closest('#voice-picker') || e.target.closest('#vc-voice')) return;
+  voicePicker.classList.remove('open');
+  vcVoice.classList.remove('on');
 });
 
 /* ────────────────────────────────────────────────────────────
