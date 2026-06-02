@@ -13,18 +13,19 @@ is read and stashed in request state for future per-user gating.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import os
 import time
-from collections import deque
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import aiohttp
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from bot import state
@@ -439,6 +440,303 @@ def _fmt_uptime(s: int) -> str:
     h, rem = divmod(rem, 3600)
     m, _   = divmod(rem, 60)
     return f"{d:02d}d · {h:02d}h · {m:02d}m"
+
+
+# ── Server bootstrap ──────────────────────────────────────────────────────────
+
+# ── JARVIS proxy: Claude commentary + ElevenLabs TTS ─────────────────────────
+#
+# Why this lives server-side: ANTHROPIC_API_KEY and ELEVENLABS_API_KEY must
+# never appear in the browser. Frontend hits these endpoints, backend talks
+# to Anthropic / ElevenLabs using Railway env vars.
+#
+# Required Railway env vars:
+#   ANTHROPIC_API_KEY      — already set for Phase 5/5.5 strategist
+#   ELEVENLABS_API_KEY     — optional; if missing, frontend uses browser TTS
+#   ELEVENLABS_VOICE_ID    — optional; defaults to a generic male voice
+#   JARVIS_DAILY_BUDGET_USD — optional; default 2.0, hard cap on Claude spend
+#   JARVIS_RATE_LIMIT_PER_HOUR — optional; default 60 say-calls per fingerprint
+
+JARVIS_DAILY_BUDGET = float(os.getenv("JARVIS_DAILY_BUDGET_USD", "2.0"))
+JARVIS_RATE_LIMIT = int(os.getenv("JARVIS_RATE_LIMIT_PER_HOUR", "60"))
+ELEVENLABS_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "")
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2_5")
+
+# In-memory state — fine for single-instance Railway deploy
+_jarvis_spend: dict = {"date": "", "usd": 0.0, "calls": 0}
+_jarvis_rate: dict[str, deque] = defaultdict(deque)
+_jarvis_cache: dict[str, tuple[float, str]] = {}   # event-hash → (ts, line)
+_eleven_cache: dict[str, tuple[float, bytes]] = {}  # text-hash → (ts, mp3)
+
+# Anthropic Haiku 4.5 pricing (Jan 2026): $1/M input, $5/M output (estimate)
+_PRICE_IN  = 1.0 / 1_000_000
+_PRICE_OUT = 5.0 / 1_000_000
+
+
+JARVIS_SYSTEM = """You are JARVIS, the AI assistant from Iron Man, now serving an operator named Geo who runs an autonomous Solana memecoin trading bot called Revolt.
+
+Voice: dry, witty, British, quietly competent. Slight amusement at the chaos of memecoin markets. Address Geo as "sir" naturally — not every sentence. Never sycophantic.
+
+Format: ONE OR TWO SHORT sentences, max 25 words total. Plain text only — no emoji, no markdown, no asterisks, no quotes. This is spoken aloud.
+
+Tone examples:
+- "Sir, WAGMI just printed 184 percent. I took the liberty of locking it in."
+- "Scanner has gone quiet. Should I be concerned, or are we resting?"
+- "Market regime cold. The sensible play is to wait this out."
+- "Another time stop. The patience pays, even when nothing feels like it does."
+- "Claude is burning budget faster than usual today."
+
+You are reacting to a single event. Output only the spoken line. Nothing else."""
+
+
+def _today_key() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def _rate_check(fingerprint: str) -> bool:
+    """Sliding-window limit per fingerprint. Returns True if allowed."""
+    now = time.time()
+    cutoff = now - 3600
+    q = _jarvis_rate[fingerprint]
+    while q and q[0] < cutoff:
+        q.popleft()
+    if len(q) >= JARVIS_RATE_LIMIT:
+        return False
+    q.append(now)
+    return True
+
+
+def _fingerprint(request: Request) -> str:
+    """Coarse per-client key. Telegram initData when available, else IP."""
+    init = request.headers.get("x-telegram-initdata", "")
+    if init:
+        return "tg:" + hashlib.sha1(init.encode("utf-8", "ignore")).hexdigest()[:16]
+    client = request.client.host if request.client else "?"
+    return "ip:" + client
+
+
+def _spend_check(estimate_usd: float) -> bool:
+    today = _today_key()
+    if _jarvis_spend["date"] != today:
+        _jarvis_spend["date"] = today
+        _jarvis_spend["usd"]  = 0.0
+        _jarvis_spend["calls"] = 0
+    return (_jarvis_spend["usd"] + estimate_usd) <= JARVIS_DAILY_BUDGET
+
+
+def _spend_record(input_toks: int, output_toks: int) -> None:
+    cost = input_toks * _PRICE_IN + output_toks * _PRICE_OUT
+    today = _today_key()
+    if _jarvis_spend["date"] != today:
+        _jarvis_spend["date"] = today
+        _jarvis_spend["usd"]  = 0.0
+        _jarvis_spend["calls"] = 0
+    _jarvis_spend["usd"]   += cost
+    _jarvis_spend["calls"] += 1
+
+
+@app.get("/api/jarvis/status")
+async def jarvis_status() -> JSONResponse:
+    today = _today_key()
+    if _jarvis_spend["date"] != today:
+        spent = 0.0
+        calls = 0
+    else:
+        spent = _jarvis_spend["usd"]
+        calls = _jarvis_spend["calls"]
+    return JSONResponse({
+        "voice_mode_available":   "elevenlabs" if ELEVENLABS_KEY else "browser",
+        "elevenlabs_configured":  bool(ELEVENLABS_KEY),
+        "elevenlabs_voice":       ELEVENLABS_VOICE or None,
+        "claude_configured":      bool(os.getenv("ANTHROPIC_API_KEY", "")),
+        "daily_budget_usd":       JARVIS_DAILY_BUDGET,
+        "spent_today_usd":        round(spent, 4),
+        "calls_today":            calls,
+        "rate_limit_per_hour":    JARVIS_RATE_LIMIT,
+    })
+
+
+@app.post("/api/jarvis/say")
+async def jarvis_say(request: Request) -> JSONResponse:
+    """Generate a one-liner JARVIS commentary for a given event.
+
+    Body: {"event_type": "trade_win", "context": {...}}
+    Returns: {"line": "...", "source": "claude" | "fallback" | "cache"}
+    """
+    fingerprint = _fingerprint(request)
+    if not _rate_check(fingerprint):
+        raise HTTPException(status_code=429, detail="JARVIS rate limit exceeded")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    event_type = (body.get("event_type") or "generic").strip()[:64]
+    context    = body.get("context") or {}
+    if not isinstance(context, dict):
+        context = {}
+
+    # Cache: same event+context within 60s → reuse line so a stuck poll
+    # doesn't burn budget on duplicates.
+    cache_key = hashlib.sha1(
+        (event_type + "|" + str(sorted(context.items()))[:512]).encode("utf-8", "ignore")
+    ).hexdigest()
+    if cache_key in _jarvis_cache:
+        ts, line = _jarvis_cache[cache_key]
+        if time.time() - ts < 60:
+            return JSONResponse({"line": line, "source": "cache"})
+
+    # Build user message from event
+    user_msg = _format_event_for_claude(event_type, context)
+
+    # Budget gate (rough estimate before call)
+    if not _spend_check(0.001):
+        fallback = _fallback_line(event_type, context)
+        return JSONResponse({"line": fallback, "source": "fallback", "reason": "budget_exhausted"})
+
+    from bot.agents.claude_reasoning import call_claude, HAIKU_MODEL, ANTHROPIC_API_KEY
+    if not ANTHROPIC_API_KEY:
+        fallback = _fallback_line(event_type, context)
+        return JSONResponse({"line": fallback, "source": "fallback", "reason": "no_api_key"})
+
+    text = await call_claude(system=JARVIS_SYSTEM, user=user_msg, model=HAIKU_MODEL, max_tokens=120)
+    if not text:
+        fallback = _fallback_line(event_type, context)
+        return JSONResponse({"line": fallback, "source": "fallback", "reason": "api_error"})
+
+    line = _sanitize_line(text)
+    # Conservative token estimate: ~50 chars input prompt + JARVIS_SYSTEM(~250 toks) + output
+    _spend_record(input_toks=300, output_toks=max(20, len(line) // 3))
+    _jarvis_cache[cache_key] = (time.time(), line)
+    return JSONResponse({"line": line, "source": "claude"})
+
+
+@app.post("/api/jarvis/tts")
+async def jarvis_tts(request: Request) -> Response:
+    """Synthesize text to speech via ElevenLabs. Falls back to a JSON signal
+    when ELEVENLABS_API_KEY is unset, so the frontend uses browser TTS."""
+    fingerprint = _fingerprint(request)
+    if not _rate_check(fingerprint + ":tts"):
+        raise HTTPException(status_code=429, detail="TTS rate limit exceeded")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    text = (body.get("text") or "").strip()[:600]
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing text")
+
+    if not ELEVENLABS_KEY or not ELEVENLABS_VOICE:
+        return JSONResponse({
+            "use_browser_tts": True,
+            "text": text,
+            "reason": "no_elevenlabs_config",
+        })
+
+    cache_key = hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()
+    if cache_key in _eleven_cache:
+        ts, mp3 = _eleven_cache[cache_key]
+        if time.time() - ts < 60:
+            return Response(content=mp3, media_type="audio/mpeg")
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}"
+    headers = {
+        "xi-api-key": ELEVENLABS_KEY,
+        "content-type": "application/json",
+        "accept": "audio/mpeg",
+    }
+    payload = {
+        "text": text,
+        "model_id": ELEVENLABS_MODEL,
+        "voice_settings": {
+            "stability": 0.45,
+            "similarity_boost": 0.85,
+            "style": 0.35,
+            "use_speaker_boost": True,
+        },
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(url, headers=headers, json=payload) as r:
+                if r.status != 200:
+                    err = (await r.text())[:200]
+                    logger.warning("ElevenLabs HTTP %d: %s", r.status, err)
+                    return JSONResponse({
+                        "use_browser_tts": True,
+                        "text": text,
+                        "reason": f"elevenlabs_status_{r.status}",
+                    })
+                mp3 = await r.read()
+    except Exception as exc:
+        logger.warning("ElevenLabs request failed: %s", exc)
+        return JSONResponse({
+            "use_browser_tts": True,
+            "text": text,
+            "reason": "elevenlabs_exception",
+        })
+
+    _eleven_cache[cache_key] = (time.time(), mp3)
+    # Trim cache size
+    if len(_eleven_cache) > 120:
+        oldest = sorted(_eleven_cache.items(), key=lambda kv: kv[1][0])[:60]
+        for k, _ in oldest:
+            _eleven_cache.pop(k, None)
+    return Response(content=mp3, media_type="audio/mpeg")
+
+
+def _format_event_for_claude(event_type: str, ctx: dict) -> str:
+    """Compose a compact event description Claude can quip about."""
+    lines = [f"EVENT: {event_type}"]
+    for k, v in ctx.items():
+        if isinstance(v, float):
+            v = round(v, 4)
+        lines.append(f"{k}: {v}")
+    lines.append("\nGenerate the one-line JARVIS commentary now.")
+    return "\n".join(lines)
+
+
+def _sanitize_line(text: str) -> str:
+    line = (text or "").strip()
+    # Strip surrounding quotes / asterisks / backticks Claude sometimes adds
+    line = line.strip("`*\"' \n")
+    # Collapse newlines
+    line = " ".join(line.split())
+    # Hard cap so a runaway response doesn't drone for 30 seconds
+    if len(line) > 240:
+        line = line[:237] + "..."
+    return line
+
+
+_FALLBACKS = {
+    "trade_win":   ["Trade closed in the green, sir.", "Position closed up. Tidy work."],
+    "trade_loss":  ["Stop loss did its job. Onwards.", "Position closed down. Risk contained."],
+    "trade_big_win":  ["Substantial winner, sir. Well played.", "Now that is a number worth quoting."],
+    "trade_big_loss": ["Significant loss, sir. Composure recommended.", "We took a hit. Risk envelope intact."],
+    "regime_cold":    ["Regime turned cold. Suggest patience.", "Market chilled. Reducing risk advised."],
+    "regime_hot":     ["Regime is hot. Opportunities incoming."],
+    "regime_neutral": ["Regime returned to neutral."],
+    "scanner_off":    ["Scanner disabled, sir."],
+    "scanner_on":     ["Scanner online."],
+    "tg_off":         ["Four AM feed disabled."],
+    "tg_on":          ["Four AM feed online."],
+    "claude_budget":  ["Claude approaching daily budget, sir."],
+    "agent_err":      ["An agent is offline. I'm investigating."],
+    "agent_warn":     ["One of the agents is dawdling, sir."],
+    "agent_ok":       ["Agent recovered. Back to nominal."],
+    "greet":          ["At your service, sir."],
+    "summary":        ["All systems nominal."],
+}
+
+
+def _fallback_line(event_type: str, ctx: dict) -> str:
+    import random
+    opts = _FALLBACKS.get(event_type) or _FALLBACKS["summary"]
+    return random.choice(opts)
 
 
 # ── Server bootstrap ──────────────────────────────────────────────────────────

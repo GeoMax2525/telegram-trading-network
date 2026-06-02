@@ -581,37 +581,239 @@
     75%     { transform: translate(1px,2px); }
   }
 
-  /* ═══════════════════════ VOICE BUTTON ═══════════════════════ */
+  /* ═══════════════════════ JARVIS ARC REACTOR ORB ═══════════════════════ */
   #voice-fab {
     position: fixed;
     right: 22px; bottom: 22px;
     z-index: 60;
-    width: 56px; height: 56px;
+    width: 72px; height: 72px;
     border-radius: 50%;
-    background: radial-gradient(circle, rgba(0,240,255,0.25), rgba(0,240,255,0.05));
-    border: 2px solid var(--cyan);
-    color: var(--cyan);
-    box-shadow: 0 0 24px var(--cyan-soft), inset 0 0 16px rgba(0,240,255,0.18);
-    display: flex; align-items: center; justify-content: center;
+    background: transparent;
+    border: none;
+    padding: 0;
     cursor: pointer;
-    transition: transform 0.15s, box-shadow 0.2s;
+    transition: transform 0.15s;
+    -webkit-tap-highlight-color: transparent;
   }
-  #voice-fab:hover { transform: scale(1.06); box-shadow: 0 0 36px var(--cyan), inset 0 0 20px rgba(0,240,255,0.3); }
-  #voice-fab.listening {
-    border-color: var(--red);
-    color: var(--red);
-    box-shadow: 0 0 32px var(--red), inset 0 0 18px rgba(255,44,82,0.3);
-    animation: voicePulse 0.9s ease-in-out infinite;
+  #voice-fab:hover { transform: scale(1.04); }
+  #voice-fab:active { transform: scale(0.96); }
+  /* Outer halo ring */
+  .arc-halo {
+    position: absolute; inset: -8px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(0,240,255,0.45) 0%, rgba(0,240,255,0.0) 70%);
+    pointer-events: none;
+    filter: blur(2px);
+    animation: arcHalo 3.2s ease-in-out infinite;
   }
-  @keyframes voicePulse {
-    0%,100% { transform: scale(1); }
-    50%     { transform: scale(1.12); }
+  @keyframes arcHalo { 0%,100% { opacity: 0.65; transform: scale(1); } 50% { opacity: 1; transform: scale(1.08); } }
+  /* Outer ring with notches */
+  .arc-ring {
+    position: absolute; inset: 0;
+    border-radius: 50%;
+    border: 1.5px solid var(--cyan);
+    box-shadow: 0 0 18px var(--cyan-soft), inset 0 0 12px rgba(0,240,255,0.25);
   }
-  #voice-fab svg { width: 24px; height: 24px; }
+  .arc-ring::before, .arc-ring::after {
+    content: '';
+    position: absolute;
+    width: 6px; height: 2px;
+    background: var(--cyan);
+    box-shadow: 0 0 6px var(--cyan);
+  }
+  .arc-ring::before { top: -1px; left: 50%; transform: translateX(-50%); }
+  .arc-ring::after  { bottom: -1px; left: 50%; transform: translateX(-50%); }
+  /* Rotating tick ring */
+  .arc-ticks {
+    position: absolute; inset: 4px;
+    border-radius: 50%;
+    border: 1px dashed rgba(0,240,255,0.55);
+    animation: arcTicks 9s linear infinite;
+  }
+  @keyframes arcTicks { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  /* Inner ring */
+  .arc-inner {
+    position: absolute; inset: 10px;
+    border-radius: 50%;
+    border: 1px solid rgba(0,240,255,0.6);
+    background: radial-gradient(circle, rgba(0,240,255,0.18) 0%, rgba(7,14,30,0.85) 70%);
+    box-shadow: inset 0 0 18px rgba(0,240,255,0.35);
+  }
+  /* Core glyph */
+  .arc-core {
+    position: absolute; inset: 18px;
+    border-radius: 50%;
+    background: radial-gradient(circle, #b8f6ff 0%, #00f0ff 35%, #006c80 80%);
+    box-shadow: 0 0 14px #00f0ff, inset 0 0 6px #fff;
+    animation: arcCore 1.8s ease-in-out infinite;
+  }
+  @keyframes arcCore {
+    0%,100% { box-shadow: 0 0 14px #00f0ff, inset 0 0 6px #fff; }
+    50%     { box-shadow: 0 0 22px #00f0ff, 0 0 36px rgba(0,240,255,0.65), inset 0 0 10px #fff; }
+  }
+  /* Speaking state */
+  #voice-fab.speaking .arc-core { animation: arcCoreSpeak 0.4s ease-in-out infinite; }
+  @keyframes arcCoreSpeak {
+    0%,100% { transform: scale(1);   box-shadow: 0 0 16px #00f0ff, 0 0 28px var(--cyan-soft), inset 0 0 8px #fff; }
+    50%     { transform: scale(1.18); box-shadow: 0 0 26px #00f0ff, 0 0 48px var(--cyan-soft), inset 0 0 12px #fff; }
+  }
+  #voice-fab.speaking .arc-ring { border-color: var(--cyan); box-shadow: 0 0 30px var(--cyan), inset 0 0 16px rgba(0,240,255,0.4); }
+  /* Listening state */
+  #voice-fab.listening .arc-ring {
+    border-color: var(--magenta);
+    box-shadow: 0 0 28px var(--magenta), inset 0 0 14px rgba(255,43,214,0.4);
+  }
+  #voice-fab.listening .arc-core {
+    background: radial-gradient(circle, #ffd4f4 0%, #ff2bd6 35%, #6c0050 80%);
+    box-shadow: 0 0 18px var(--magenta), inset 0 0 8px #fff;
+    animation: arcCoreSpeak 0.6s ease-in-out infinite;
+  }
+  #voice-fab.listening .arc-halo {
+    background: radial-gradient(circle, rgba(255,43,214,0.45) 0%, rgba(255,43,214,0.0) 70%);
+  }
   @media (max-width: 480px) {
-    #voice-fab { width: 48px; height: 48px; right: 14px; bottom: 100px; }
-    #voice-fab svg { width: 20px; height: 20px; }
+    #voice-fab { width: 60px; height: 60px; right: 14px; bottom: 100px; }
+    .arc-core { inset: 16px; }
   }
+
+  /* HUD line — text strip below the orb while JARVIS speaks */
+  #jarvis-hud {
+    position: fixed;
+    right: 110px; bottom: 36px;
+    z-index: 59;
+    max-width: 360px;
+    padding: 8px 12px;
+    background: rgba(3,6,12,0.9);
+    border: 1px solid var(--cyan);
+    box-shadow: 0 0 18px var(--cyan-soft);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    color: #cfe5ff;
+    opacity: 0;
+    transform: translateX(8px);
+    transition: opacity 0.25s, transform 0.25s;
+    pointer-events: none;
+  }
+  #jarvis-hud.show { opacity: 1; transform: translateX(0); }
+  #jarvis-hud::before {
+    content: 'JARVIS';
+    display: block;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 9px;
+    letter-spacing: 0.32em;
+    color: var(--cyan);
+    margin-bottom: 4px;
+  }
+  @media (max-width: 768px) {
+    #jarvis-hud {
+      right: 14px;
+      bottom: 170px;
+      max-width: calc(100vw - 28px);
+      left: 14px;
+    }
+  }
+
+  /* Scanline sweep that fires when JARVIS speaks */
+  #jarvis-sweep {
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 49;
+    opacity: 0;
+    background: linear-gradient(180deg, transparent 40%, rgba(0,240,255,0.18) 50%, transparent 60%);
+    background-size: 100% 300%;
+    transition: opacity 0.2s;
+  }
+  #jarvis-sweep.active {
+    opacity: 1;
+    animation: jarvisSweep 1.8s linear infinite;
+  }
+  @keyframes jarvisSweep {
+    from { background-position-y: -300%; }
+    to   { background-position-y: 300%; }
+  }
+
+  /* Settings modal */
+  #jarvis-modal {
+    position: fixed; inset: 0;
+    z-index: 9500;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.65);
+    backdrop-filter: blur(6px);
+  }
+  #jarvis-modal.open { display: flex; }
+  .jm-panel {
+    width: min(440px, 92vw);
+    max-height: 90vh;
+    overflow-y: auto;
+    background: linear-gradient(160deg, rgba(8,16,34,0.95), rgba(3,6,12,0.95));
+    border: 1px solid var(--cyan);
+    box-shadow: 0 0 36px var(--cyan-soft), inset 0 0 24px rgba(0,240,255,0.06);
+    padding: 22px;
+    position: relative;
+  }
+  .jm-panel h2 {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 14px;
+    font-weight: 900;
+    letter-spacing: 0.28em;
+    color: var(--cyan);
+    margin: 0 0 4px 0;
+    text-shadow: 0 0 12px var(--cyan-soft);
+  }
+  .jm-panel .sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.22em;
+    color: rgba(214,230,255,0.55);
+    margin-bottom: 18px;
+  }
+  .jm-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-top: 1px solid rgba(0,240,255,0.08);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+  }
+  .jm-row:first-of-type { border-top: none; }
+  .jm-row .lbl { opacity: 0.65; letter-spacing: 0.16em; text-transform: uppercase; font-size: 10px; }
+  .jm-row .val { color: var(--cyan); }
+  .jm-row .val.ok   { color: var(--lime); }
+  .jm-row .val.warn { color: var(--amber); }
+  .jm-row .val.err  { color: var(--red); }
+  .jm-close {
+    position: absolute;
+    top: 12px; right: 12px;
+    width: 28px; height: 28px;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: #cfe5ff;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .jm-close:hover { border-color: var(--cyan); color: var(--cyan); }
+  .jm-actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+  .jm-btn {
+    flex: 1; min-width: 120px;
+    padding: 8px 12px;
+    background: rgba(0,240,255,0.08);
+    border: 1px solid var(--cyan);
+    color: var(--cyan);
+    font-family: 'Orbitron', sans-serif;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .jm-btn:hover { background: rgba(0,240,255,0.18); box-shadow: 0 0 12px var(--cyan-soft); }
+  .jm-btn.alt { border-color: var(--magenta); color: var(--magenta); background: rgba(255,43,214,0.06); }
+  .jm-btn.alt:hover { background: rgba(255,43,214,0.18); box-shadow: 0 0 12px var(--magenta-soft); }
+  .jm-help { margin-top: 14px; padding: 10px 12px; border: 1px dashed rgba(255,177,58,0.4); color: rgba(255,230,180,0.85); font-family: 'JetBrains Mono', monospace; font-size: 10px; line-height: 1.55; }
+  .jm-help a { color: var(--amber); text-decoration: underline; }
 
   #voice-toast {
     position: fixed;
@@ -1000,14 +1202,47 @@
   <div id="voice-list"></div>
 </div>
 
-<button id="voice-fab" aria-label="Voice command" title="Voice command (tap or hold)">
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-    <line x1="12" y1="19" x2="12" y2="23"/>
-    <line x1="8" y1="23" x2="16" y2="23"/>
-  </svg>
+<button id="voice-fab" aria-label="JARVIS — tap to speak, hold for settings" title="JARVIS — tap to speak, hold for settings">
+  <span class="arc-halo"></span>
+  <span class="arc-ring"></span>
+  <span class="arc-ticks"></span>
+  <span class="arc-inner"></span>
+  <span class="arc-core"></span>
 </button>
+<div id="jarvis-hud"><span id="jarvis-hud-text">Standing by.</span></div>
+<div id="jarvis-sweep"></div>
+
+<div id="jarvis-modal" role="dialog" aria-modal="true">
+  <div class="jm-panel">
+    <button class="jm-close" id="jm-close" aria-label="Close">×</button>
+    <h2>// JARVIS · CONFIG</h2>
+    <div class="sub">SYSTEM · STATUS · v1</div>
+
+    <div class="jm-row"><span class="lbl">Claude</span><span class="val" id="jm-claude">—</span></div>
+    <div class="jm-row"><span class="lbl">Voice engine</span><span class="val" id="jm-voice-mode">—</span></div>
+    <div class="jm-row"><span class="lbl">ElevenLabs voice</span><span class="val" id="jm-eleven-voice">—</span></div>
+    <div class="jm-row"><span class="lbl">Daily budget</span><span class="val" id="jm-budget">— / —</span></div>
+    <div class="jm-row"><span class="lbl">Calls today</span><span class="val" id="jm-calls">0</span></div>
+    <div class="jm-row"><span class="lbl">Rate limit / hr</span><span class="val" id="jm-rate">—</span></div>
+    <div class="jm-row"><span class="lbl">Browser TTS</span><span class="val" id="jm-browser-tts">—</span></div>
+
+    <div class="jm-actions">
+      <button class="jm-btn" id="jm-test-claude">TEST · CLAUDE</button>
+      <button class="jm-btn alt" id="jm-test-voice">TEST · VOICE</button>
+    </div>
+
+    <div class="jm-help" id="jm-help-eleven">
+      <strong>Premium voice setup (optional):</strong><br>
+      1. Create an ElevenLabs account at <a href="https://elevenlabs.io" target="_blank" rel="noopener">elevenlabs.io</a><br>
+      2. Voice Library → pick a male British voice (e.g. "Dave", "Adam", "Brian") → copy its Voice ID<br>
+      3. Profile → API Keys → copy your API key<br>
+      4. In Railway → Variables → add:<br>
+      &nbsp;&nbsp;<code>ELEVENLABS_API_KEY</code> = your key<br>
+      &nbsp;&nbsp;<code>ELEVENLABS_VOICE_ID</code> = the voice ID<br>
+      5. Save. The next dashboard load will use premium TTS automatically.
+    </div>
+  </div>
+</div>
 <div id="voice-toast" role="status">
   <div class="heading">VOICE · CAPTURED</div>
   <div id="voice-text">—</div>
@@ -1016,7 +1251,7 @@
 
 <script>
 /* ────────────────────────────────────────────────────────────
-   Telegram WebApp init
+   Telegram WebApp init + haptic feedback
    ──────────────────────────────────────────────────────────── */
 const TG = window.Telegram && window.Telegram.WebApp;
 if (TG) {
@@ -1024,9 +1259,17 @@ if (TG) {
     TG.ready(); TG.expand();
     TG.setHeaderColor && TG.setHeaderColor('#03060c');
     TG.setBackgroundColor && TG.setBackgroundColor('#03060c');
+    TG.enableClosingConfirmation && TG.enableClosingConfirmation();
   } catch (e) {}
 }
 const TG_INITDATA = TG ? (TG.initData || '') : '';
+function haptic(style = 'light') {
+  try {
+    if (!TG || !TG.HapticFeedback) return;
+    if (['light','medium','heavy','rigid','soft'].includes(style)) TG.HapticFeedback.impactOccurred(style);
+    else if (['success','warning','error'].includes(style))         TG.HapticFeedback.notificationOccurred(style);
+  } catch (e) {}
+}
 
 /* ────────────────────────────────────────────────────────────
    Animated counters
@@ -1665,7 +1908,8 @@ if (TTS) {
 }
 
 let _ttsSpeaking = false;
-function speak(text, opts = {}) {
+
+function speakBrowser(text, opts = {}) {
   if (!TTS || LS.mute || !text) return;
   if (opts.priority === 'high') TTS.cancel();
 
@@ -1686,12 +1930,100 @@ function speak(text, opts = {}) {
     u.volume = 1.0;
     if (i === 0) u.onstart = () => { _ttsSpeaking = true; };
     if (i === parts.length - 1) {
-      u.onend = () => { _ttsSpeaking = false; };
-      u.onerror = () => { _ttsSpeaking = false; };
+      u.onend = () => { _ttsSpeaking = false; hudHide(); orbSpeakingOff(); };
+      u.onerror = () => { _ttsSpeaking = false; hudHide(); orbSpeakingOff(); };
     }
     TTS.speak(u);
   });
 }
+
+// ── JARVIS speech pipeline ──
+// speak() is the unified entry point used by greetings, intent responses,
+// and proactive alerts. Tries ElevenLabs via backend proxy first; falls
+// back to browser TTS silently.
+let _activeAudio = null;
+let _voiceMode = 'browser'; // updated from /api/jarvis/status
+
+async function speak(text, opts = {}) {
+  if (!text || LS.mute) return;
+  // Show HUD + sweep + speaking ring on orb
+  hudShow(text);
+  orbSpeakingOn();
+
+  // Stop any in-flight audio/synthesis
+  if (opts.priority === 'high') {
+    try { _activeAudio && _activeAudio.pause(); } catch (e) {}
+    try { TTS && TTS.cancel(); } catch (e) {}
+  }
+
+  // Try premium path first
+  try {
+    const r = await fetch('/api/jarvis/tts', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(TG_INITDATA ? { 'X-Telegram-InitData': TG_INITDATA } : {}),
+      },
+      body: JSON.stringify({ text }),
+    });
+    const ctype = r.headers.get('content-type') || '';
+    if (r.ok && ctype.startsWith('audio/')) {
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      _activeAudio = audio;
+      audio.onended = () => { URL.revokeObjectURL(url); orbSpeakingOff(); hudHide(); _activeAudio = null; };
+      audio.onerror = () => { URL.revokeObjectURL(url); orbSpeakingOff(); hudHide(); _activeAudio = null; };
+      await audio.play();
+      return;
+    }
+    // Fallback signal — server says "use browser TTS"
+    speakBrowser(text, opts);
+  } catch (e) {
+    // Network blip or proxy crash — fall back gracefully
+    speakBrowser(text, opts);
+  }
+}
+
+// jarvisSay: fetch a Claude-generated one-liner for an event and speak it
+async function jarvisSay(eventType, context = {}) {
+  if (LS.mute) return;
+  try {
+    const r = await fetch('/api/jarvis/say', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(TG_INITDATA ? { 'X-Telegram-InitData': TG_INITDATA } : {}),
+      },
+      body: JSON.stringify({ event_type: eventType, context }),
+    });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data && data.line) await speak(data.line);
+  } catch (e) { /* silent */ }
+}
+
+// HUD show/hide
+const hudEl = document.getElementById('jarvis-hud');
+const hudText = document.getElementById('jarvis-hud-text');
+const sweepEl = document.getElementById('jarvis-sweep');
+let _hudTimer = null;
+function hudShow(text) {
+  if (!hudEl) return;
+  hudText.textContent = text;
+  hudEl.classList.add('show');
+  sweepEl.classList.add('active');
+  clearTimeout(_hudTimer);
+  // Auto-hide after a generous window in case TTS onend doesn't fire
+  _hudTimer = setTimeout(hudHide, Math.max(4000, text.length * 90));
+}
+function hudHide() {
+  if (!hudEl) return;
+  hudEl.classList.remove('show');
+  sweepEl.classList.remove('active');
+}
+function orbSpeakingOn()  { voiceFab && voiceFab.classList.add('speaking'); }
+function orbSpeakingOff() { voiceFab && voiceFab.classList.remove('speaking'); }
 
 // ── Toast ──
 function showToast(text, action) {
@@ -2070,6 +2402,15 @@ function announce(text, key = null, debounceMs = 60000) {
   speak(text);
 }
 
+// Claude-powered announcement: fetches a JARVIS one-liner from the backend
+// instead of using a template string. Falls back to backend templates if
+// Claude is unavailable or over-budget.
+function announceClaude(eventType, context, key = null, debounceMs = 60000) {
+  if (!LS.alerts) return;
+  if (key && !shouldSpeak(key, debounceMs)) return;
+  jarvisSay(eventType, context);
+}
+
 function checkAnnouncements(d) {
   if (!LS.alerts) {
     // Still update watch state so we don't re-announce stale events on enable
@@ -2082,51 +2423,54 @@ function checkAnnouncements(d) {
     return;
   }
 
-  // Big trade closes
+  // Big trade closes — route through Claude for personality
   for (const t of d.trades) {
     if (t.open) continue;
     if (_watch.announcedTrades.has(t.id)) continue;
     _watch.announcedTrades.add(t.id);
-    if (!_watch.initialized) continue; // skip backfill on first load
+    if (!_watch.initialized) continue;
     const pct = Math.abs(t.pnl_pct || 0);
     if (pct >= 100) {
-      announce(t.win
-        ? `Sir, ${t.token} closed up ${Math.round(pct)} percent. Strong winner.`
-        : `Heads up sir, ${t.token} closed down ${Math.round(pct)} percent. Significant loss.`,
-        'trade_' + t.id, 0);
+      announceClaude(
+        t.win ? 'trade_big_win' : 'trade_big_loss',
+        { token: t.token, pnl_pct: Math.round(t.win ? pct : -pct), reason: t.reason, entry_mc: t.mc },
+        'trade_' + t.id, 0
+      );
+      haptic(t.win ? 'success' : 'warning');
     } else if (pct >= 50) {
-      announce(t.win
-        ? `${t.token} closed up ${Math.round(pct)} percent.`
-        : `${t.token} closed down ${Math.round(pct)} percent.`,
-        'trade_' + t.id, 0);
+      announceClaude(
+        t.win ? 'trade_win' : 'trade_loss',
+        { token: t.token, pnl_pct: Math.round(t.win ? pct : -pct), reason: t.reason },
+        'trade_' + t.id, 0
+      );
     }
   }
 
   // Regime change
   if (_watch.initialized && _watch.regime !== d.system.regime) {
     const r = d.system.regime;
-    if (r === 'COLD')        announce("Market regime shifted to COLD. Suggest reducing risk, sir.", 'regime_cold', 600000);
-    else if (r === 'HOT')    announce("Market regime now HOT. Opportunities incoming.",             'regime_hot',  600000);
-    else                     announce("Market regime returned to NEUTRAL.",                         'regime_neu',  600000);
+    const key = r === 'COLD' ? 'regime_cold' : r === 'HOT' ? 'regime_hot' : 'regime_neutral';
+    announceClaude(key, { regime: r }, key, 600000);
   }
   _watch.regime = d.system.regime;
 
   // Scanner / 4AM feed status
   if (_watch.initialized && _watch.scanner !== d.system.scanner_on) {
-    announce(d.system.scanner_on ? "Scanner is online." : "Sir, the scanner has been disabled.", 'scanner', 300000);
+    announceClaude(d.system.scanner_on ? 'scanner_on' : 'scanner_off', { enabled: !!d.system.scanner_on }, 'scanner', 300000);
   }
   _watch.scanner = d.system.scanner_on;
 
   if (_watch.initialized && _watch.tg !== d.system.tg_scraper_on) {
-    announce(d.system.tg_scraper_on ? "Four AM feed online." : "Sir, the four AM feed has been disabled.", 'tg', 300000);
+    announceClaude(d.system.tg_scraper_on ? 'tg_on' : 'tg_off', { enabled: !!d.system.tg_scraper_on }, 'tg', 300000);
   }
   _watch.tg = d.system.tg_scraper_on;
 
   // Claude spend
   const over = d.system.claude_budget > 0 && d.system.claude_spend >= d.system.claude_budget * 0.8;
   if (over && !_watch.claudeOverBudget) {
-    announce(`Sir, Claude spend has reached ${Math.round(d.system.claude_spend / d.system.claude_budget * 100)} percent of today's budget.`,
-             'claude_budget', 1800000);
+    announceClaude('claude_budget',
+      { spent: d.system.claude_spend, budget: d.system.claude_budget, pct: Math.round(d.system.claude_spend / d.system.claude_budget * 100) },
+      'claude_budget', 1800000);
   }
   _watch.claudeOverBudget = over;
 
@@ -2134,9 +2478,10 @@ function checkAnnouncements(d) {
   for (const a of d.agents) {
     const prev = _watch.agentStates[a.key];
     if (prev && prev !== a.state && _watch.initialized) {
-      if (a.state === 'ERR')   announce(`${a.name} agent is offline.`, 'agent_' + a.key, 300000);
-      else if (a.state === 'WARN') announce(`${a.name} agent reporting delay.`, 'agent_' + a.key, 300000);
-      else if (a.state === 'ONLINE' && (prev === 'ERR' || prev === 'WARN')) announce(`${a.name} agent recovered.`, 'agent_' + a.key, 300000);
+      if (a.state === 'ERR')       announceClaude('agent_err',  { agent: a.name }, 'agent_' + a.key, 300000);
+      else if (a.state === 'WARN') announceClaude('agent_warn', { agent: a.name }, 'agent_' + a.key, 300000);
+      else if (a.state === 'ONLINE' && (prev === 'ERR' || prev === 'WARN'))
+        announceClaude('agent_ok', { agent: a.name }, 'agent_' + a.key, 300000);
     }
     _watch.agentStates[a.key] = a.state;
   }
@@ -2162,10 +2507,103 @@ let _greeted = false;
 function maybeGreet() {
   if (_greeted || !LS.alerts) return;
   _greeted = true;
-  setTimeout(() => speak(timeGreeting() + " All systems online."), 600);
+  // Let Claude generate the greeting line; backend supplies template if Claude unavailable
+  const hour = new Date().getHours();
+  const tod = hour < 5 ? 'late_night' : hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : hour < 22 ? 'evening' : 'night';
+  setTimeout(() => jarvisSay('greet', {
+    time_of_day: tod,
+    balance: _latest && _latest.paper ? _latest.paper.balance : null,
+    win_rate: _latest && _latest.performance ? _latest.performance.win_rate : null,
+    open_pos: _latest && _latest.performance ? _latest.performance.open_pos : null,
+  }), 600);
 }
 window.addEventListener('pointerdown', maybeGreet, { once: true });
 window.addEventListener('keydown',    maybeGreet, { once: true });
+
+/* ────────────────────────────────────────────────────────────
+   JARVIS SETTINGS MODAL — long-press orb to open
+   ──────────────────────────────────────────────────────────── */
+const jarvisModal = document.getElementById('jarvis-modal');
+const jmClose = document.getElementById('jm-close');
+const jmTestClaude = document.getElementById('jm-test-claude');
+const jmTestVoice  = document.getElementById('jm-test-voice');
+
+async function refreshJarvisStatus() {
+  try {
+    const r = await fetch('/api/jarvis/status');
+    if (!r.ok) return;
+    const s = await r.json();
+    _voiceMode = s.voice_mode_available || 'browser';
+    document.getElementById('jm-claude').textContent = s.claude_configured ? 'configured' : 'missing key';
+    document.getElementById('jm-claude').className = 'val ' + (s.claude_configured ? 'ok' : 'err');
+    document.getElementById('jm-voice-mode').textContent = s.voice_mode_available.toUpperCase();
+    document.getElementById('jm-voice-mode').className = 'val ' + (s.elevenlabs_configured ? 'ok' : 'warn');
+    document.getElementById('jm-eleven-voice').textContent = s.elevenlabs_voice || 'not set';
+    document.getElementById('jm-eleven-voice').className = 'val ' + (s.elevenlabs_voice ? 'ok' : 'warn');
+    document.getElementById('jm-budget').textContent = `$${(s.spent_today_usd || 0).toFixed(3)} / $${(s.daily_budget_usd || 0).toFixed(2)}`;
+    const pct = s.daily_budget_usd > 0 ? (s.spent_today_usd / s.daily_budget_usd) : 0;
+    document.getElementById('jm-budget').className = 'val ' + (pct >= 0.8 ? 'warn' : pct >= 1 ? 'err' : 'ok');
+    document.getElementById('jm-calls').textContent = s.calls_today;
+    document.getElementById('jm-rate').textContent  = s.rate_limit_per_hour;
+    document.getElementById('jm-browser-tts').textContent = TTS ? 'available' : 'unsupported';
+    document.getElementById('jm-browser-tts').className = 'val ' + (TTS ? 'ok' : 'err');
+    // Hide the ElevenLabs help text if it's already configured
+    document.getElementById('jm-help-eleven').style.display = s.elevenlabs_configured ? 'none' : 'block';
+  } catch (e) { /* silent */ }
+}
+
+function openJarvisModal() {
+  jarvisModal.classList.add('open');
+  haptic('medium');
+  refreshJarvisStatus();
+}
+function closeJarvisModal() {
+  jarvisModal.classList.remove('open');
+  haptic('light');
+}
+jmClose.addEventListener('click', closeJarvisModal);
+jarvisModal.addEventListener('click', (e) => {
+  if (e.target === jarvisModal) closeJarvisModal();
+});
+jmTestClaude.addEventListener('click', () => {
+  haptic('light');
+  jarvisSay('test_claude', { note: 'operator pressed test button' });
+});
+jmTestVoice.addEventListener('click', () => {
+  haptic('light');
+  speak("Hello sir. I'm Revolt. All systems online.", { priority: 'high' });
+});
+
+// Long-press detection on the orb (also triple-tap as fallback for desktops)
+(() => {
+  let pressTimer = null;
+  let pressActive = false;
+  const LONG_MS = 600;
+  voiceFab.addEventListener('pointerdown', (e) => {
+    pressActive = true;
+    pressTimer = setTimeout(() => {
+      if (pressActive) {
+        pressActive = 'consumed';
+        openJarvisModal();
+      }
+    }, LONG_MS);
+  });
+  const cancel = () => { clearTimeout(pressTimer); pressActive = false; };
+  voiceFab.addEventListener('pointerup', cancel);
+  voiceFab.addEventListener('pointerleave', cancel);
+  voiceFab.addEventListener('pointercancel', cancel);
+  // Suppress click-to-talk when it was a long press
+  voiceFab.addEventListener('click', (e) => {
+    if (pressActive === 'consumed') {
+      e.stopImmediatePropagation();
+      pressActive = false;
+    }
+  }, true);
+})();
+
+// Add haptic feedback to all voice control toggles
+[vcWake, vcAlerts, vcMute, vcVoice].forEach(b => b && b.addEventListener('click', () => haptic('light')));
+voiceFab.addEventListener('click', () => haptic('light'));
 
 /* ────────────────────────────────────────────────────────────
    MATRIX RAIN
