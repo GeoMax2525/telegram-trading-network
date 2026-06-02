@@ -634,6 +634,59 @@
   #voice-toast .heading { color: var(--cyan); font-family: 'Orbitron', sans-serif; font-size: 10px; letter-spacing: 0.22em; margin-bottom: 4px; }
   #voice-toast .action  { color: var(--lime); margin-top: 6px; font-size: 10px; letter-spacing: 0.12em; }
   @media (max-width: 480px) { #voice-toast { right: 14px; bottom: 160px; max-width: 240px; } }
+
+  /* ═══════════════════════ VOICE TOGGLE BAR ═══════════════════════ */
+  #voice-controls {
+    position: fixed;
+    right: 22px; bottom: 88px;
+    z-index: 60;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .vc-toggle {
+    width: 38px; height: 38px;
+    border-radius: 50%;
+    background: rgba(7,14,30,0.85);
+    border: 1px solid var(--line);
+    color: rgba(214,230,255,0.5);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    backdrop-filter: blur(4px);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.18em;
+  }
+  .vc-toggle svg { width: 16px; height: 16px; }
+  .vc-toggle:hover { border-color: var(--cyan); color: var(--cyan); }
+  .vc-toggle.on {
+    background: rgba(0,240,255,0.15);
+    border-color: var(--cyan);
+    color: var(--cyan);
+    box-shadow: 0 0 16px var(--cyan-soft);
+  }
+  .vc-toggle.on[data-tip="wake"]   { background: rgba(255,43,214,0.15); border-color: var(--magenta); color: var(--magenta); box-shadow: 0 0 16px var(--magenta-soft); }
+  .vc-toggle.on[data-tip="alerts"] { background: rgba(185,255,58,0.12); border-color: var(--lime);    color: var(--lime);    box-shadow: 0 0 16px var(--lime-soft); }
+  .vc-tip {
+    position: absolute;
+    right: 46px;
+    background: rgba(3,6,12,0.92);
+    border: 1px solid var(--line);
+    padding: 4px 8px;
+    color: #cfe5ff;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s;
+  }
+  .vc-toggle:hover .vc-tip { opacity: 1; }
+  @media (max-width: 480px) {
+    #voice-controls { right: 14px; bottom: 156px; }
+    .vc-toggle { width: 32px; height: 32px; }
+    .vc-toggle svg { width: 14px; height: 14px; }
+  }
 </style>
 </head>
 
@@ -860,6 +913,32 @@
 </main>
 
 <div id="conn" class="ok">SYNC · INIT</div>
+
+<div id="voice-controls">
+  <button class="vc-toggle relative" id="vc-wake" data-tip="wake" aria-label="Wake-word mode" title="Always-listen wake-word mode">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <circle cx="12" cy="12" r="7" opacity="0.5"/>
+      <circle cx="12" cy="12" r="11" opacity="0.25"/>
+    </svg>
+    <span class="vc-tip">WAKE · WORD</span>
+  </button>
+  <button class="vc-toggle relative" id="vc-alerts" data-tip="alerts" aria-label="Auto alerts" title="Proactive spoken alerts">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+      <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+    </svg>
+    <span class="vc-tip">AUTO · ALERTS</span>
+  </button>
+  <button class="vc-toggle relative" id="vc-mute" data-tip="mute" aria-label="Mute" title="Mute voice output">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+      <line x1="23" y1="9" x2="17" y2="15"/>
+      <line x1="17" y1="9" x2="23" y2="15"/>
+    </svg>
+    <span class="vc-tip">MUTE</span>
+  </button>
+</div>
 
 <button id="voice-fab" aria-label="Voice command" title="Voice command (tap or hold)">
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1444,17 +1523,76 @@ window.addEventListener('pointerdown', () => {
 }, { once: true });
 
 /* ────────────────────────────────────────────────────────────
-   VOICE MODE — push-to-talk
+   VOICE MODE — JARVIS-style speech I/O
    ──────────────────────────────────────────────────────────── */
 const voiceFab = document.getElementById('voice-fab');
 const voiceToast = document.getElementById('voice-toast');
 const voiceText = document.getElementById('voice-text');
 const voiceAction = document.getElementById('voice-action');
+const vcWake   = document.getElementById('vc-wake');
+const vcAlerts = document.getElementById('vc-alerts');
+const vcMute   = document.getElementById('vc-mute');
 
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognizer = null;
-let voiceActive = false;
+const TTS = window.speechSynthesis || null;
 
+// Persisted toggles
+const LS = {
+  get wake()   { return localStorage.getItem('revolt.wake')   === '1'; },
+  set wake(v)  { localStorage.setItem('revolt.wake',   v ? '1' : '0'); },
+  get alerts() { return localStorage.getItem('revolt.alerts') === '1'; },
+  set alerts(v){ localStorage.setItem('revolt.alerts', v ? '1' : '0'); },
+  get mute()   { return localStorage.getItem('revolt.mute')   === '1'; },
+  set mute(v)  { localStorage.setItem('revolt.mute',   v ? '1' : '0'); },
+};
+function syncToggleUI() {
+  vcWake.classList.toggle('on',   LS.wake);
+  vcAlerts.classList.toggle('on', LS.alerts);
+  vcMute.classList.toggle('on',   LS.mute);
+}
+syncToggleUI();
+
+// ── TTS voice picker ──
+let _jarvisVoice = null;
+function pickJarvisVoice() {
+  if (!TTS) return;
+  const voices = TTS.getVoices();
+  if (!voices.length) return;
+  // Prefer male UK / Daniel / Microsoft David / Google UK English Male
+  const pref = [
+    /daniel/i, /uk english male/i, /microsoft david/i, /google uk english male/i,
+    /uk\b.*male/i, /en-gb.*male/i,
+    /(male)/i, /en-gb/i, /en[-_]us/i,
+  ];
+  for (const re of pref) {
+    const m = voices.find(v => re.test(v.name) || re.test(v.lang));
+    if (m) { _jarvisVoice = m; return; }
+  }
+  _jarvisVoice = voices.find(v => /^en/i.test(v.lang)) || voices[0];
+}
+if (TTS) {
+  pickJarvisVoice();
+  TTS.onvoiceschanged = pickJarvisVoice;
+}
+
+let _ttsSpeaking = false;
+function speak(text, opts = {}) {
+  if (!TTS || LS.mute || !text) return;
+  // Cancel any in-flight speech so new urgent alerts aren't queued forever
+  if (opts.priority === 'high') TTS.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.voice = _jarvisVoice || null;
+  u.lang  = (u.voice && u.voice.lang) || 'en-GB';
+  u.rate  = opts.rate  || 0.96;
+  u.pitch = opts.pitch || 0.85;
+  u.volume = 1.0;
+  u.onstart = () => { _ttsSpeaking = true; };
+  u.onend   = () => { _ttsSpeaking = false; };
+  u.onerror = () => { _ttsSpeaking = false; };
+  TTS.speak(u);
+}
+
+// ── Toast ──
 function showToast(text, action) {
   voiceText.textContent = text;
   voiceAction.textContent = action;
@@ -1463,84 +1601,416 @@ function showToast(text, action) {
   showToast._t = setTimeout(() => voiceToast.classList.remove('show'), 6000);
 }
 
-function parseIntent(text) {
-  const t = text.toLowerCase();
-  // simple intent matching
+// ── Time-aware greeting ──
+function timeGreeting() {
+  const h = new Date().getHours();
+  if (h < 5)  return "Good evening, operator. The system has been watching the markets through the night.";
+  if (h < 12) return "Good morning, sir.";
+  if (h < 17) return "Good afternoon, sir.";
+  if (h < 22) return "Good evening, sir.";
+  return "Working late again, sir.";
+}
+
+// ── System analysis composer ──
+let _latest = null; // last full dashboard payload
+function composeSystemAnalysis() {
+  const d = _latest;
+  if (!d) return "Sir, I'm still bringing systems online. One moment.";
+  const lines = [];
+  lines.push(`Revolt is operating in ${d.system.trade_mode || 'off'} mode.`);
+  lines.push(`Current balance: ${d.paper.balance.toFixed(2)} SOL.`);
+  if (d.performance.alltime_pnl > 0) {
+    lines.push(`All-time profit: plus ${d.performance.alltime_pnl.toFixed(2)} SOL.`);
+  } else if (d.performance.alltime_pnl < 0) {
+    lines.push(`All-time drawdown: ${Math.abs(d.performance.alltime_pnl).toFixed(2)} SOL.`);
+  }
+  lines.push(`${d.performance.open_pos} positions open.`);
+  lines.push(`${d.performance.trades_24h} trades in the last 24 hours, win rate ${d.performance.win_rate} percent.`);
+  lines.push(`Market regime is ${d.system.regime}.`);
+  lines.push(`Scanner ${d.system.scanner_on ? 'online' : 'disabled'}. Four AM feed ${d.system.tg_scraper_on ? 'online' : 'disabled'}.`);
+  if (d.system.claude_spend >= d.system.claude_budget * 0.8 && d.system.claude_budget > 0) {
+    lines.push(`Claude spend at ${Math.round(d.system.claude_spend / d.system.claude_budget * 100)} percent of daily budget.`);
+  }
+  // Last closed trade highlight
+  const lastClose = (d.trades || []).find(t => !t.open);
+  if (lastClose) {
+    const verb = lastClose.win ? 'closed up' : 'closed down';
+    lines.push(`Most recent trade ${lastClose.token} ${verb} ${Math.abs(lastClose.pnl_pct).toFixed(0)} percent.`);
+  }
+  // Agent issues
+  const issues = (d.agents || []).filter(a => a.state !== 'ONLINE');
+  if (issues.length === 0) {
+    lines.push("All agents nominal.");
+  } else {
+    lines.push(`${issues.length} agents reporting: ${issues.map(a => a.name).join(', ')}.`);
+  }
+  return lines.join(' ');
+}
+
+// ── Intent parsing ──
+function parseIntent(rawText) {
+  const t = (rawText || '').toLowerCase();
+  // Greetings
+  if (/\bgood morning\b/.test(t) || /\bmorning revolt\b/.test(t)) return { intent: 'greet_morning' };
+  if (/\bgood afternoon\b/.test(t)) return { intent: 'greet_afternoon' };
+  if (/\bgood (evening|night)\b/.test(t)) return { intent: 'greet_night' };
+  if (/\b(hey|hi|hello|yo|sup)\s*(revolt)?\b/.test(t)) return { intent: 'greet_hey' };
+  if (/\bthank(s| you)\b/.test(t)) return { intent: 'thanks' };
+  // System
+  if (/\bsystem (analysis|status|report|check|rundown)\b/.test(t) || /\brundown\b/.test(t) || /\bstatus report\b/.test(t)) return { intent: 'analysis' };
+  if (/\b(how('| ar)?e? (you|things)|sitrep|sit rep)\b/.test(t)) return { intent: 'analysis' };
+  // Data
   if (/\banaly[sz]e\b|\bscan\b/.test(t)) {
-    const m = t.match(/(?:analy[sz]e|scan)\s+([a-z0-9]{3,})/);
-    return { intent: 'analyze', token: m ? m[1].toUpperCase() : null };
+    const m = t.match(/(?:analy[sz]e|scan)\s+([a-z0-9$]{3,})/);
+    return { intent: 'analyze', token: m ? m[1].toUpperCase().replace(/\$/g, '') : null };
   }
   if (/\bbalance\b|\bhow much\b/.test(t)) return { intent: 'balance' };
   if (/\bopen positions?\b|\bpositions?\b/.test(t)) return { intent: 'positions' };
   if (/\btrades?\b/.test(t)) return { intent: 'trades' };
+  if (/\b(market|regime|sol price)\b/.test(t)) return { intent: 'market' };
+  if (/\bclaude (spend|budget|cost)\b/.test(t)) return { intent: 'claude' };
+  if (/\bwin rate\b/.test(t)) return { intent: 'winrate' };
+  if (/\blast trade\b/.test(t)) return { intent: 'last_trade' };
+  if (/\b(issues?|problems?|any (errors|alerts))\b/.test(t)) return { intent: 'issues' };
+  // Actions
   if (/\bglitch\b|\bcrazy\b/.test(t)) return { intent: 'glitch' };
   if (/\brefresh\b|\breload\b|\bupdate\b/.test(t)) return { intent: 'refresh' };
-  if (/\bclose\b|\bdismiss\b/.test(t)) return { intent: 'dismiss' };
+  if (/\b(mute|quiet|silence)\b/.test(t)) return { intent: 'mute' };
+  if (/\b(unmute|speak again|talk)\b/.test(t)) return { intent: 'unmute' };
+  if (/\b(close|dismiss)\b/.test(t)) return { intent: 'dismiss' };
   return { intent: 'unknown' };
 }
 
-function applyIntent(intent, text) {
+function fmt(num, dec = 2) { return Number(num).toFixed(dec); }
+
+function applyIntent(intent, raw) {
+  const d = _latest;
   switch (intent.intent) {
+    case 'greet_morning': {
+      const g = timeGreeting();
+      speak(g, { priority: 'high' });
+      return '→ ' + g;
+    }
+    case 'greet_afternoon': speak("Good afternoon, sir.", { priority: 'high' }); return '→ Good afternoon, sir.';
+    case 'greet_night':     speak("Good night, sir. I'll keep watch.", { priority: 'high' }); return "→ Good night, sir.";
+    case 'greet_hey':       speak("At your service.", { priority: 'high' }); return '→ At your service.';
+    case 'thanks':          speak("Always a pleasure, sir.", { priority: 'high' }); return '→ Always a pleasure, sir.';
+    case 'analysis': {
+      const sentence = composeSystemAnalysis();
+      speak(sentence, { priority: 'high' });
+      return '→ system analysis (speaking)';
+    }
     case 'analyze':
-      return intent.token ? `→ would analyze ${intent.token} (DM /scan ${intent.token})` : '→ token not recognized';
-    case 'balance':
-      const bal = document.getElementById('h-balance').textContent;
+      if (intent.token) {
+        speak(`Acknowledged. To run a full analysis on ${intent.token}, message me ${intent.token} in Telegram.`);
+        return `→ would analyze ${intent.token} (DM the token CA in chat)`;
+      }
+      speak("I didn't catch the token name, sir.");
+      return '→ token not recognized';
+    case 'balance': {
+      const bal = d ? d.paper.balance.toFixed(4) : document.getElementById('h-balance').textContent;
+      speak(`Current balance is ${fmt(parseFloat(bal), 2)} SOL.`);
       return `→ BALANCE: ${bal} SOL`;
-    case 'positions':
-      const op = document.getElementById('p-open').textContent;
+    }
+    case 'positions': {
+      const op = d ? d.performance.open_pos : document.getElementById('p-open').textContent;
+      speak(op > 0 ? `${op} positions are currently open.` : "No open positions, sir.");
       return `→ OPEN POSITIONS: ${op}`;
-    case 'trades':
-      const t24 = document.getElementById('p-trades').textContent;
-      return `→ TRADES 24H: ${t24}`;
-    case 'glitch':
-      triggerGlitch('+999%', 'VOICE', true);
-      return '→ glitch mode engaged';
-    case 'refresh':
-      fetchDashboard(); fetchSol();
-      return '→ refreshing dashboard';
-    case 'dismiss':
-      voiceToast.classList.remove('show');
-      return '→ dismissed';
+    }
+    case 'trades': {
+      const t24 = d ? d.performance.trades_24h : document.getElementById('p-trades').textContent;
+      const wr = d ? d.performance.win_rate : 0;
+      speak(`${t24} trades in the last 24 hours, win rate ${wr} percent.`);
+      return `→ TRADES 24H: ${t24} · WR ${wr}%`;
+    }
+    case 'market': {
+      const reg = d ? d.system.regime : 'unknown';
+      speak(`Market regime is ${reg}.`);
+      return `→ REGIME: ${reg}`;
+    }
+    case 'claude': {
+      const s = d ? d.system.claude_spend : 0;
+      const b = d ? d.system.claude_budget : 5;
+      speak(`Claude spend today is ${fmt(s, 2)} dollars of ${fmt(b, 2)}.`);
+      return `→ CLAUDE: $${fmt(s, 2)} / $${fmt(b, 2)}`;
+    }
+    case 'winrate': {
+      const wr = d ? d.performance.win_rate : 0;
+      speak(`Win rate is ${wr} percent.`);
+      return `→ WR: ${wr}%`;
+    }
+    case 'last_trade': {
+      const last = d ? (d.trades || []).find(t => !t.open) : null;
+      if (last) {
+        const verb = last.win ? 'gained' : 'lost';
+        speak(`Last trade ${last.token} ${verb} ${Math.abs(last.pnl_pct).toFixed(0)} percent.`);
+        return `→ LAST: ${last.token} ${last.pnl}`;
+      }
+      speak("No closed trades yet, sir.");
+      return '→ no trades';
+    }
+    case 'issues': {
+      const probs = [];
+      if (d) {
+        if (!d.system.scanner_on) probs.push("Scanner is disabled.");
+        if (!d.system.tg_scraper_on) probs.push("Four AM feed is disabled.");
+        if (d.system.claude_budget > 0 && d.system.claude_spend >= d.system.claude_budget * 0.8) {
+          probs.push(`Claude spend is at ${Math.round(d.system.claude_spend / d.system.claude_budget * 100)} percent of budget.`);
+        }
+        const errs = (d.agents || []).filter(a => a.state === 'ERR');
+        const warns = (d.agents || []).filter(a => a.state === 'WARN');
+        if (errs.length)  probs.push(`${errs.length} agents in error state: ${errs.map(a => a.name).join(', ')}.`);
+        if (warns.length) probs.push(`${warns.length} agents in warning state: ${warns.map(a => a.name).join(', ')}.`);
+        if (d.system.regime === 'COLD') probs.push("Market regime is COLD. Reducing risk is advised.");
+      }
+      if (!probs.length) { speak("All systems nominal, sir."); return '→ all clear'; }
+      speak(probs.join(' '));
+      return '→ ' + probs.length + ' issue(s)';
+    }
+    case 'glitch':  triggerGlitch('+999%', 'VOICE', true); speak("Engaging."); return '→ glitch mode';
+    case 'refresh': fetchDashboard(); fetchSol(); speak("Refreshing.");        return '→ refreshing';
+    case 'mute':    LS.mute = true;  syncToggleUI();                            return '→ muted';
+    case 'unmute':  LS.mute = false; syncToggleUI(); speak("Voice restored.");  return '→ unmuted';
+    case 'dismiss': voiceToast.classList.remove('show');                         return '→ dismissed';
     default:
-      return '→ command not recognized';
+      speak("Command not recognized.");
+      return '→ not recognized';
   }
 }
 
-function startVoice() {
+// ── Wake-word filter ──
+const WAKE_RE = /^\s*(hey\s+|ok\s+|okay\s+|yo\s+|hello\s+|hi\s+|good\s+(morning|afternoon|evening|night)\s+)?revolt\b\s*[,.]?\s*(.*)$/i;
+
+function stripWake(text) {
+  const m = text.match(WAKE_RE);
+  if (!m) return null; // no wake word
+  // m[3] is the rest after "revolt"; if empty, treat as plain greeting trigger
+  const rest = (m[3] || '').trim();
+  return rest || text; // if user just said "hey revolt", run intent on full text (greeting will match)
+}
+
+let recognizer = null;
+let recognizing = false;
+let userRequestedStop = false;
+
+function startRecognizer(continuous) {
   if (!SpeechRec) {
     showToast('Browser does not support speech recognition.', '→ try Chrome / Edge');
     return;
   }
-  if (voiceActive && recognizer) { recognizer.stop(); return; }
+  if (recognizing) return;
   recognizer = new SpeechRec();
   recognizer.lang = 'en-US';
-  recognizer.continuous = false;
+  recognizer.continuous = !!continuous;
   recognizer.interimResults = false;
   recognizer.maxAlternatives = 1;
+  userRequestedStop = false;
+
   recognizer.onstart = () => {
-    voiceActive = true;
+    recognizing = true;
     voiceFab.classList.add('listening');
     beep(700, 0.08, 'sine', 0.06);
-    showToast('LISTENING…', '→ say "analyze BONK" or "balance"');
+    if (!continuous) showToast('LISTENING…', '→ say "system analysis" or "balance"');
   };
   recognizer.onresult = (ev) => {
-    const transcript = ev.results[0][0].transcript;
-    const intent = parseIntent(transcript);
-    const action = applyIntent(intent, transcript);
+    const last = ev.results[ev.results.length - 1];
+    const transcript = last[0].transcript.trim();
+    // In wake-word mode, ignore unless prefixed with "revolt"
+    let toParse = transcript;
+    if (LS.wake) {
+      const stripped = stripWake(transcript);
+      if (stripped === null) {
+        // ambient speech, ignore
+        return;
+      }
+      toParse = stripped;
+    }
+    const intent = parseIntent(toParse);
+    const action = applyIntent(intent, toParse);
     showToast(transcript, action);
-    beep(1200, 0.08, 'sine', 0.06);
+    beep(1200, 0.06, 'sine', 0.05);
   };
   recognizer.onerror = (ev) => {
-    showToast('Voice error: ' + (ev.error || 'unknown'), '→ try again');
+    if (!LS.wake) showToast('Voice error: ' + (ev.error || 'unknown'), '→ try again');
   };
   recognizer.onend = () => {
-    voiceActive = false;
+    recognizing = false;
     voiceFab.classList.remove('listening');
+    // Wake-word mode: auto-restart unless user explicitly stopped
+    if (LS.wake && !userRequestedStop) {
+      setTimeout(() => { if (LS.wake) startRecognizer(true); }, 250);
+    }
   };
   try { recognizer.start(); }
   catch (e) { showToast('Could not start mic: ' + e.message, '→ check permissions'); }
 }
-voiceFab.addEventListener('click', startVoice);
+
+function stopRecognizer() {
+  userRequestedStop = true;
+  try { recognizer && recognizer.stop(); } catch (e) {}
+}
+
+// Mic FAB → tap-to-talk (always one-shot regardless of wake-word mode)
+voiceFab.addEventListener('click', () => {
+  if (recognizing && !LS.wake) { stopRecognizer(); return; }
+  if (recognizing && LS.wake)  { stopRecognizer(); /* will not auto-restart */ return; }
+  startRecognizer(false);
+});
+
+// Wake word toggle
+vcWake.addEventListener('click', () => {
+  LS.wake = !LS.wake;
+  syncToggleUI();
+  if (LS.wake) {
+    speak("Always listening. Address me as Revolt.", { priority: 'high' });
+    setTimeout(() => startRecognizer(true), 1200);
+  } else {
+    stopRecognizer();
+    speak("Wake mode disabled.", { priority: 'high' });
+  }
+});
+
+// Auto-alerts toggle
+vcAlerts.addEventListener('click', () => {
+  LS.alerts = !LS.alerts;
+  syncToggleUI();
+  speak(LS.alerts ? "Auto alerts engaged. I'll keep you informed." : "Auto alerts off.", { priority: 'high' });
+  if (LS.alerts && _latest) {
+    // Fire a greeting + brief snapshot on enable
+    setTimeout(() => speak(timeGreeting() + ' ' + composeSystemAnalysis().split('. ').slice(0, 3).join('. ') + '.'), 1400);
+  }
+});
+
+// Mute toggle
+vcMute.addEventListener('click', () => {
+  LS.mute = !LS.mute;
+  syncToggleUI();
+  if (!LS.mute) speak("Voice restored, sir.");
+});
+
+/* ────────────────────────────────────────────────────────────
+   PROACTIVE ANNOUNCEMENTS — watch render() output for changes
+   ──────────────────────────────────────────────────────────── */
+const _watch = {
+  regime: null,
+  scanner: null,
+  tg: null,
+  claudeOverBudget: false,
+  agentStates: {},
+  announcedTrades: new Set(),
+  initialized: false,
+  lastSpoke: {},  // intent_key → ts (debounce)
+};
+
+function shouldSpeak(key, debounceMs = 60000) {
+  const now = Date.now();
+  if (_watch.lastSpoke[key] && (now - _watch.lastSpoke[key]) < debounceMs) return false;
+  _watch.lastSpoke[key] = now;
+  return true;
+}
+
+function announce(text, key = null, debounceMs = 60000) {
+  if (!LS.alerts) return;
+  if (key && !shouldSpeak(key, debounceMs)) return;
+  speak(text);
+}
+
+function checkAnnouncements(d) {
+  if (!LS.alerts) {
+    // Still update watch state so we don't re-announce stale events on enable
+    _watch.regime  = d.system.regime;
+    _watch.scanner = d.system.scanner_on;
+    _watch.tg      = d.system.tg_scraper_on;
+    _watch.agentStates = Object.fromEntries(d.agents.map(a => [a.key, a.state]));
+    _watch.initialized = true;
+    for (const t of d.trades) if (!t.open) _watch.announcedTrades.add(t.id);
+    return;
+  }
+
+  // Big trade closes
+  for (const t of d.trades) {
+    if (t.open) continue;
+    if (_watch.announcedTrades.has(t.id)) continue;
+    _watch.announcedTrades.add(t.id);
+    if (!_watch.initialized) continue; // skip backfill on first load
+    const pct = Math.abs(t.pnl_pct || 0);
+    if (pct >= 100) {
+      announce(t.win
+        ? `Sir, ${t.token} closed up ${Math.round(pct)} percent. Strong winner.`
+        : `Heads up sir, ${t.token} closed down ${Math.round(pct)} percent. Significant loss.`,
+        'trade_' + t.id, 0);
+    } else if (pct >= 50) {
+      announce(t.win
+        ? `${t.token} closed up ${Math.round(pct)} percent.`
+        : `${t.token} closed down ${Math.round(pct)} percent.`,
+        'trade_' + t.id, 0);
+    }
+  }
+
+  // Regime change
+  if (_watch.initialized && _watch.regime !== d.system.regime) {
+    const r = d.system.regime;
+    if (r === 'COLD')        announce("Market regime shifted to COLD. Suggest reducing risk, sir.", 'regime_cold', 600000);
+    else if (r === 'HOT')    announce("Market regime now HOT. Opportunities incoming.",             'regime_hot',  600000);
+    else                     announce("Market regime returned to NEUTRAL.",                         'regime_neu',  600000);
+  }
+  _watch.regime = d.system.regime;
+
+  // Scanner / 4AM feed status
+  if (_watch.initialized && _watch.scanner !== d.system.scanner_on) {
+    announce(d.system.scanner_on ? "Scanner is online." : "Sir, the scanner has been disabled.", 'scanner', 300000);
+  }
+  _watch.scanner = d.system.scanner_on;
+
+  if (_watch.initialized && _watch.tg !== d.system.tg_scraper_on) {
+    announce(d.system.tg_scraper_on ? "Four AM feed online." : "Sir, the four AM feed has been disabled.", 'tg', 300000);
+  }
+  _watch.tg = d.system.tg_scraper_on;
+
+  // Claude spend
+  const over = d.system.claude_budget > 0 && d.system.claude_spend >= d.system.claude_budget * 0.8;
+  if (over && !_watch.claudeOverBudget) {
+    announce(`Sir, Claude spend has reached ${Math.round(d.system.claude_spend / d.system.claude_budget * 100)} percent of today's budget.`,
+             'claude_budget', 1800000);
+  }
+  _watch.claudeOverBudget = over;
+
+  // Agent state transitions
+  for (const a of d.agents) {
+    const prev = _watch.agentStates[a.key];
+    if (prev && prev !== a.state && _watch.initialized) {
+      if (a.state === 'ERR')   announce(`${a.name} agent is offline.`, 'agent_' + a.key, 300000);
+      else if (a.state === 'WARN') announce(`${a.name} agent reporting delay.`, 'agent_' + a.key, 300000);
+      else if (a.state === 'ONLINE' && (prev === 'ERR' || prev === 'WARN')) announce(`${a.name} agent recovered.`, 'agent_' + a.key, 300000);
+    }
+    _watch.agentStates[a.key] = a.state;
+  }
+
+  _watch.initialized = true;
+}
+
+// Hook into render() — keep _latest fresh + run announcements
+const _renderOrig = render;
+render = function(data) {
+  _latest = data;
+  _renderOrig(data);
+  try { checkAnnouncements(data); } catch (e) { console.warn('announce error', e); }
+};
+
+// Manual glitch trigger for testing: press G
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'g' || e.key === 'G') triggerGlitch('+250%', 'TEST', true);
+});
+
+// First-load greeting on user interaction (browsers block audio before gesture)
+let _greeted = false;
+function maybeGreet() {
+  if (_greeted || !LS.alerts) return;
+  _greeted = true;
+  setTimeout(() => speak(timeGreeting() + " All systems online."), 600);
+}
+window.addEventListener('pointerdown', maybeGreet, { once: true });
+window.addEventListener('keydown',    maybeGreet, { once: true });
 
 /* ────────────────────────────────────────────────────────────
    MATRIX RAIN
