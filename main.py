@@ -11,6 +11,7 @@ Startup sequence:
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher
@@ -210,6 +211,13 @@ async def main() -> None:
     from bot.agents.claude_cold import claude_cold_loop
     asyncio.create_task(claude_cold_loop())
     logger.info("Claude cold path: queued for startup")
+
+    # Dashboard web server — serves /api/dashboard + static cyberpunk UI.
+    # Skipped only if DISABLE_WEB=1 (e.g. local-only bot mode).
+    if os.getenv("DISABLE_WEB", "0") != "1":
+        from bot.web import run_server as _run_web
+        asyncio.create_task(_run_web())
+        logger.info("Dashboard web server: queued for startup")
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     # Expose bot reference so background tasks (scanner, tg_scraper,

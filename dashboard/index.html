@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>REVOLT // TRADING AGENT HUB</title>
+
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800;900&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+<style>
+  :root {
+    --bg-0:        #03060c;
+    --bg-1:        #060b18;
+    --bg-2:        #0a1226;
+    --cyan:        #00f0ff;
+    --cyan-soft:   rgba(0, 240, 255, 0.6);
+    --magenta:     #ff2bd6;
+    --magenta-soft:rgba(255, 43, 214, 0.6);
+    --lime:        #b9ff3a;
+    --lime-soft:   rgba(185, 255, 58, 0.7);
+    --amber:       #ffb13a;
+    --red:         #ff2c52;
+    --grid:        rgba(0, 240, 255, 0.07);
+    --line:        rgba(0, 240, 255, 0.18);
+    --glass:       rgba(7, 14, 30, 0.55);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0; padding: 0;
+    background: radial-gradient(ellipse at top, #07112a 0%, #03060c 60%, #000 100%);
+    color: #d6e6ff;
+    font-family: 'Rajdhani', 'Segoe UI', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+    cursor: crosshair;
+  }
+
+  ::selection { background: var(--cyan); color: #000; }
+
+  #matrix-rain, #sol-network {
+    position: fixed; inset: 0;
+    width: 100vw; height: 100vh;
+    pointer-events: none;
+    z-index: 0;
+  }
+  #matrix-rain { opacity: 0.18; }
+  #sol-network { opacity: 0.45; }
+
+  .grid-overlay {
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 56px 56px;
+    animation: gridMove 24s linear infinite;
+    pointer-events: none;
+    z-index: 1;
+    mask-image: radial-gradient(ellipse at center, black 30%, transparent 90%);
+  }
+  @keyframes gridMove { from { background-position: 0 0; } to { background-position: 56px 56px; } }
+
+  .scanlines {
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(0,240,255,0.025) 0px,
+      rgba(0,240,255,0.025) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    pointer-events: none;
+    z-index: 2;
+    mix-blend-mode: screen;
+  }
+
+  .cockpit-frame {
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 50;
+  }
+  .corner {
+    position: absolute;
+    width: 88px; height: 88px;
+    border: 2px solid var(--cyan);
+    filter: drop-shadow(0 0 8px var(--cyan-soft));
+    opacity: 0.85;
+  }
+  .corner.tl { top: 14px; left: 14px;       border-right: none; border-bottom: none; }
+  .corner.tr { top: 14px; right: 14px;      border-left: none;  border-bottom: none; }
+  .corner.bl { bottom: 14px; left: 14px;    border-right: none; border-top: none; }
+  .corner.br { bottom: 14px; right: 14px;   border-left: none;  border-top: none; }
+  .corner::after {
+    content: '';
+    position: absolute;
+    width: 6px; height: 6px;
+    background: var(--cyan);
+    box-shadow: 0 0 12px var(--cyan);
+    border-radius: 50%;
+  }
+  .corner.tl::after { top: -3px; left: -3px; }
+  .corner.tr::after { top: -3px; right: -3px; }
+  .corner.bl::after { bottom: -3px; left: -3px; }
+  .corner.br::after { bottom: -3px; right: -3px; }
+
+  .cockpit-frame::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+    box-shadow: 0 0 12px var(--cyan);
+    animation: scanY 9s linear infinite;
+    opacity: 0.55;
+  }
+  @keyframes scanY {
+    0%   { transform: translateY(0); }
+    100% { transform: translateY(100vh); }
+  }
+
+  .font-display { font-family: 'Orbitron', sans-serif; letter-spacing: 0.12em; }
+  .font-mono    { font-family: 'JetBrains Mono', monospace; }
+  .font-ui      { font-family: 'Rajdhani', sans-serif; }
+
+  .panel {
+    position: relative;
+    background: linear-gradient(160deg, rgba(8,16,34,0.85) 0%, rgba(3,6,12,0.85) 100%);
+    border: 1px solid var(--line);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow:
+      inset 0 0 28px rgba(0,240,255,0.04),
+      0 0 22px rgba(0,240,255,0.06);
+    transition: transform 0.35s ease, box-shadow 0.35s ease, border-color 0.35s ease;
+  }
+  .panel::before {
+    content: '';
+    position: absolute;
+    top: -1px; left: 16px;
+    width: 14px; height: 2px;
+    background: var(--cyan);
+    box-shadow: 0 0 8px var(--cyan);
+  }
+  .panel::after {
+    content: '';
+    position: absolute;
+    bottom: -1px; right: 16px;
+    width: 14px; height: 2px;
+    background: var(--magenta);
+    box-shadow: 0 0 8px var(--magenta);
+  }
+  .panel:hover {
+    transform: translateY(-2px);
+    border-color: var(--cyan);
+    box-shadow:
+      inset 0 0 32px rgba(0,240,255,0.08),
+      0 0 38px rgba(0,240,255,0.18);
+  }
+
+  .panel-title {
+    font-family: 'Orbitron', sans-serif;
+    font-weight: 800;
+    font-size: 12px;
+    letter-spacing: 0.32em;
+    color: var(--cyan);
+    text-shadow: 0 0 12px var(--cyan-soft);
+  }
+
+  .glow-cyan    { color: var(--cyan);    text-shadow: 0 0 10px var(--cyan-soft); }
+  .glow-magenta { color: var(--magenta); text-shadow: 0 0 10px var(--magenta-soft); }
+  .glow-lime    { color: var(--lime);    text-shadow: 0 0 10px var(--lime-soft); }
+  .glow-amber   { color: var(--amber);   text-shadow: 0 0 10px rgba(255,177,58,0.6); }
+  .glow-red     { color: var(--red);     text-shadow: 0 0 10px rgba(255,44,82,0.7); }
+
+  .pulse-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--lime);
+    box-shadow: 0 0 10px var(--lime), 0 0 18px var(--lime-soft);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  .pulse-dot.warn { background: var(--amber); box-shadow: 0 0 10px var(--amber), 0 0 18px rgba(255,177,58,0.6); }
+  .pulse-dot.err  { background: var(--red);   box-shadow: 0 0 10px var(--red),   0 0 18px rgba(255,44,82,0.6); animation-duration: 0.8s; }
+  @keyframes pulse {
+    0%,100% { transform: scale(1);   opacity: 1; }
+    50%     { transform: scale(1.6); opacity: 0.5; }
+  }
+
+  .agent-card {
+    position: relative;
+    user-select: none;
+    cursor: grab;
+    width: 100%;
+    aspect-ratio: 1.05 / 1;
+    padding: 14px 12px 12px;
+    background:
+      radial-gradient(circle at 30% 20%, rgba(0,240,255,0.10), transparent 60%),
+      linear-gradient(160deg, rgba(10,18,38,0.85), rgba(3,6,12,0.85));
+    border: 1px solid var(--line);
+    transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+    overflow: hidden;
+  }
+  .agent-card.dragging {
+    cursor: grabbing;
+    transform: scale(1.05) rotate(-1deg);
+    z-index: 30;
+    border-color: var(--cyan);
+    box-shadow:
+      0 0 0 1px var(--cyan),
+      0 0 40px var(--cyan-soft),
+      0 20px 60px rgba(0,0,0,0.6);
+  }
+  .agent-card::before {
+    content: '';
+    position: absolute;
+    top: 8px; right: 8px;
+    width: 26px; height: 26px;
+    border: 1px solid var(--line);
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(0,240,255,0.18), transparent 70%);
+  }
+  .agent-card:hover {
+    border-color: var(--cyan);
+    box-shadow: 0 0 28px rgba(0,240,255,0.25);
+  }
+  .agent-card .ring {
+    position: relative;
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    margin: 4px auto 8px;
+  }
+  .agent-card .ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .agent-card .ring circle.bg {
+    fill: none; stroke: rgba(0,240,255,0.12); stroke-width: 3;
+  }
+  .agent-card .ring circle.fg {
+    fill: none; stroke: var(--cyan); stroke-width: 3;
+    stroke-linecap: round;
+    filter: drop-shadow(0 0 6px var(--cyan-soft));
+    animation: ringSpin 4s linear infinite;
+  }
+  .agent-card[data-state="WARN"] .ring circle.fg { stroke: var(--amber); filter: drop-shadow(0 0 6px rgba(255,177,58,0.6)); }
+  .agent-card[data-state="ERR"]  .ring circle.fg { stroke: var(--red);   filter: drop-shadow(0 0 6px rgba(255,44,82,0.7)); }
+  @keyframes ringSpin {
+    0%   { stroke-dasharray: 30 200; stroke-dashoffset: 0; }
+    100% { stroke-dasharray: 30 200; stroke-dashoffset: -230; }
+  }
+  .agent-card .glyph {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Orbitron', sans-serif;
+    font-weight: 900;
+    font-size: 16px;
+    color: var(--cyan);
+    text-shadow: 0 0 10px var(--cyan-soft);
+  }
+  .agent-card[data-state="WARN"] .glyph { color: var(--amber); text-shadow: 0 0 10px rgba(255,177,58,0.6); }
+  .agent-card[data-state="ERR"]  .glyph { color: var(--red);   text-shadow: 0 0 10px rgba(255,44,82,0.7); }
+  .agent-card .name {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-align: center;
+    color: #cfe5ff;
+  }
+  .agent-card .meta {
+    margin-top: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9.5px;
+    text-align: center;
+    color: rgba(214,230,255,0.55);
+  }
+  .agent-card .status {
+    position: absolute;
+    bottom: 8px; left: 0; right: 0;
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    color: var(--lime);
+  }
+  .agent-card[data-state="WARN"] .status { color: var(--amber); }
+  .agent-card[data-state="ERR"]  .status { color: var(--red); }
+
+  .digit {
+    font-family: 'Orbitron', sans-serif;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .glitch-x {
+    position: relative;
+    display: inline-block;
+    color: var(--red);
+    text-shadow: 0 0 8px var(--red);
+    animation: glitch 2.4s steps(2, end) infinite;
+  }
+  .glitch-x::before, .glitch-x::after {
+    content: '✕';
+    position: absolute;
+    top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  .glitch-x::before { color: var(--cyan);    transform: translate(1px, 0);  mix-blend-mode: screen; opacity: 0.75; animation: glitch1 2.4s infinite steps(2); }
+  .glitch-x::after  { color: var(--magenta); transform: translate(-1px, 0); mix-blend-mode: screen; opacity: 0.75; animation: glitch2 2.4s infinite steps(2); }
+  @keyframes glitch  { 0%,90%,100% { transform: translate(0); } 92% { transform: translate(-1px,1px); } 94% { transform: translate(2px,-1px); } }
+  @keyframes glitch1 { 0%,88%,100% { transform: translate(1px,0); } 90% { transform: translate(3px,-2px); } 92% { transform: translate(-2px,1px); } }
+  @keyframes glitch2 { 0%,88%,100% { transform: translate(-1px,0); } 90% { transform: translate(-3px,2px); } 92% { transform: translate(2px,-1px); } }
+
+  .trade-row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 18px 1.1fr 0.8fr 0.6fr 0.7fr 0.8fr;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 12px;
+    border-left: 2px solid transparent;
+    border-top: 1px solid rgba(0,240,255,0.05);
+    transition: background 0.2s, border-color 0.2s, transform 0.2s;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+  }
+  .trade-row:hover {
+    background: rgba(0,240,255,0.05);
+    border-left-color: var(--cyan);
+    transform: translateX(2px);
+  }
+  .trade-row.loss:hover { border-left-color: var(--red); }
+  .trade-row.win:hover  { border-left-color: var(--lime); }
+  .trade-row.open       { background: rgba(0,240,255,0.04); }
+
+  .gauge {
+    position: relative;
+    width: 100%; aspect-ratio: 1/1;
+  }
+  .gauge svg { transform: rotate(-90deg); width: 100%; height: 100%; }
+  .gauge .track { fill: none; stroke: rgba(0,240,255,0.10); stroke-width: 8; }
+  .gauge .fill  { fill: none; stroke-width: 8; stroke-linecap: round; transition: stroke-dashoffset 1.4s cubic-bezier(.2,.9,.2,1); }
+  .gauge .center {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .gauge .center .val { font-family: 'Orbitron', sans-serif; font-weight: 800; font-size: 22px; }
+  .gauge .center .lbl { font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.2em; opacity: 0.7; margin-top: 2px; }
+
+  .wave {
+    height: 60px;
+    width: 100%;
+    background:
+      repeating-linear-gradient(90deg, rgba(0,240,255,0.08) 0 1px, transparent 1px 4px);
+    position: relative;
+    overflow: hidden;
+    border: 1px solid rgba(0,240,255,0.12);
+  }
+  .wave::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 60' preserveAspectRatio='none'><path d='M0 30 Q 10 5, 20 30 T 40 30 T 60 30 T 80 30 T 100 30 T 120 30 T 140 30 T 160 30 T 180 30 T 200 30' stroke='%2300f0ff' stroke-width='1.5' fill='none' filter='drop-shadow(0 0 4px %2300f0ff)'/></svg>") repeat-x;
+    background-size: 200px 100%;
+    animation: waveMove 3s linear infinite;
+  }
+  @keyframes waveMove { from { background-position-x: 0; } to { background-position-x: -200px; } }
+
+  .stream-line {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 4px 8px;
+    border-left: 2px solid var(--cyan);
+    opacity: 0;
+    animation: streamIn 0.4s forwards;
+  }
+  @keyframes streamIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 0.85; transform: translateX(0); } }
+
+  #sol-3d {
+    width: 96px; height: 96px;
+    filter: drop-shadow(0 0 12px var(--cyan-soft));
+  }
+
+  .bar {
+    width: 100%; height: 6px; background: rgba(0,240,255,0.1);
+    overflow: hidden;
+    border: 1px solid rgba(0,240,255,0.18);
+  }
+  .bar > div {
+    height: 100%;
+    background: linear-gradient(90deg, var(--cyan), var(--magenta));
+    box-shadow: 0 0 10px var(--cyan-soft);
+    transition: width 1.4s cubic-bezier(.2,.9,.2,1);
+    width: 0%;
+  }
+
+  .chip {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    padding: 2px 8px;
+    border: 1px solid var(--line);
+    color: #cfe5ff;
+    background: rgba(0,240,255,0.04);
+    letter-spacing: 0.12em;
+  }
+  .chip.live { color: var(--lime); border-color: var(--lime-soft); box-shadow: 0 0 12px rgba(185,255,58,0.15); }
+  .chip.ai   { color: var(--magenta); border-color: var(--magenta-soft); box-shadow: 0 0 12px rgba(255,43,214,0.15); }
+  .chip.warn { color: var(--amber); border-color: rgba(255,177,58,0.55); box-shadow: 0 0 12px rgba(255,177,58,0.15); }
+
+  @keyframes floaty { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+  .floaty { animation: floaty 6s ease-in-out infinite; }
+
+  /* Connection indicator (bottom right) */
+  #conn {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    z-index: 51;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    letter-spacing: 0.3em;
+    padding: 4px 10px;
+    border: 1px solid var(--line);
+    background: rgba(3,6,12,0.7);
+    backdrop-filter: blur(4px);
+  }
+  #conn.ok  { color: var(--lime);  border-color: var(--lime-soft); }
+  #conn.err { color: var(--red);   border-color: rgba(255,44,82,0.55); }
+</style>
+</head>
+
+<body class="font-ui">
+
+<canvas id="matrix-rain"></canvas>
+<canvas id="sol-network"></canvas>
+<div class="grid-overlay"></div>
+<div class="scanlines"></div>
+
+<div class="cockpit-frame">
+  <div class="corner tl"></div>
+  <div class="corner tr"></div>
+  <div class="corner bl"></div>
+  <div class="corner br"></div>
+</div>
+
+<main class="relative z-10 max-w-[1640px] mx-auto px-8 py-8">
+
+  <header class="flex items-center justify-between mb-8 floaty">
+    <div class="flex items-center gap-6">
+      <div class="relative">
+        <div class="font-display text-3xl font-black glow-cyan">REVOLT</div>
+        <div class="font-mono text-[10px] tracking-[0.4em] text-cyan-300/70 -mt-1">TRADING // AGENT HUB</div>
+      </div>
+      <div class="h-12 w-px bg-gradient-to-b from-transparent via-cyan-400/50 to-transparent"></div>
+      <div class="flex items-center gap-2">
+        <span class="pulse-dot"></span>
+        <span class="font-mono text-xs tracking-widest text-cyan-200">OPERATOR // <span class="glow-cyan" id="h-operator">—</span></span>
+        <span class="chip">/HUB</span>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <div class="text-right leading-tight">
+        <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">TRADE MODE</div>
+        <div class="font-display text-sm font-bold glow-lime" id="h-mode">—</div>
+      </div>
+      <div class="h-10 w-px bg-cyan-400/30"></div>
+      <div class="text-right leading-tight">
+        <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">DECISION</div>
+        <div class="font-display text-sm font-bold glow-magenta" id="h-decision">—</div>
+      </div>
+      <div class="h-10 w-px bg-cyan-400/30"></div>
+      <div class="text-right leading-tight">
+        <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">BALANCE</div>
+        <div class="font-display text-lg font-bold glow-cyan"><span class="digit" id="h-balance">0.0000</span> <span class="text-xs opacity-70">SOL</span></div>
+      </div>
+      <div id="sol-3d" class="ml-2"></div>
+    </div>
+  </header>
+
+  <div class="grid grid-cols-12 gap-6">
+
+    <div class="col-span-12 xl:col-span-9 space-y-6">
+
+      <!-- AGENTS -->
+      <section class="panel p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div class="panel-title">// AGENT GRID</div>
+          <div class="flex gap-2">
+            <span class="chip live" id="agents-online">— ONLINE</span>
+            <span class="chip">DRAG · TO · REARRANGE</span>
+          </div>
+        </div>
+        <div id="agents-grid" class="grid grid-cols-4 md:grid-cols-8 gap-3"></div>
+      </section>
+
+      <!-- PERFORMANCE -->
+      <section class="panel p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div class="panel-title">// PERFORMANCE</div>
+          <span class="chip ai">LIVE</span>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-4">
+          <div>
+            <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">TODAY · PnL</div>
+            <div class="font-display text-2xl"><span class="digit" id="p-today">0.000</span><span class="text-sm opacity-70"> SOL</span></div>
+          </div>
+          <div>
+            <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">ALL · TIME</div>
+            <div class="font-display text-2xl"><span class="digit" id="p-alltime">0.0000</span><span class="text-sm opacity-70"> SOL</span></div>
+          </div>
+          <div>
+            <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">WIN · RATE</div>
+            <div class="font-display text-2xl glow-magenta"><span class="digit" id="p-winrate">0</span><span class="text-sm opacity-70"> %</span></div>
+          </div>
+          <div>
+            <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">OPEN · POS</div>
+            <div class="font-display text-2xl glow-cyan"><span class="digit" id="p-open">0</span><span class="text-sm opacity-70"> /<span id="p-max">8</span></span></div>
+          </div>
+          <div>
+            <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">TRADES · 24H</div>
+            <div class="font-display text-2xl glow-amber"><span class="digit" id="p-trades">0</span></div>
+          </div>
+          <div>
+            <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">EXPECTANCY</div>
+            <div class="font-display text-2xl"><span class="digit" id="p-exp">0.000</span><span class="text-sm opacity-70"> /T</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PAPER TRADING -->
+      <section class="panel p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div class="panel-title">// PAPER · TRADING</div>
+          <span class="chip" id="t-mode-chip">SIM · MODE</span>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
+          <div>
+            <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">BALANCE</div>
+            <div class="font-display text-xl glow-cyan"><span class="digit" id="t-balance">0.0000</span> SOL</div>
+            <div class="bar mt-2"><div id="t-balance-bar"></div></div>
+          </div>
+          <div>
+            <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">STARTING</div>
+            <div class="font-display text-xl"><span id="t-starting">0.0000</span> SOL</div>
+            <div class="bar mt-2"><div id="t-starting-bar"></div></div>
+          </div>
+          <div>
+            <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">DRAWDOWN · MAX</div>
+            <div class="font-display text-xl glow-red"><span class="digit" id="t-dd">0.0</span> %</div>
+            <div class="bar mt-2"><div id="t-dd-bar"></div></div>
+          </div>
+          <div>
+            <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70">PROBE · SIZE</div>
+            <div class="font-display text-xl"><span id="t-probe">0.000</span> SOL</div>
+            <div class="bar mt-2"><div id="t-probe-bar"></div></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+        <section class="panel p-5 lg:col-span-2">
+          <div class="flex items-center justify-between mb-4">
+            <div class="panel-title">// TOP · WALLETS</div>
+            <span class="chip">RANK · 24H</span>
+          </div>
+          <div id="wallet-list" class="space-y-2 font-mono text-xs"></div>
+        </section>
+
+        <section class="panel p-5 lg:col-span-3">
+          <div class="flex items-center justify-between mb-4">
+            <div class="panel-title">// RECENT · TRADES</div>
+            <div class="flex gap-2">
+              <span class="chip live">STREAM</span>
+              <span class="chip">LAST · 12</span>
+            </div>
+          </div>
+          <div class="grid grid-cols-[18px_1.1fr_0.8fr_0.6fr_0.7fr_0.8fr] gap-[10px] px-3 pb-2 font-mono text-[9.5px] tracking-[0.2em] text-cyan-300/60">
+            <div></div><div>TOKEN</div><div>ENTRY · MC</div><div>X</div><div>PnL</div><div>EXIT</div>
+          </div>
+          <div id="trade-list"></div>
+        </section>
+      </div>
+
+    </div>
+
+    <aside class="col-span-12 xl:col-span-3 space-y-6">
+
+      <section class="panel p-5 relative overflow-hidden">
+        <div class="flex items-center justify-between mb-4">
+          <div class="panel-title">// NEURAL · CORE</div>
+          <span class="chip ai" id="n-claude">CLAUDE · 4.7</span>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div class="gauge" id="g-conf" data-color="cyan"    data-label="CONFIDENCE"></div>
+          <div class="gauge" id="g-risk" data-color="red"     data-label="RISK"></div>
+          <div class="gauge" id="g-conv" data-color="magenta" data-label="CONVICTION"></div>
+          <div class="gauge" id="g-liq"  data-color="lime"    data-label="LIQUIDITY"></div>
+        </div>
+        <div class="mt-5">
+          <div class="font-mono text-[10px] tracking-[0.3em] text-cyan-300/70 mb-1">CORE · WAVEFORM</div>
+          <div class="wave"></div>
+        </div>
+      </section>
+
+      <section class="panel p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div class="panel-title">// DECISION · STREAM</div>
+          <span class="pulse-dot"></span>
+        </div>
+        <div id="stream" class="space-y-1 max-h-[260px] overflow-hidden"></div>
+      </section>
+
+      <section class="panel p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div class="panel-title">// SYSTEM</div>
+          <span class="chip live" id="s-mode-chip">NOMINAL</span>
+        </div>
+        <div class="space-y-3 font-mono text-xs">
+          <div class="flex justify-between"><span class="opacity-60">CLAUDE · SPEND</span><span>$ <span class="glow-magenta" id="s-spend">0.00</span> / <span id="s-budget">5.00</span></span></div>
+          <div class="flex justify-between"><span class="opacity-60">CLAUDE · CALLS</span><span class="glow-cyan" id="s-calls">0</span></div>
+          <div class="flex justify-between"><span class="opacity-60">REGIME</span><span class="glow-amber" id="s-regime">NEUTRAL</span></div>
+          <div class="flex justify-between"><span class="opacity-60">SCANNER</span><span id="s-scanner">—</span></div>
+          <div class="flex justify-between"><span class="opacity-60">4AM · FEED</span><span id="s-tg">—</span></div>
+          <div class="flex justify-between"><span class="opacity-60">UPTIME</span><span class="glow-cyan" id="s-uptime">—</span></div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <footer class="mt-10 flex items-center justify-between font-mono text-[10px] tracking-[0.3em] text-cyan-300/60">
+    <div>REVOLT // <span id="f-mode">PAPER · MODE</span> // BUILD · 2026.06.02</div>
+    <div class="flex items-center gap-2">
+      <span class="pulse-dot"></span><span>CORE LINK · STABLE</span>
+    </div>
+    <div>SECTOR · SOL · MAINNET</div>
+  </footer>
+
+</main>
+
+<div id="conn" class="ok">SYNC · INIT</div>
+
+<script>
+/* ────────────────────────────────────────────────────────────
+   Telegram WebApp init (no-ops outside Telegram)
+   ──────────────────────────────────────────────────────────── */
+const TG = window.Telegram && window.Telegram.WebApp;
+if (TG) {
+  try {
+    TG.ready();
+    TG.expand();
+    TG.setHeaderColor && TG.setHeaderColor('#03060c');
+    TG.setBackgroundColor && TG.setBackgroundColor('#03060c');
+  } catch (e) { /* ignore */ }
+}
+const TG_INITDATA = TG ? (TG.initData || '') : '';
+
+/* ────────────────────────────────────────────────────────────
+   STATE — last counter values for smooth animation
+   ──────────────────────────────────────────────────────────── */
+const _last = {};
+
+function animateNumber(el, end, decimals = 0, prefix = '', dur = 1100) {
+  if (!el) return;
+  const key = el.id || el.dataset.key || Math.random();
+  const start = _last[key] !== undefined ? _last[key] : (end * 0.6);
+  _last[key] = end;
+  const t0 = performance.now();
+  function step(t) {
+    const p = Math.min(1, (t - t0) / dur);
+    const eased = 1 - Math.pow(1 - p, 3);
+    const v = start + (end - start) * eased;
+    el.textContent = prefix + v.toFixed(decimals);
+    if (p < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+function setColorByPnL(el, v) {
+  if (!el) return;
+  el.classList.remove('glow-lime', 'glow-red', 'glow-cyan');
+  el.classList.add(v > 0 ? 'glow-lime' : v < 0 ? 'glow-red' : 'glow-cyan');
+}
+
+/* ────────────────────────────────────────────────────────────
+   GAUGE renderer
+   ──────────────────────────────────────────────────────────── */
+function renderGauge(id, value, fallbackColor, label) {
+  const g = document.getElementById(id);
+  if (!g) return;
+  const color = g.dataset.color || fallbackColor || 'cyan';
+  const lab = g.dataset.label || label || '';
+  const C = { cyan: '#00f0ff', magenta: '#ff2bd6', lime: '#b9ff3a', red: '#ff2c52', amber: '#ffb13a' }[color] || '#00f0ff';
+  const R = 44, CIRC = 2 * Math.PI * R;
+  if (!g.querySelector('svg')) {
+    g.innerHTML = `
+      <svg viewBox="0 0 100 100">
+        <circle class="track" cx="50" cy="50" r="${R}"/>
+        <circle class="fill"  cx="50" cy="50" r="${R}"
+          stroke="${C}"
+          stroke-dasharray="${CIRC}"
+          stroke-dashoffset="${CIRC}"
+          style="filter: drop-shadow(0 0 6px ${C});"
+        />
+      </svg>
+      <div class="center">
+        <div class="val" style="color:${C}; text-shadow: 0 0 12px ${C}"><span class="num">0</span><span class="text-xs opacity-70">%</span></div>
+        <div class="lbl" style="color:${C}">${lab}</div>
+      </div>`;
+  }
+  const num = g.querySelector('.num');
+  const fill = g.querySelector('.fill');
+  animateNumber(num, value, 0);
+  requestAnimationFrame(() => {
+    fill.style.strokeDashoffset = CIRC - (value / 100) * CIRC;
+  });
+}
+
+/* ────────────────────────────────────────────────────────────
+   AGENT CARDS — render from API data
+   ──────────────────────────────────────────────────────────── */
+function renderAgents(agents) {
+  const grid = document.getElementById('agents-grid');
+  const seenKeys = new Set(Array.from(grid.children).map((c) => c.dataset.key));
+  const newKeys = new Set(agents.map((a) => a.key));
+
+  // Build a fresh grid if shape changes (e.g. first render or schema drift)
+  if (seenKeys.size !== newKeys.size || ![...seenKeys].every((k) => newKeys.has(k))) {
+    grid.innerHTML = '';
+    agents.forEach((a) => {
+      const c = document.createElement('div');
+      c.className = 'agent-card';
+      c.dataset.key = a.key;
+      c.dataset.state = a.state;
+      c.innerHTML = `
+        <div class="ring">
+          <svg viewBox="0 0 60 60">
+            <circle class="bg" cx="30" cy="30" r="26"/>
+            <circle class="fg" cx="30" cy="30" r="26"/>
+          </svg>
+          <div class="glyph">${a.key}</div>
+        </div>
+        <div class="name">${a.name}</div>
+        <div class="meta">${a.meta}</div>
+        <div class="status">
+          <span class="pulse-dot ${a.state === 'WARN' ? 'warn' : a.state === 'ERR' ? 'err' : ''}"></span>
+          ${a.state}
+        </div>`;
+      c.addEventListener('mouseenter', () => beep(880, 0.04, 'square', 0.04));
+      grid.appendChild(c);
+    });
+  } else {
+    // In-place update preserves drag order
+    agents.forEach((a) => {
+      const c = grid.querySelector(`.agent-card[data-key="${a.key}"]`);
+      if (!c) return;
+      c.dataset.state = a.state;
+      c.querySelector('.meta').textContent = a.meta;
+      const dot = c.querySelector('.pulse-dot');
+      dot.className = `pulse-dot ${a.state === 'WARN' ? 'warn' : a.state === 'ERR' ? 'err' : ''}`;
+      c.querySelector('.status').lastChild.nodeValue = ' ' + a.state;
+    });
+  }
+  const online = agents.filter((a) => a.state === 'ONLINE').length;
+  document.getElementById('agents-online').textContent = `${online}/${agents.length} ONLINE`;
+}
+
+/* ────────────────────────────────────────────────────────────
+   WALLETS
+   ──────────────────────────────────────────────────────────── */
+function renderWallets(wallets) {
+  const wl = document.getElementById('wallet-list');
+  wl.innerHTML = '';
+  if (!wallets.length) {
+    wl.innerHTML = `<div class="opacity-50 px-2 py-3">No wallet data yet.</div>`;
+    return;
+  }
+  wallets.forEach((w) => {
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between px-2 py-1.5 border-l-2 border-transparent hover:border-cyan-400 hover:bg-cyan-400/5 transition';
+    row.innerHTML = `
+      <div class="flex items-center gap-3">
+        <span class="glow-cyan font-display text-sm w-5">${String(w.rank).padStart(2, '0')}</span>
+        <span class="opacity-80">${w.addr}</span>
+      </div>
+      <div class="flex items-center gap-4">
+        <span class="opacity-60">${w.wl}</span>
+        <span class="glow-lime digit">${w.score.toFixed(1)}</span>
+      </div>`;
+    wl.appendChild(row);
+  });
+}
+
+/* ────────────────────────────────────────────────────────────
+   TRADES
+   ──────────────────────────────────────────────────────────── */
+function renderTrades(trades) {
+  const tl = document.getElementById('trade-list');
+  tl.innerHTML = '';
+  if (!trades.length) {
+    tl.innerHTML = `<div class="opacity-50 px-3 py-4 font-mono text-xs">No trades yet.</div>`;
+    return;
+  }
+  trades.forEach((t) => {
+    const r = document.createElement('div');
+    const cls = t.open ? 'open' : (t.win ? 'win' : 'loss');
+    r.className = `trade-row ${cls}`;
+    const icon = t.open
+      ? `<span class="glow-cyan">◇</span>`
+      : (t.win ? `<span class="glow-lime">✓</span>` : `<span class="glitch-x">✕</span>`);
+    const pnlCls = t.open ? 'glow-cyan' : (t.win ? 'glow-lime' : 'glow-red');
+    const reasonCls = (t.reason === 'time_stop' || t.reason === 'dead_token' || t.reason === 'expired')
+        ? 'glow-amber' : (t.open ? 'glow-cyan' : (t.win ? 'glow-cyan' : 'glow-red'));
+    r.innerHTML = `
+      ${icon}
+      <div class="font-display tracking-widest">${escapeHtml(t.token)}</div>
+      <div class="opacity-80">${escapeHtml(t.mc)}</div>
+      <div class="${t.win ? 'glow-cyan' : t.open ? 'glow-cyan' : 'glow-amber'}">${escapeHtml(t.x)}</div>
+      <div class="${pnlCls} digit">${escapeHtml(t.pnl)}</div>
+      <div class="${reasonCls} text-[10px] tracking-[0.18em] uppercase">${escapeHtml(t.reason)}</div>`;
+    r.addEventListener('mouseenter', () => beep(t.win ? 1200 : t.open ? 800 : 220, 0.03, t.win ? 'sine' : 'sawtooth', 0.04));
+    tl.appendChild(r);
+  });
+}
+
+/* ────────────────────────────────────────────────────────────
+   STREAM
+   ──────────────────────────────────────────────────────────── */
+let _lastStreamTs = '';
+function renderStream(stream) {
+  const box = document.getElementById('stream');
+  // Identify NEW lines since last render
+  const newest = stream[0]?.ts || '';
+  if (newest && newest === _lastStreamTs) return;
+  _lastStreamTs = newest;
+
+  // re-render top 8
+  box.innerHTML = '';
+  stream.slice(0, 8).forEach((s) => {
+    const el = document.createElement('div');
+    el.className = 'stream-line';
+    el.textContent = s.text;
+    if (s.kind === 'claude' && s.ok) { el.style.color = '#b9ff3a'; el.style.borderLeftColor = '#b9ff3a'; }
+    else if (s.kind === 'claude')    { el.style.color = '#ff2bd6'; el.style.borderLeftColor = '#ff2bd6'; }
+    else if (s.ok)                   { el.style.color = '#00f0ff'; el.style.borderLeftColor = '#00f0ff'; }
+    else                             { el.style.color = '#ffb13a'; el.style.borderLeftColor = '#ffb13a'; }
+    box.appendChild(el);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ────────────────────────────────────────────────────────────
+   MAIN RENDER
+   ──────────────────────────────────────────────────────────── */
+function render(data) {
+  // Header
+  document.getElementById('h-operator').textContent = data.header.operator;
+  document.getElementById('h-mode').textContent = data.header.trade_mode || 'OFF';
+  document.getElementById('h-decision').textContent = data.header.decision;
+  animateNumber(document.getElementById('h-balance'), data.header.balance, 4);
+
+  // Performance
+  const today = data.performance.today_pnl;
+  const allt  = data.performance.alltime_pnl;
+  const todayEl  = document.getElementById('p-today');
+  const alltEl   = document.getElementById('p-alltime');
+  setColorByPnL(todayEl, today);
+  setColorByPnL(alltEl,  allt);
+  animateNumber(todayEl, today, 3, today >= 0 ? '+' : '');
+  animateNumber(alltEl,  allt,  4, allt  >= 0 ? '+' : '');
+  animateNumber(document.getElementById('p-winrate'), data.performance.win_rate, 0);
+  animateNumber(document.getElementById('p-open'),    data.performance.open_pos, 0);
+  document.getElementById('p-max').textContent = data.performance.max_open;
+  animateNumber(document.getElementById('p-trades'),  data.performance.trades_24h, 0);
+  const expEl = document.getElementById('p-exp');
+  setColorByPnL(expEl, data.performance.expectancy);
+  animateNumber(expEl, data.performance.expectancy, 3, data.performance.expectancy >= 0 ? '+' : '');
+
+  // Paper trading
+  animateNumber(document.getElementById('t-balance'), data.paper.balance, 4);
+  document.getElementById('t-starting').textContent = data.paper.starting.toFixed(4);
+  animateNumber(document.getElementById('t-dd'), data.paper.drawdown_pct, 1);
+  document.getElementById('t-probe').textContent = data.paper.probe_size.toFixed(3);
+  document.getElementById('t-balance-bar').style.width = data.paper.balance_pct + '%';
+  document.getElementById('t-starting-bar').style.width = '100%';
+  document.getElementById('t-dd-bar').style.width = Math.min(100, data.paper.drawdown_pct * 3) + '%';
+  document.getElementById('t-probe-bar').style.width = Math.min(100, (data.paper.probe_size / Math.max(0.01, data.paper.max_probe)) * 100) + '%';
+  document.getElementById('t-mode-chip').textContent = (data.system.trade_mode || 'off').toUpperCase() + ' · MODE';
+
+  // Agents
+  renderAgents(data.agents);
+
+  // Wallets + trades
+  renderWallets(data.wallets);
+  renderTrades(data.trades);
+
+  // Neural core gauges
+  renderGauge('g-conf', data.neural.confidence);
+  renderGauge('g-risk', data.neural.risk);
+  renderGauge('g-conv', data.neural.conviction);
+  renderGauge('g-liq',  data.neural.liquidity);
+
+  // Stream
+  renderStream(data.stream);
+
+  // System
+  document.getElementById('s-spend').textContent = data.system.claude_spend.toFixed(2);
+  document.getElementById('s-budget').textContent = data.system.claude_budget.toFixed(2);
+  document.getElementById('s-calls').textContent = data.system.claude_calls;
+  document.getElementById('s-regime').textContent = data.system.regime;
+  document.getElementById('s-scanner').textContent = data.system.scanner_on ? 'ONLINE' : 'OFF';
+  document.getElementById('s-scanner').className = data.system.scanner_on ? 'glow-lime' : 'glow-amber';
+  document.getElementById('s-tg').textContent = data.system.tg_scraper_on ? 'ONLINE' : 'OFF';
+  document.getElementById('s-tg').className = data.system.tg_scraper_on ? 'glow-lime' : 'glow-amber';
+  document.getElementById('s-uptime').textContent = data.system.uptime_label;
+  document.getElementById('f-mode').textContent = (data.system.trade_mode || 'off').toUpperCase() + ' · MODE';
+  document.getElementById('s-mode-chip').textContent = data.system.trade_mode === 'off' ? 'OFFLINE' : 'NOMINAL';
+}
+
+/* ────────────────────────────────────────────────────────────
+   FETCH + POLL
+   ──────────────────────────────────────────────────────────── */
+const conn = document.getElementById('conn');
+async function fetchDashboard() {
+  try {
+    const r = await fetch('/api/dashboard', {
+      headers: TG_INITDATA ? { 'X-Telegram-InitData': TG_INITDATA } : {},
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    render(data);
+    conn.className = 'ok';
+    conn.textContent = 'SYNC · LIVE · ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    conn.className = 'err';
+    conn.textContent = 'SYNC · ERROR · ' + (e.message || '?');
+  }
+}
+fetchDashboard();
+setInterval(fetchDashboard, 5000);
+
+/* ────────────────────────────────────────────────────────────
+   DRAG & DROP for agent cards (pointer-based, swap on hover)
+   ──────────────────────────────────────────────────────────── */
+(() => {
+  const container = document.getElementById('agents-grid');
+  let dragEl = null, startX = 0, startY = 0;
+  const cards = () => Array.from(container.children);
+
+  container.addEventListener('pointerdown', (e) => {
+    const card = e.target.closest('.agent-card');
+    if (!card) return;
+    dragEl = card;
+    startX = e.clientX; startY = e.clientY;
+    card.classList.add('dragging');
+    card.setPointerCapture(e.pointerId);
+    beep(660, 0.05, 'square', 0.05);
+  });
+
+  container.addEventListener('pointermove', (e) => {
+    if (!dragEl) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    dragEl.style.transform = `translate(${dx}px, ${dy}px) scale(1.04) rotate(-1deg)`;
+
+    dragEl.style.pointerEvents = 'none';
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    dragEl.style.pointerEvents = '';
+    const target = under && under.closest('.agent-card');
+    if (target && target !== dragEl) {
+      const all = cards();
+      const di = all.indexOf(dragEl);
+      const ti = all.indexOf(target);
+      if (di < ti) container.insertBefore(dragEl, target.nextSibling);
+      else container.insertBefore(dragEl, target);
+      startX = e.clientX; startY = e.clientY;
+      dragEl.style.transform = `translate(0px, 0px) scale(1.04) rotate(-1deg)`;
+      beep(900, 0.03, 'triangle', 0.05);
+    }
+  });
+
+  container.addEventListener('pointerup', () => {
+    if (!dragEl) return;
+    dragEl.classList.remove('dragging');
+    dragEl.style.transform = '';
+    dragEl = null;
+    beep(1100, 0.05, 'sine', 0.05);
+  });
+})();
+
+/* ────────────────────────────────────────────────────────────
+   WEB AUDIO
+   ──────────────────────────────────────────────────────────── */
+let _audio;
+function audio() {
+  if (!_audio) {
+    try { _audio = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) { _audio = null; }
+  }
+  return _audio;
+}
+function beep(freq = 880, dur = 0.05, type = 'sine', vol = 0.05) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator();
+    const g = a.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.value = 0;
+    o.connect(g); g.connect(a.destination);
+    const t = a.currentTime;
+    g.gain.linearRampToValueAtTime(vol, t + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.start(t); o.stop(t + dur + 0.02);
+  } catch (e) {}
+}
+window.addEventListener('pointerdown', () => audio(), { once: true });
+window.addEventListener('pointerdown', () => {
+  beep(110, 1.4, 'sawtooth', 0.012);
+  setTimeout(() => beep(220, 1.0, 'sine', 0.014), 80);
+}, { once: true });
+
+/* ────────────────────────────────────────────────────────────
+   MATRIX RAIN
+   ──────────────────────────────────────────────────────────── */
+(() => {
+  const cv = document.getElementById('matrix-rain');
+  const ctx = cv.getContext('2d');
+  let w, h, cols, ys;
+  const glyphs = '01<>/[]{}=+-#$ABCDEF◆◇◢◣◤◥█▓▒░';
+  function resize() {
+    w = cv.width = window.innerWidth;
+    h = cv.height = window.innerHeight;
+    cols = Math.floor(w / 18);
+    ys = new Array(cols).fill(0).map(() => Math.random() * -h);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+  function tick() {
+    ctx.fillStyle = 'rgba(3,6,12,0.16)';
+    ctx.fillRect(0, 0, w, h);
+    ctx.font = '14px "JetBrains Mono", monospace';
+    for (let i = 0; i < cols; i++) {
+      const x = i * 18;
+      const edgeFade = Math.max(0, 1 - x / (w * 0.55));
+      if (edgeFade < 0.05) continue;
+      const ch = glyphs[(Math.random() * glyphs.length) | 0];
+      ctx.fillStyle = `rgba(0, 240, 255, ${0.18 + 0.25 * Math.random() * edgeFade})`;
+      ctx.fillText(ch, x, ys[i]);
+      ys[i] += 16;
+      if (ys[i] > h && Math.random() > 0.975) ys[i] = -20;
+    }
+    requestAnimationFrame(tick);
+  }
+  tick();
+})();
+
+/* ────────────────────────────────────────────────────────────
+   SOLANA NETWORK NODES
+   ──────────────────────────────────────────────────────────── */
+(() => {
+  const cv = document.getElementById('sol-network');
+  const ctx = cv.getContext('2d');
+  let w, h, nodes = [];
+  const N = 70;
+  function resize() {
+    w = cv.width = window.innerWidth;
+    h = cv.height = window.innerHeight;
+    nodes = new Array(N).fill(0).map(() => ({
+      x: Math.random() * w,
+      y: Math.random() * h,
+      vx: (Math.random() - 0.5) * 0.25,
+      vy: (Math.random() - 0.5) * 0.25,
+      r: 1 + Math.random() * 2.5,
+      pulse: Math.random() * Math.PI * 2,
+    }));
+  }
+  resize();
+  window.addEventListener('resize', resize);
+  function tick() {
+    ctx.clearRect(0, 0, w, h);
+    for (let i = 0; i < N; i++) {
+      const a = nodes[i];
+      a.x += a.vx; a.y += a.vy;
+      if (a.x < 0 || a.x > w) a.vx *= -1;
+      if (a.y < 0 || a.y > h) a.vy *= -1;
+      a.pulse += 0.04;
+      for (let j = i + 1; j < N; j++) {
+        const b = nodes[j];
+        const dx = a.x - b.x, dy = a.y - b.y;
+        const d2 = dx*dx + dy*dy;
+        if (d2 < 160 * 160) {
+          const alpha = (1 - d2 / (160 * 160)) * 0.35;
+          const mag = (i + j) % 7 === 0;
+          ctx.strokeStyle = mag ? `rgba(255, 43, 214, ${alpha})` : `rgba(0, 240, 255, ${alpha})`;
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+      }
+    }
+    for (const n of nodes) {
+      const pulse = 0.5 + 0.5 * Math.sin(n.pulse);
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r + pulse * 1.2, 0, Math.PI * 2);
+      const grd = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, 14);
+      grd.addColorStop(0, `rgba(0, 240, 255, ${0.7 * pulse + 0.3})`);
+      grd.addColorStop(1, 'rgba(0, 240, 255, 0)');
+      ctx.fillStyle = grd;
+      ctx.fill();
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+
+/* ────────────────────────────────────────────────────────────
+   THREE.js — rotating "SOL" octahedron
+   ──────────────────────────────────────────────────────────── */
+(() => {
+  const mount = document.getElementById('sol-3d');
+  if (!mount || !window.THREE) return;
+  const W = 96, H = 96;
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(45, W/H, 0.1, 100);
+  cam.position.z = 3.4;
+  const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+  renderer.setSize(W, H);
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  mount.appendChild(renderer.domElement);
+
+  const geo = new THREE.OctahedronGeometry(1.05, 0);
+  const matFill = new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.08 });
+  const matLine = new THREE.LineBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.95 });
+  const matLine2 = new THREE.LineBasicMaterial({ color: 0xff2bd6, transparent: true, opacity: 0.6 });
+
+  const mesh = new THREE.Mesh(geo, matFill);
+  const edges = new THREE.EdgesGeometry(geo);
+  const wires = new THREE.LineSegments(edges, matLine);
+  const wires2 = new THREE.LineSegments(edges, matLine2);
+  wires2.scale.setScalar(1.18);
+
+  scene.add(mesh); scene.add(wires); scene.add(wires2);
+
+  function tick(t) {
+    const s = t * 0.001;
+    mesh.rotation.x = s * 0.6;
+    mesh.rotation.y = s * 0.9;
+    wires.rotation.copy(mesh.rotation);
+    wires2.rotation.x = -s * 0.4;
+    wires2.rotation.y = -s * 0.7;
+    renderer.render(scene, cam);
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

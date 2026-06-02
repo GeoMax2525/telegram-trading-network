@@ -10,7 +10,7 @@ from aiogram import Router, Bot, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -481,6 +481,15 @@ async def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🗑️ Close All",     callback_data="hub:close_all"),
         InlineKeyboardButton(text="💰 Reset Balance", callback_data="hub:reset_confirm"),
     )
+
+    # Row 6: Mini App dashboard (only if PUBLIC_URL is configured)
+    import os as _os
+    public_url = _os.getenv("PUBLIC_URL", "").rstrip("/")
+    if public_url:
+        builder.row(InlineKeyboardButton(
+            text="🛸 OPEN DASHBOARD",
+            web_app=WebAppInfo(url=public_url + "/"),
+        ))
     return builder.as_markup()
 
 
@@ -1257,6 +1266,33 @@ async def cb_subhub(callback: CallbackQuery):
             show_alert=True,
         )
         return
+
+
+@router.message(Command("dashboard"))
+async def cmd_dashboard(message: Message):
+    """Open the cyberpunk web dashboard as a Telegram Mini App."""
+    import os as _os
+    public_url = _os.getenv("PUBLIC_URL", "").rstrip("/")
+    if not public_url:
+        await message.reply(
+            "⛔ Dashboard URL not configured.\n"
+            "Set <code>PUBLIC_URL</code> env var in Railway (e.g. "
+            "<code>https://your-app.up.railway.app</code>) and then in BotFather "
+            "run <code>/setdomain</code> on this bot pointing to the same host.",
+            parse_mode="HTML",
+        )
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="🛸 OPEN DASHBOARD",
+            web_app=WebAppInfo(url=public_url + "/"),
+        )
+    ]])
+    await message.reply(
+        "<b>REVOLT // TRADING HUB</b>\nTap to open the live dashboard.",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
 
 
 @router.message(Command("hub"))
