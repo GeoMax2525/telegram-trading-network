@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import aiohttp
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -72,6 +75,64 @@ async def index() -> FileResponse:
 @app.get("/healthz")
 async def healthz() -> dict:
     return {"ok": True, "uptime_s": int(time.time() - START_TS)}
+
+
+# ── SOL price (Live Market Pulse) ─────────────────────────────────────────────
+
+_SOL_CACHE: dict = {"price": 0.0, "change_24h": 0.0, "fetched_at": 0.0}
+_SOL_HISTORY: deque[tuple[float, float]] = deque(maxlen=60)  # (ts, price)
+
+
+async def _refresh_sol_price() -> None:
+    """Pull SOL price from CoinGecko (free, ~30 req/min)."""
+    now = time.time()
+    if now - _SOL_CACHE["fetched_at"] < 25:
+        return  # honor cache, stay well under rate limit
+    url = ("https://api.coingecko.com/api/v3/simple/price"
+           "?ids=solana&vs_currencies=usd&include_24hr_change=true")
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as sess:
+            async with sess.get(url) as r:
+                if r.status != 200:
+                    return
+                data = await r.json()
+                sol = data.get("solana") or {}
+                price = float(sol.get("usd") or 0.0)
+                change = float(sol.get("usd_24h_change") or 0.0)
+                if price > 0:
+                    _SOL_CACHE.update({"price": price, "change_24h": change, "fetched_at": now})
+                    _SOL_HISTORY.append((now, price))
+    except Exception as exc:
+        logger.debug("SOL price refresh failed: %s", exc)
+
+
+def _sol_volatility() -> float:
+    """Stdev of last 20 price ticks as a 0..1 'volatility intensity'."""
+    if len(_SOL_HISTORY) < 4:
+        return 0.0
+    pts = [p for _, p in list(_SOL_HISTORY)[-20:]]
+    mean = sum(pts) / len(pts)
+    if mean <= 0:
+        return 0.0
+    var = sum((p - mean) ** 2 for p in pts) / len(pts)
+    stdev_pct = (math.sqrt(var) / mean) * 100  # % of mean
+    # Map: 0% → 0.0,  0.5% → ~1.0
+    return max(0.0, min(1.0, stdev_pct / 0.5))
+
+
+@app.get("/api/sol")
+async def api_sol() -> JSONResponse:
+    await _refresh_sol_price()
+    hist = list(_SOL_HISTORY)
+    base_ts = hist[0][0] if hist else 0
+    points = [{"t": round(t - base_ts, 1), "p": round(p, 4)} for t, p in hist]
+    return JSONResponse({
+        "price":      round(_SOL_CACHE["price"], 4),
+        "change_24h": round(_SOL_CACHE["change_24h"], 2),
+        "volatility": round(_sol_volatility(), 3),
+        "history":    points,
+        "fetched_at": _SOL_CACHE["fetched_at"],
+    })
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
