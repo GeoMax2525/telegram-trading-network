@@ -577,14 +577,33 @@ async def tg_scraper_loop() -> None:
         await client.disconnect()
         return
 
-    # Register event handler for new messages
-    channel_ids = [e.id for e, _ in channel_entities]
-    channel_id_to_name = {e.id: n for e, n in channel_entities}
+    # Register event handler for new messages.
+    #
+    # Pass the entity objects (not raw IDs) so Telethon handles the channel
+    # ID normalization internally. Passing raw entity.id values silently
+    # missed every message because Telegram delivers channel events with
+    # chat_id = -100<id> while entity.id is the unprefixed positive form.
+    #
+    # The id-to-name lookup also accepts both forms so the diagnostic log
+    # always resolves the channel name regardless of which form Telethon
+    # surfaces in event.chat_id on a given build.
+    channel_entity_objs = [e for e, _ in channel_entities]
+    channel_id_to_name: dict[int, str] = {}
+    for e, n in channel_entities:
+        channel_id_to_name[e.id] = n
+        channel_id_to_name[-1_000_000_000_000 - e.id] = n  # -100<id> form
 
-    @client.on(events.NewMessage(chats=channel_ids))
+    @client.on(events.NewMessage(chats=channel_entity_objs))
     async def handler(event):
         chat_id = event.chat_id
-        channel_name = channel_id_to_name.get(chat_id, "unknown")
+        channel_name = channel_id_to_name.get(chat_id, f"unknown(chat_id={chat_id})")
+        # Diagnostic: confirm we're receiving events at all. Drop to DEBUG
+        # once the pipeline is proven stable.
+        text_preview = (event.message.message or event.message.text or "")[:60].replace("\n", " ")
+        logger.info(
+            "TG scraper: event chat_id=%s name=%s text=%r",
+            chat_id, channel_name, text_preview,
+        )
         try:
             await _handle_message(event, channel_name)
         except Exception as exc:
