@@ -1279,17 +1279,18 @@
   #globe-hero {
     position: relative;
     width: 100%;
-    margin: 8px 0 24px;
-    display: flex; flex-direction: column; align-items: center;
+    margin: 4px 0 16px;
+    display: flex; align-items: center; justify-content: center;
     cursor: pointer;
     user-select: none;
     -webkit-tap-highlight-color: transparent;
+    height: 130px;
   }
   .globe-hero-rings {
     position: absolute;
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
-    width: 340px; height: 340px;
+    width: 140px; height: 140px;
     pointer-events: none;
     z-index: 0;
   }
@@ -1298,63 +1299,33 @@
     content: ''; position: absolute;
     border-radius: 50%;
     border: 1px solid rgba(0,217,255,0.18);
-    box-shadow: 0 0 24px rgba(0,217,255,0.10);
+    box-shadow: 0 0 14px rgba(0,217,255,0.08);
   }
   .globe-hero-rings::before {
     inset: 0;
     border-style: dashed;
-    animation: spinAll 28s linear infinite;
+    animation: spinAll 30s linear infinite;
   }
   .globe-hero-rings::after {
-    inset: 30px;
+    inset: 14px;
     border-color: rgba(77,159,255,0.22);
-    animation: spinAll 18s linear infinite reverse;
-  }
-  .globe-hero-pre {
-    position: absolute;
-    top: 8px; left: 50%; transform: translateX(-50%);
-    z-index: 2;
-    font-family: 'Orbitron', sans-serif;
-    font-size: 10px; letter-spacing: 0.32em;
-    color: var(--cyan-pale);
-    opacity: 0.7; text-shadow: 0 0 8px var(--cyan-glow);
-    pointer-events: none;
+    animation: spinAll 22s linear infinite reverse;
   }
   #globe-3d {
-    width: 240px; height: 240px;
+    width: 92px; height: 92px;
     opacity: 0.96;
-    filter: drop-shadow(0 0 22px var(--cyan-glow));
+    filter: drop-shadow(0 0 16px var(--cyan-glow));
     transition: filter 0.25s, transform 0.25s;
     pointer-events: none;
     z-index: 1;
   }
-  #globe-hero:hover #globe-3d { filter: drop-shadow(0 0 30px var(--cyan-primary)); transform: scale(1.03); }
-  .globe-label {
-    margin-top: 8px;
-    font-family: 'Orbitron', sans-serif;
-    font-size: 13px;
-    font-weight: 800;
-    letter-spacing: 0.32em;
-    color: var(--cyan-primary);
-    text-shadow: 0 0 10px var(--cyan-glow);
-    text-align: center;
-    pointer-events: none;
-    z-index: 1;
-  }
-  .globe-hint {
-    margin-top: 4px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 9px; letter-spacing: 0.28em;
-    color: rgba(160,240,255,0.5);
-    pointer-events: none;
-    z-index: 1;
-  }
+  #globe-hero:hover #globe-3d { filter: drop-shadow(0 0 22px var(--cyan-primary)); transform: scale(1.05); }
   /* Corner brackets that snap on hover, locking the centerpiece */
   .globe-hero-frame {
     position: absolute;
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
-    width: 296px; height: 296px;
+    width: 122px; height: 122px;
     pointer-events: none;
     z-index: 1;
     opacity: 0; transition: opacity 0.2s;
@@ -1363,9 +1334,9 @@
   .globe-hero-frame::before, .globe-hero-frame::after,
   .globe-hero-frame > i, .globe-hero-frame > b {
     position: absolute;
-    width: 18px; height: 18px;
+    width: 14px; height: 14px;
     border: 1px solid var(--cyan-primary);
-    box-shadow: 0 0 8px var(--cyan-glow);
+    box-shadow: 0 0 6px var(--cyan-glow);
     content: '';
   }
   .globe-hero-frame::before { top: 0;    left: 0;    border-right: none; border-bottom: none; }
@@ -1373,18 +1344,16 @@
   .globe-hero-frame > i     { bottom: 0; left: 0;    border-right: none; border-top: none; display: block; }
   .globe-hero-frame > b     { bottom: 0; right: 0;   border-left: none;  border-top: none; display: block; }
   @media (max-width: 768px) {
-    #globe-3d { width: 180px; height: 180px; }
-    .globe-hero-rings { width: 260px; height: 260px; }
-    .globe-hero-frame { width: 220px; height: 220px; }
-    .globe-label { font-size: 11px; letter-spacing: 0.22em; }
+    #globe-hero { height: 110px; }
+    #globe-3d { width: 76px; height: 76px; }
+    .globe-hero-rings { width: 120px; height: 120px; }
+    .globe-hero-frame { width: 104px; height: 104px; }
   }
   @media (max-width: 480px) {
-    #globe-3d { width: 150px; height: 150px; }
-    .globe-hero-rings { width: 210px; height: 210px; }
-    .globe-hero-frame { width: 188px; height: 188px; }
-    .globe-hero-pre { font-size: 9px; letter-spacing: 0.22em; top: 4px; }
-    .globe-label { font-size: 10px; }
-    .globe-hint { font-size: 8px; }
+    #globe-hero { height: 96px; }
+    #globe-3d { width: 64px; height: 64px; }
+    .globe-hero-rings { width: 102px; height: 102px; }
+    .globe-hero-frame { width: 90px; height: 90px; }
   }
 
   /* ═══════════════════════ INTERACTIVE GLOBE MODAL ═══════════════════════ */
@@ -1624,11 +1593,8 @@
   <!-- Holographic globe centerpiece -->
   <section id="globe-hero" role="button" aria-label="Open Geo Atlas" tabindex="0">
     <div class="globe-hero-rings"></div>
-    <div class="globe-hero-pre">// GEO · ATLAS · TRADING SESSIONS</div>
     <div class="globe-hero-frame"><i></i><b></b></div>
     <canvas id="globe-3d"></canvas>
-    <div class="globe-label">TAP TO EXPAND</div>
-    <div class="globe-hint">CLAUDE WILL ANALYZE TIMEZONE PERFORMANCE</div>
   </section>
 
   <div class="grid grid-cols-12 gap-6">
@@ -3920,9 +3886,9 @@ window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && globeModal
   if (!mount || !window.THREE) return;
   function globeSize() {
     const w = window.innerWidth;
-    if (w < 480) return 150;
-    if (w < 768) return 180;
-    return 240;
+    if (w < 480) return 64;
+    if (w < 768) return 76;
+    return 92;
   }
   let W = globeSize(), H = W;
   const scene = new THREE.Scene();
