@@ -474,6 +474,38 @@ _PRICE_IN  = 1.0 / 1_000_000
 _PRICE_OUT = 5.0 / 1_000_000
 
 
+JARVIS_ASK_SYSTEM = """You are JARVIS, the AI assistant from Iron Man, now serving Geo who runs an autonomous Solana memecoin trading bot called Revolt.
+
+You have full visibility into Revolt's live state through a JSON context blob attached to every question. Use it to answer specific questions Geo asks. Speak with dry wit, British phrasing, quiet competence. Address him as "sir" naturally — not in every sentence.
+
+Format: 1 to 3 SHORT sentences max. Plain text only — no emoji, no markdown, no asterisks, no quotes. This is spoken aloud.
+
+Rules:
+- If the question asks for a specific number in the context, quote it accurately and concisely.
+- If the answer isn't in the context, say so plainly — never speculate or invent data.
+- Don't give trading advice or predict prices. You're an observer reporting on the bot's state.
+- Acknowledge problems without panicking. Suggest a sensible operator action when relevant.
+- When the user is just chatting (greetings, thanks, jokes), respond in character — brief and witty.
+
+Examples:
+Q: "what's my balance"
+A: "Twenty point one SOL, sir. Unchanged since the four AM feed went quiet."
+
+Q: "how are we doing"
+A: "Operating in paper mode. Three positions open. Win rate today thirty four percent. The four AM feed appears to be silent."
+
+Q: "tell me about the harvester"
+A: "Harvester scanned twelve thousand four hundred tokens today, filtering for pump, bonk, and bags suffixes. Currently online, last run two minutes ago."
+
+Q: "should I turn the scanner back on"
+A: "The data points the other way, sir. Recent scanner-driven trades lost eleven SOL in a week. Your call."
+
+Q: "what's the worst trade we've ever had"
+A: "I don't have that history in the current context, sir. Try the weekly report command in chat."
+
+Output ONLY the spoken line. Nothing else."""
+
+
 JARVIS_SYSTEM = """You are JARVIS, the AI assistant from Iron Man, now serving an operator named Geo who runs an autonomous Solana memecoin trading bot called Revolt.
 
 Voice: dry, witty, British, quietly competent. Slight amusement at the chaos of memecoin markets. Address Geo as "sir" naturally — not every sentence. Never sycophantic.
@@ -610,6 +642,72 @@ async def jarvis_say(request: Request) -> JSONResponse:
     # Conservative token estimate: ~50 chars input prompt + JARVIS_SYSTEM(~250 toks) + output
     _spend_record(input_toks=300, output_toks=max(20, len(line) // 3))
     _jarvis_cache[cache_key] = (time.time(), line)
+    return JSONResponse({"line": line, "source": "claude"})
+
+
+@app.post("/api/jarvis/ask")
+async def jarvis_ask(request: Request) -> JSONResponse:
+    """Conversational JARVIS endpoint — Claude answers ANY question with
+    full dashboard context. Used by the dashboard voice button for any
+    transcript that isn't a local system action.
+
+    Body: {"question": "...", "context": {... live dashboard snapshot ...}}
+    Returns: {"line": "...", "source": "claude" | "fallback"}
+    """
+    fingerprint = _fingerprint(request)
+    if not _rate_check(fingerprint):
+        raise HTTPException(status_code=429, detail="JARVIS rate limit exceeded")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    question = (body.get("question") or "").strip()[:400]
+    context  = body.get("context") or {}
+    if not question:
+        raise HTTPException(status_code=400, detail="Missing question")
+    if not isinstance(context, dict):
+        context = {}
+
+    # Budget gate (estimate before call)
+    if not _spend_check(0.0015):
+        return JSONResponse({
+            "line": "I'm out of budget for today, sir. Pour me a drink and try again tomorrow.",
+            "source": "fallback",
+            "reason": "budget_exhausted",
+        })
+
+    from bot.agents.claude_reasoning import call_claude, HAIKU_MODEL, ANTHROPIC_API_KEY
+    if not ANTHROPIC_API_KEY:
+        return JSONResponse({
+            "line": "My brain is offline, sir. The operator forgot to plug in the Anthropic key.",
+            "source": "fallback",
+            "reason": "no_api_key",
+        })
+
+    # Compose user message: question + compact context
+    import json as _json
+    try:
+        ctx_str = _json.dumps(context, separators=(',', ':'))[:3500]
+    except Exception:
+        ctx_str = "{}"
+    user_msg = f"CONTEXT (live snapshot):\n{ctx_str}\n\nGEO ASKS: {question}"
+
+    text = await call_claude(
+        system=JARVIS_ASK_SYSTEM, user=user_msg,
+        model=HAIKU_MODEL, max_tokens=160,
+    )
+    if not text:
+        return JSONResponse({
+            "line": "I lost the signal for a moment, sir. Try again.",
+            "source": "fallback",
+            "reason": "api_error",
+        })
+
+    line = _sanitize_line(text)
+    # Conservative cost: ~600 in (system + context) + ~120 out
+    _spend_record(input_toks=600, output_toks=max(40, len(line) // 3))
     return JSONResponse({"line": line, "source": "claude"})
 
 

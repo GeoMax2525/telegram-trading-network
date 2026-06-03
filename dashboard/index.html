@@ -1292,31 +1292,31 @@ class Particle {
   reset(initial = false) {
     this.x = Math.random() * sandW;
     this.y = initial ? Math.random() * sandH : sandH + 10;
-    this.vx = (Math.random() - 0.5) * 0.15;
-    this.vy = -0.08 - Math.random() * 0.25;
-    this.r  = 0.4 + Math.random() * 1.6;
+    this.vx = (Math.random() - 0.5) * 0.08;
+    this.vy = -0.04 - Math.random() * 0.14;
+    this.r  = 0.4 + Math.random() * 1.4;
     this.life = 0;
-    this.maxLife = 280 + Math.random() * 400;
+    this.maxLife = 380 + Math.random() * 520;
     this.alpha = 0;
-    this.targetAlpha = 0.25 + Math.random() * 0.65;
+    this.targetAlpha = 0.2 + Math.random() * 0.55;
     this.phase = Math.random() * Math.PI * 2;
-    this.hueShift = Math.random() < 0.18; // small fraction skew toward bright cyan
+    this.hueShift = Math.random() < 0.14;
   }
   step() {
     this.life++;
-    // Brownian motion + slight upward drift + global drift influence
-    this.vx += (Math.random() - 0.5) * 0.02 + drift.x * 0.0006;
-    this.vy += (Math.random() - 0.5) * 0.015 + drift.y * 0.0004 - 0.0012;
-    // Damping
-    this.vx *= 0.985; this.vy *= 0.985;
-    // Activity-driven turbulence
+    // Very gentle Brownian motion — feel like floating grains of sand
+    this.vx += (Math.random() - 0.5) * 0.008;
+    this.vy += (Math.random() - 0.5) * 0.006 - 0.0006;
+    // Stronger damping for that hypnotic drift
+    this.vx *= 0.975; this.vy *= 0.975;
+    // Activity nudge stays subtle even when speaking
     if (activityLevel > 0.05) {
-      this.vx += (Math.random() - 0.5) * activityLevel * 0.12;
-      this.vy += (Math.random() - 0.5) * activityLevel * 0.12;
+      this.vx += (Math.random() - 0.5) * activityLevel * 0.04;
+      this.vy += (Math.random() - 0.5) * activityLevel * 0.04;
     }
     this.x += this.vx;
     this.y += this.vy;
-    this.phase += 0.04;
+    this.phase += 0.025;
 
     // Fade in/out
     const ratio = this.life / this.maxLife;
@@ -1373,9 +1373,9 @@ function tickSand() {
   for (const p of particles) { p.step(); p.draw(sandCtx); }
   sandCtx.globalCompositeOperation = 'source-over';
 
-  // Activity decay
-  activityLevel = Math.max(0, activityLevel - 0.012);
-  drift.x *= 0.9; drift.y *= 0.9;
+  // Activity decay — slow so the sand never feels frantic
+  activityLevel = Math.max(0, activityLevel - 0.005);
+  drift.x *= 0.92; drift.y *= 0.92;
 
   requestAnimationFrame(tickSand);
 }
@@ -1401,20 +1401,27 @@ function particleBurst(x, y, intensity = 1, color = 'cyan') {
   activityLevel = Math.min(1, activityLevel + 0.35 * intensity);
 }
 
-// Click anywhere → subtle burst at click point
-document.addEventListener('pointerdown', (e) => {
-  if (e.target.closest('button, .agent-card, .jm-btn, .vc-toggle')) return;
-  particleBurst(e.clientX, e.clientY, 0.4);
-}, { passive: true });
-
-// JARVIS speaking → continuously elevate activity + spawn particles near orb
+// Ambient mode — particles drift like grains of sand. No click bursts,
+// no reactive explosions. Only a very subtle activity lift while JARVIS
+// is speaking so the dust gathers slightly around the orb.
 let speakingInterval = null;
 function startSpeakingParticles() {
   if (speakingInterval) return;
+  // Gentle: gather a few particles toward the orb rather than burst out.
   speakingInterval = setInterval(() => {
     const r = document.getElementById('voice-fab').getBoundingClientRect();
-    particleBurst(r.left + r.width/2, r.top + r.height/2, 0.5, Math.random() < 0.3 ? 'bright' : 'cyan');
-  }, 180);
+    const cx = r.left + r.width / 2;
+    const cy = r.top  + r.height / 2;
+    // Pull 4-6 random particles toward the orb instead of spawning bursts
+    for (let i = 0; i < 5; i++) {
+      const p = particles[Math.floor(Math.random() * particles.length)];
+      const dx = cx - p.x, dy = cy - p.y;
+      const d = Math.hypot(dx, dy) || 1;
+      p.vx += (dx / d) * 0.05;
+      p.vy += (dy / d) * 0.05;
+    }
+    activityLevel = Math.min(0.35, activityLevel + 0.04);
+  }, 280);
 }
 function stopSpeakingParticles() {
   if (speakingInterval) { clearInterval(speakingInterval); speakingInterval = null; }
@@ -1636,10 +1643,7 @@ function renderAgents(agents) {
       const dot = c.querySelector('.pulse-dot');
       dot.className = `pulse-dot ${a.state === 'WARN' ? 'warn' : a.state === 'ERR' ? 'err' : ''}`;
       c.querySelector('.status').lastChild.nodeValue = ' ' + a.state;
-      if (prevState !== a.state) {
-        const r = c.getBoundingClientRect();
-        particleBurst(r.left + r.width/2, r.top + r.height/2, 0.4);
-      }
+      /* no particle burst on state change — keep ambient drift only */
     });
   }
   const online = agents.filter((a) => a.state === 'ONLINE').length;
@@ -1661,8 +1665,6 @@ function openAgentModal(key) {
   haptic('medium');
   const card = document.querySelector(`.agent-card[data-key="${key}"]`);
   if (!card) return;
-  const r = card.getBoundingClientRect();
-  particleBurst(r.left + r.width/2, r.top + r.height/2, 1.2);
 
   amIcon.innerHTML = AGENT_SVG[key] || '';
   amTitle.textContent = card.dataset.name || key;
@@ -1755,17 +1757,10 @@ function renderTrades(trades) {
     if (_seenTradeIds.has(t.id)) continue;
     _seenTradeIds.add(t.id);
     if (_firstTradeLoad) continue;
-    if (t.open) {
-      // New trade just opened — burst near top of trade list
-      const rect = tl.getBoundingClientRect();
-      particleBurst(rect.left + rect.width * 0.3, rect.top + 20, 0.9);
-      continue;
-    }
+    if (t.open) continue;
     if (Math.abs(t.pnl_pct || 0) >= 50) {
       const label = (t.win ? '+' : '') + Math.round(t.pnl_pct) + '%';
       triggerGlitch(label, t.token, t.win);
-      const rect = tl.getBoundingClientRect();
-      particleBurst(rect.left + rect.width * 0.5, rect.top + 30, 1.4, t.win ? 'cyan' : 'cyan');
     }
   }
   _firstTradeLoad = false;
@@ -2213,6 +2208,72 @@ async function jarvisSay(eventType, context = {}) {
   } catch (e) {}
 }
 
+// Build a compact JSON snapshot of the live dashboard for Claude.
+// Send this with every freeform question so JARVIS can answer anything.
+function jarvisContext() {
+  const d = _latest;
+  if (!d) return { state: 'loading' };
+  return {
+    trade_mode:    d.system.trade_mode,
+    decision_mode: d.header.decision,
+    operator:      d.header.operator,
+    balance:       d.paper.balance,
+    starting:      d.paper.starting,
+    drawdown_pct:  d.paper.drawdown_pct,
+    probe_size:    d.paper.probe_size,
+    today_pnl:     d.performance.today_pnl,
+    alltime_pnl:   d.performance.alltime_pnl,
+    win_rate:      d.performance.win_rate,
+    open_pos:      d.performance.open_pos,
+    max_open:      d.performance.max_open,
+    trades_24h:    d.performance.trades_24h,
+    expectancy:    d.performance.expectancy,
+    regime:        d.system.regime,
+    scanner_on:    d.system.scanner_on,
+    tg_scraper_on: d.system.tg_scraper_on,
+    claude_spend:  d.system.claude_spend,
+    claude_budget: d.system.claude_budget,
+    uptime:        d.system.uptime_label,
+    agents: (d.agents || []).map(a => ({
+      key: a.key, name: a.name, state: a.state, meta: a.meta,
+    })),
+    recent_trades: (d.trades || []).slice(0, 8).map(t => ({
+      token: t.token, win: t.win, open: t.open,
+      pnl: t.pnl, pnl_pct: t.pnl_pct, reason: t.reason, x: t.x, mc: t.mc,
+    })),
+    top_wallets: (d.wallets || []).slice(0, 5).map(w => ({
+      rank: w.rank, addr: w.addr, score: w.score,
+    })),
+    neural: d.neural,
+  };
+}
+
+// Freeform Claude conversation — ANY question routes here.
+async function jarvisAsk(question) {
+  if (!question || LS.mute) return null;
+  try {
+    const r = await fetch('/api/jarvis/ask', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(TG_INITDATA ? { 'X-Telegram-InitData': TG_INITDATA } : {}),
+      },
+      body: JSON.stringify({ question, context: jarvisContext() }),
+    });
+    if (!r.ok) {
+      speak("My connection to Claude wobbled, sir. Try again."); return null;
+    }
+    const data = await r.json();
+    if (data && data.line) {
+      await speak(data.line, { priority: 'high' });
+      return data.line;
+    }
+  } catch (e) {
+    speak("Network blip, sir. Repeat that.");
+  }
+  return null;
+}
+
 const hudEl = document.getElementById('jarvis-hud');
 const hudText = document.getElementById('jarvis-hud-text');
 const sweepEl = document.getElementById('jarvis-sweep');
@@ -2416,10 +2477,19 @@ function startRecognizer(continuous) {
       if (stripped === null) return;
       toParse = stripped;
     }
-    const intent = parseIntent(toParse);
-    applyIntent(intent, toParse);
     haptic('light');
     beep(1200, 0.06, 'sine', 0.05);
+
+    // Local fast-paths — system actions, no Claude needed.
+    const t = (toParse || '').toLowerCase().trim();
+    if (/\b(mute|silence|quiet)\b/.test(t))                  { LS.mute = true;  syncToggleUI(); return; }
+    if (/\b(unmute|speak again|talk to me)\b/.test(t))       { LS.mute = false; syncToggleUI(); speak("Voice restored, sir."); return; }
+    if (/\brefresh\b|\breload\b|\bupdate the dashboard\b/.test(t)) { fetchDashboard(); fetchSol(); speak("Refreshing."); return; }
+    if (/\bglitch\b|\bgo crazy\b/.test(t))                   { triggerGlitch('+999%', 'VOICE', true); speak("Engaging."); return; }
+    if (/\b(close|dismiss)\b/.test(t))                       { hudHide(); return; }
+
+    // Everything else → Claude with full dashboard context.
+    jarvisAsk(toParse);
   };
   recognizer.onerror = () => {};
   recognizer.onend = () => {
