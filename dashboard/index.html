@@ -243,8 +243,12 @@
     user-select: none;
     cursor: pointer;
     width: 100%;
-    aspect-ratio: 1.05 / 1;
-    padding: 14px 12px 12px;
+    min-height: 156px;
+    padding: 14px 10px 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
     background:
       radial-gradient(circle at 30% 20%, rgba(0,217,255,0.10), transparent 60%),
       linear-gradient(160deg, rgba(10,22,40,0.85), rgba(5,11,24,0.85));
@@ -252,7 +256,8 @@
     transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
     overflow: hidden;
   }
-  @media (max-width: 768px) { .agent-card { padding: 12px 8px 10px; } }
+  @media (max-width: 768px) { .agent-card { padding: 12px 8px 10px; min-height: 138px; } }
+  @media (max-width: 480px) { .agent-card { min-height: 120px; padding: 10px 6px; } }
   .agent-card.dragging {
     cursor: grabbing;
     transform: scale(1.05) rotate(-1deg);
@@ -274,9 +279,10 @@
     transform: translateY(-1px);
   }
   .agent-card .av {
-    width: 64px; height: 64px;
-    margin: 2px auto 6px; display: block;
+    width: 56px; height: 56px;
+    margin: 0; display: block;
     filter: drop-shadow(0 0 6px var(--cyan-glow));
+    flex-shrink: 0;
   }
   .agent-card[data-state="WARN"] .av { filter: drop-shadow(0 0 6px var(--orange-soft)); }
   .agent-card[data-state="ERR"]  .av { filter: drop-shadow(0 0 6px var(--red-soft)); }
@@ -284,23 +290,36 @@
     font-family: 'Orbitron', sans-serif;
     font-size: 11px; letter-spacing: 0.18em;
     text-align: center; color: var(--cyan-faint);
+    line-height: 1.1;
+    margin-top: 2px;
   }
   .agent-card .meta {
-    margin-top: 4px;
     font-family: 'JetBrains Mono', monospace;
     font-size: 9.5px; text-align: center;
     color: rgba(160,240,255,0.55);
+    line-height: 1.2;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    max-width: 100%;
   }
   .agent-card .status {
-    position: absolute;
-    bottom: 8px; left: 0; right: 0;
+    margin-top: auto;
+    padding-top: 4px;
     text-align: center;
     font-family: 'JetBrains Mono', monospace;
     font-size: 9px; letter-spacing: 0.18em;
     color: var(--cyan-primary);
+    display: flex; align-items: center; justify-content: center; gap: 6px;
   }
   .agent-card[data-state="WARN"] .status { color: var(--orange-warn); }
   .agent-card[data-state="ERR"]  .status { color: var(--red-danger); }
+  @media (max-width: 480px) {
+    .agent-card .av { width: 44px; height: 44px; }
+    .agent-card .name { font-size: 10px; letter-spacing: 0.12em; }
+    .agent-card .meta { font-size: 9px; }
+    .agent-card .status { font-size: 8.5px; letter-spacing: 0.14em; }
+  }
 
   /* ── Agent SVG animations ── */
   @keyframes spinAll       { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -495,9 +514,6 @@
   }
   @media (max-width: 480px) {
     #market-pulse { margin-bottom: 10px; }
-    .agent-card .av { width: 48px; height: 48px; }
-    .agent-card .name { font-size: 10px; letter-spacing: 0.12em; }
-    .agent-card .meta { font-size: 9px; }
     .gauge .center .val { font-size: 18px; }
   }
 
@@ -1259,21 +1275,42 @@
   }
   [data-tip]:hover::after, [data-tip]:hover::before { opacity: 1; }
 
-  /* ═══════════════════════ WIREFRAME GLOBE (corner) ═══════════════════════ */
-  #globe-3d {
+  /* ═══════════════════════ WIREFRAME GLOBE BUTTON (corner) ═══════════════════════ */
+  #globe-button {
     position: fixed;
-    right: 22px; top: 100px;
-    width: 140px; height: 140px;
-    z-index: 4;
-    pointer-events: auto;
+    right: 22px; top: 24px;
+    z-index: 58;
+    width: 88px;
+    display: flex; flex-direction: column; align-items: center;
     cursor: pointer;
-    opacity: 0.85;
-    filter: drop-shadow(0 0 18px var(--cyan-glow));
-    transition: transform 0.25s, filter 0.25s;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform 0.25s;
   }
-  #globe-3d:hover { transform: scale(1.08); filter: drop-shadow(0 0 26px var(--cyan-primary)); }
+  #globe-button:hover { transform: scale(1.06); }
+  #globe-3d {
+    width: 80px; height: 80px;
+    opacity: 0.95;
+    filter: drop-shadow(0 0 14px var(--cyan-glow));
+    transition: filter 0.25s;
+    pointer-events: none;
+  }
+  #globe-button:hover #globe-3d { filter: drop-shadow(0 0 22px var(--cyan-primary)); }
+  .globe-label {
+    margin-top: 4px;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.26em;
+    color: var(--cyan-primary);
+    text-shadow: 0 0 8px var(--cyan-glow);
+    text-align: center;
+    pointer-events: none;
+  }
   @media (max-width: 768px) {
-    #globe-3d { width: 92px; height: 92px; right: 14px; top: 76px; opacity: 0.95; }
+    #globe-button { right: 14px; top: 14px; width: 60px; }
+    #globe-3d { width: 56px; height: 56px; }
+    .globe-label { font-size: 8px; letter-spacing: 0.18em; margin-top: 2px; }
   }
 
   /* ═══════════════════════ INTERACTIVE GLOBE MODAL ═══════════════════════ */
@@ -1449,8 +1486,11 @@
 <!-- Mouse reticle -->
 <div id="reticle"><div class="ret-ring"></div></div>
 
-<!-- Wireframe globe -->
-<canvas id="globe-3d"></canvas>
+<!-- Wireframe globe button (top-right) -->
+<div id="globe-button" role="button" aria-label="Open Geo Atlas">
+  <canvas id="globe-3d"></canvas>
+  <div class="globe-label">GEO · ATLAS</div>
+</div>
 
 <div class="cockpit-frame">
   <div class="corner tl"></div>
@@ -1817,7 +1857,7 @@ function haptic(style = 'light') {
 const sandCanvas = document.getElementById('sand-particles');
 const sandCtx = sandCanvas.getContext('2d');
 let sandW = 0, sandH = 0;
-const PARTICLE_COUNT = 220;
+const PARTICLE_COUNT = 75;
 const particles = [];
 let activityLevel = 0; // 0-1, decays over time
 let drift = { x: 0, y: 0 };
@@ -1827,15 +1867,15 @@ class Particle {
   reset(initial = false) {
     this.x = Math.random() * sandW;
     this.y = initial ? Math.random() * sandH : sandH + 10;
-    this.vx = (Math.random() - 0.5) * 0.08;
-    this.vy = -0.04 - Math.random() * 0.14;
-    this.r  = 0.4 + Math.random() * 1.4;
+    this.vx = (Math.random() - 0.5) * 0.05;
+    this.vy = -0.02 - Math.random() * 0.08;
+    this.r  = 0.3 + Math.random() * 0.9;
     this.life = 0;
-    this.maxLife = 380 + Math.random() * 520;
+    this.maxLife = 520 + Math.random() * 620;
     this.alpha = 0;
-    this.targetAlpha = 0.2 + Math.random() * 0.55;
+    this.targetAlpha = 0.12 + Math.random() * 0.32;
     this.phase = Math.random() * Math.PI * 2;
-    this.hueShift = Math.random() < 0.14;
+    this.hueShift = Math.random() < 0.07;
   }
   step() {
     this.life++;
@@ -3748,30 +3788,44 @@ async function openGlobeModal() {
   globeModal.classList.add('open');
   haptic('medium');
   sfx.engage();
-  buildBigGlobe();
-  // Resize canvas to actual rendered size now that it's visible
-  setTimeout(() => {
-    if (bigGlobeState) {
-      const s = globeBig.clientWidth;
-      bigGlobeState.renderer.setSize(s, s);
-    }
-  }, 100);
+  // Defer Three.js init until layout has measured the visible canvas
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      buildBigGlobe();
+      if (bigGlobeState) {
+        const s = globeBig.clientWidth || 500;
+        bigGlobeState.renderer.setSize(s, s);
+      }
+    });
+  });
 
   if (!bigGlobeData) bigGlobeData = await fetchTimezones();
   if (bigGlobeData) {
-    paintGlobeMarkers(bigGlobeData);
-    paintRegionList(bigGlobeData);
-    paintGlobeAnalysis(bigGlobeData);
+    // Ensure the Three.js scene exists before painting markers
+    let attempts = 0;
+    const paintWhenReady = () => {
+      if (bigGlobeState) {
+        paintGlobeMarkers(bigGlobeData);
+        paintRegionList(bigGlobeData);
+        paintGlobeAnalysis(bigGlobeData);
+      } else if (attempts++ < 20) {
+        setTimeout(paintWhenReady, 50);
+      }
+    };
+    paintWhenReady();
   } else {
     gmStats.textContent = 'Could not load timezone data.';
   }
 }
 function closeGlobeModal() { globeModal.classList.remove('open'); haptic('light'); sfx.click(); }
 
-// Click the corner globe to open
-const cornerGlobe = document.getElementById('globe-3d');
-if (cornerGlobe) {
-  cornerGlobe.addEventListener('click', openGlobeModal);
+// Click the corner globe button to open the atlas
+const globeButton = document.getElementById('globe-button');
+if (globeButton) {
+  globeButton.addEventListener('click', openGlobeModal);
+  globeButton.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openGlobeModal(); }
+  });
 }
 gmCloseBtn.addEventListener('click', closeGlobeModal);
 globeModal.addEventListener('click', (e) => { if (e.target === globeModal) closeGlobeModal(); });
