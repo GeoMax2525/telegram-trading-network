@@ -935,14 +935,393 @@
 
   /* ═══════════════════════ PARTICLE BURST UTIL ═══════════════════════ */
   body.activity-high #sand-particles { /* hook into JS — controlled in script */ }
+
+  /* ═══════════════════════ ANGULAR UI CORNERS (Stark) ═══════════════════════ */
+  .panel {
+    clip-path: polygon(
+      14px 0,
+      calc(100% - 14px) 0,
+      100% 14px,
+      100% calc(100% - 14px),
+      calc(100% - 14px) 100%,
+      14px 100%,
+      0 calc(100% - 14px),
+      0 14px
+    );
+  }
+  .panel-accent-tl, .panel-accent-tr, .panel-accent-bl, .panel-accent-br {
+    position: absolute;
+    width: 20px; height: 20px;
+    border: 1px solid var(--cyan-primary);
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+    box-shadow: 0 0 8px var(--cyan-glow);
+  }
+  .panel-accent-tl { top: -1px;    left: -1px;    border-right: none; border-bottom: none; }
+  .panel-accent-tr { top: -1px;    right: -1px;   border-left: none;  border-bottom: none; }
+  .panel-accent-bl { bottom: -1px; left: -1px;    border-right: none; border-top: none; }
+  .panel-accent-br { bottom: -1px; right: -1px;   border-left: none;  border-top: none; }
+  .panel:hover .panel-accent-tl,
+  .panel:hover .panel-accent-tr,
+  .panel:hover .panel-accent-bl,
+  .panel:hover .panel-accent-br {
+    opacity: 1;
+    animation: bracketLock 0.4s ease-out;
+  }
+  @keyframes bracketLock {
+    0%   { transform: scale(1.8); opacity: 0; }
+    60%  { transform: scale(0.9); opacity: 1; }
+    100% { transform: scale(1);   opacity: 1; }
+  }
+
+  /* ═══════════════════════ BOOT SEQUENCE ═══════════════════════ */
+  #boot-overlay {
+    position: fixed; inset: 0;
+    z-index: 10000;
+    background: radial-gradient(circle at center, #07112a 0%, #000 100%);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: 'Orbitron', sans-serif;
+    color: var(--cyan-primary);
+    text-shadow: 0 0 16px var(--cyan-glow);
+    overflow: hidden;
+    transition: opacity 0.6s ease;
+  }
+  #boot-overlay.gone { opacity: 0; pointer-events: none; }
+  .boot-logo {
+    font-size: clamp(40px, 8vw, 96px);
+    font-weight: 900;
+    letter-spacing: 0.32em;
+    animation: bootLogoSpawn 0.8s ease-out;
+  }
+  .boot-sub {
+    margin-top: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.32em;
+    color: var(--cyan-pale);
+    animation: bootLogoSpawn 0.8s 0.2s both ease-out;
+  }
+  @keyframes bootLogoSpawn {
+    from { opacity: 0; letter-spacing: 1em; filter: blur(6px); }
+    to   { opacity: 1; letter-spacing: 0.32em; filter: blur(0); }
+  }
+  .boot-bar {
+    margin-top: 28px;
+    width: min(360px, 60vw);
+    height: 2px;
+    background: rgba(0,217,255,0.18);
+    overflow: hidden;
+    position: relative;
+  }
+  .boot-bar::after {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, var(--cyan-primary), transparent);
+    box-shadow: 0 0 12px var(--cyan-primary);
+    animation: bootBar 1.6s linear infinite;
+  }
+  @keyframes bootBar { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+  .boot-status {
+    margin-top: 18px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.28em;
+    color: var(--cyan-pale);
+    opacity: 0.7;
+    min-height: 16px;
+  }
+  /* HUD assembly animation — main fades in only after boot */
+  main { opacity: 0; transition: opacity 0.8s ease; }
+  main.booted { opacity: 1; }
+  main.booted section, main.booted header, main.booted aside {
+    animation: panelAssemble 0.7s cubic-bezier(.2,.9,.2,1) both;
+  }
+  main.booted header                        { animation-delay: 0.05s; }
+  main.booted .col-span-12 > section:nth-of-type(1) { animation-delay: 0.15s; }
+  main.booted .col-span-12 > section:nth-of-type(2) { animation-delay: 0.25s; }
+  main.booted .col-span-12 > section:nth-of-type(3) { animation-delay: 0.35s; }
+  main.booted aside section:nth-of-type(1)  { animation-delay: 0.45s; }
+  main.booted aside section:nth-of-type(2)  { animation-delay: 0.55s; }
+  main.booted aside section:nth-of-type(3)  { animation-delay: 0.65s; }
+  @keyframes panelAssemble {
+    from { opacity: 0; transform: translateY(8px) scaleY(0.96); filter: blur(4px); }
+    to   { opacity: 1; transform: translateY(0)   scaleY(1);    filter: blur(0); }
+  }
+
+  /* ═══════════════════════ VERTICAL SCAN BEAM ═══════════════════════ */
+  #scan-beam {
+    position: fixed;
+    top: 0; left: 0;
+    width: 2px; height: 100vh;
+    background: linear-gradient(180deg, transparent, var(--cyan-primary), transparent);
+    box-shadow: 0 0 24px var(--cyan-primary), 0 0 60px var(--cyan-glow);
+    z-index: 4;
+    opacity: 0.7;
+    pointer-events: none;
+    animation: scanX 11s linear infinite;
+  }
+  @keyframes scanX {
+    0%   { transform: translateX(-10vw); opacity: 0; }
+    8%   { opacity: 0.7; }
+    50%  { opacity: 0.95; }
+    92%  { opacity: 0.7; }
+    100% { transform: translateX(110vw); opacity: 0; }
+  }
+
+  /* ═══════════════════════ DATA TICKER COLUMNS ═══════════════════════ */
+  .ticker-col {
+    position: fixed;
+    top: 0; bottom: 0;
+    width: 36px;
+    z-index: 3;
+    pointer-events: none;
+    overflow: hidden;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: rgba(0,217,255,0.32);
+    text-align: center;
+    mask-image: linear-gradient(180deg, transparent 0%, black 18%, black 82%, transparent 100%);
+    -webkit-mask-image: linear-gradient(180deg, transparent 0%, black 18%, black 82%, transparent 100%);
+  }
+  .ticker-col.left  { left: 0; }
+  .ticker-col.right { right: 0; }
+  .ticker-col .ticker-stream {
+    position: absolute;
+    left: 0; right: 0; top: 0;
+    animation: tickerScroll 90s linear infinite;
+    line-height: 14px;
+  }
+  .ticker-col.right .ticker-stream { animation-direction: reverse; animation-duration: 110s; }
+  @keyframes tickerScroll {
+    from { transform: translateY(0); }
+    to   { transform: translateY(-50%); }
+  }
+  @media (max-width: 768px) { .ticker-col { display: none; } }
+
+  /* ═══════════════════════ MOUSE RETICLE ═══════════════════════ */
+  #reticle {
+    position: fixed;
+    width: 28px; height: 28px;
+    pointer-events: none;
+    z-index: 53;
+    opacity: 0;
+    transition: opacity 0.3s, width 0.2s, height 0.2s;
+    transform: translate(-50%, -50%);
+  }
+  #reticle::before, #reticle::after {
+    content: ''; position: absolute;
+    background: var(--cyan-primary);
+    box-shadow: 0 0 6px var(--cyan-primary);
+  }
+  #reticle::before { top: 50%; left: 0; right: 0; height: 1px; transform: translateY(-50%); }
+  #reticle::after  { left: 50%; top: 0; bottom: 0; width: 1px; transform: translateX(-50%); }
+  #reticle .ret-ring {
+    position: absolute; inset: 4px;
+    border: 1px solid var(--cyan-primary);
+    border-radius: 50%;
+    box-shadow: 0 0 6px var(--cyan-glow);
+    animation: spinAll 8s linear infinite;
+  }
+  #reticle .ret-ring::before, #reticle .ret-ring::after {
+    content: ''; position: absolute;
+    width: 4px; height: 1px;
+    background: var(--cyan-primary);
+    box-shadow: 0 0 4px var(--cyan-primary);
+    top: 50%; transform: translateY(-50%);
+  }
+  #reticle .ret-ring::before { left: -5px; }
+  #reticle .ret-ring::after  { right: -5px; }
+  body.has-mouse #reticle { opacity: 0.7; }
+  #reticle.locked { width: 40px; height: 40px; }
+  @media (max-width: 768px), (pointer: coarse) {
+    #reticle { display: none; }
+  }
+
+  /* ═══════════════════════ STATUS RIBBON ═══════════════════════ */
+  #status-ribbon {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    height: 24px;
+    z-index: 52;
+    background: linear-gradient(90deg, rgba(5,11,24,0.95) 0%, rgba(10,22,40,0.9) 50%, rgba(5,11,24,0.95) 100%);
+    border-top: 1px solid var(--line);
+    overflow: hidden;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--cyan-pale);
+    letter-spacing: 0.18em;
+    display: flex; align-items: center;
+    backdrop-filter: blur(4px);
+  }
+  #status-ribbon::before {
+    content: ''; position: absolute;
+    left: 0; top: 0; bottom: 0; width: 6px;
+    background: var(--cyan-primary);
+    box-shadow: 0 0 12px var(--cyan-primary);
+  }
+  #status-ribbon .rib-inner {
+    display: inline-flex; gap: 32px;
+    padding-left: 24px;
+    white-space: nowrap;
+    animation: ribbonScroll 60s linear infinite;
+  }
+  @keyframes ribbonScroll {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-50%); }
+  }
+  #status-ribbon .rib-token { color: var(--cyan-primary); }
+  #status-ribbon .rib-warn  { color: var(--orange-warn); }
+  #status-ribbon .rib-sep   { opacity: 0.4; }
+  @media (max-width: 480px) { #status-ribbon { height: 20px; font-size: 9px; } }
+
+  /* keep conn indicator above ribbon */
+  #conn { bottom: 36px !important; }
+  @media (max-width: 480px) { #conn { bottom: 84px !important; } }
+
+  /* ═══════════════════════ CONCENTRIC GAUGE RINGS ═══════════════════════ */
+  .gauge .ring-outer, .gauge .ring-mid {
+    fill: none;
+    stroke: rgba(0,217,255,0.25);
+    stroke-width: 1;
+    stroke-dasharray: 3 6;
+  }
+  .gauge .ring-outer { transform-origin: 50% 50%; animation: spinAll 18s linear infinite; }
+  .gauge .ring-mid   { transform-origin: 50% 50%; animation: spinAll 26s linear infinite reverse; }
+  .gauge .ring-ticks {
+    fill: none;
+    stroke: var(--cyan-primary);
+    stroke-width: 1.5;
+    opacity: 0.65;
+  }
+
+  /* ═══════════════════════ SCHEMATIC BLUEPRINT MODE ═══════════════════════ */
+  body.schematic { background: #001a26; }
+  body.schematic main { filter: hue-rotate(0deg) contrast(1.1); }
+  body.schematic .panel {
+    background: rgba(0, 30, 50, 0.6) !important;
+    border-color: rgba(0,217,255,0.5);
+    box-shadow: inset 0 0 0 1px rgba(0,217,255,0.3), 0 0 16px rgba(0,217,255,0.18);
+  }
+  body.schematic .panel::before,
+  body.schematic .panel::after { display: none; }
+  body.schematic .grid-overlay {
+    background-size: 16px 16px;
+    background-image:
+      linear-gradient(rgba(0,217,255,0.18) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,217,255,0.18) 1px, transparent 1px) !important;
+    opacity: 1;
+  }
+  body.schematic .agent-card {
+    background: rgba(0, 28, 48, 0.5) !important;
+    border-color: rgba(0,217,255,0.55);
+  }
+  body.schematic .agent-card .av { filter: drop-shadow(0 0 8px var(--cyan-glow)) brightness(1.1); }
+  body.schematic .panel::after {
+    /* re-enable a dimension line in schematic mode */
+    display: block !important;
+    content: ''; position: absolute;
+    bottom: -10px; left: 50%;
+    transform: translateX(-50%);
+    width: 60%; height: 1px;
+    background: var(--cyan-primary);
+    opacity: 0.4;
+  }
+  body.schematic #status-ribbon { background: rgba(0, 20, 36, 0.9); }
+  body.schematic #sand-particles { opacity: 0.4; }
+
+  /* ═══════════════════════ TOOLTIPS WITH BRACKETS ═══════════════════════ */
+  [data-tip] { position: relative; }
+  [data-tip]::after, [data-tip]::before {
+    position: absolute;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.18s;
+  }
+  [data-tip]::after {
+    content: attr(data-tip);
+    bottom: calc(100% + 8px); left: 50%;
+    transform: translateX(-50%);
+    background: rgba(5,11,24,0.95);
+    border: 1px solid var(--cyan-primary);
+    color: var(--cyan-faint);
+    padding: 4px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.18em;
+    white-space: nowrap;
+    box-shadow: 0 0 12px var(--cyan-glow);
+    z-index: 70;
+  }
+  [data-tip]::before {
+    content: ''; bottom: calc(100% + 4px); left: 50%;
+    transform: translateX(-50%) rotate(45deg);
+    width: 6px; height: 6px;
+    background: var(--cyan-primary);
+    z-index: 71;
+  }
+  [data-tip]:hover::after, [data-tip]:hover::before { opacity: 1; }
+
+  /* ═══════════════════════ WIREFRAME GLOBE ═══════════════════════ */
+  #globe-3d {
+    position: fixed;
+    right: 22px; top: 100px;
+    width: 140px; height: 140px;
+    z-index: 4;
+    pointer-events: none;
+    opacity: 0.85;
+    filter: drop-shadow(0 0 18px var(--cyan-glow));
+  }
+  @media (max-width: 768px) { #globe-3d { display: none; } }
+
+  /* ═══════════════════════ TOGGLE BUTTON (schematic) ═══════════════════════ */
+  #schematic-toggle {
+    position: fixed;
+    left: 22px; bottom: 88px;
+    z-index: 60;
+    width: 38px; height: 38px;
+    border-radius: 6px;
+    background: rgba(5,11,24,0.85);
+    border: 1px solid var(--line);
+    color: rgba(160,240,255,0.5);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: all 0.2s;
+    backdrop-filter: blur(4px);
+  }
+  #schematic-toggle:hover { border-color: var(--cyan-primary); color: var(--cyan-primary); }
+  #schematic-toggle.on {
+    background: rgba(0,217,255,0.18);
+    border-color: var(--cyan-primary);
+    color: var(--cyan-primary);
+    box-shadow: 0 0 16px var(--cyan-glow);
+  }
+  #schematic-toggle svg { width: 18px; height: 18px; }
+  @media (max-width: 480px) { #schematic-toggle { left: 14px; bottom: 156px; width: 32px; height: 32px; } }
+
 </style>
 </head>
 
 <body>
 
+<!-- Boot sequence overlay -->
+<div id="boot-overlay">
+  <div class="boot-logo">REVOLT</div>
+  <div class="boot-sub">// JARVIS · TRADING DECK · v3</div>
+  <div class="boot-bar"></div>
+  <div class="boot-status" id="boot-status">INITIALIZING CORE…</div>
+</div>
+
 <canvas id="sand-particles"></canvas>
 <div class="grid-overlay"></div>
 <div class="scanlines"></div>
+<div id="scan-beam"></div>
+
+<!-- Data ticker columns -->
+<aside class="ticker-col left"><div class="ticker-stream" id="ticker-left"></div></aside>
+<aside class="ticker-col right"><div class="ticker-stream" id="ticker-right"></div></aside>
+
+<!-- Mouse reticle -->
+<div id="reticle"><div class="ret-ring"></div></div>
+
+<!-- Wireframe globe -->
+<canvas id="globe-3d"></canvas>
 
 <div class="cockpit-frame">
   <div class="corner tl"></div>
@@ -1162,6 +1541,20 @@
 </main>
 
 <div id="conn" class="ok">SYNC · INIT</div>
+
+<!-- Status ribbon at bottom -->
+<div id="status-ribbon"><div class="rib-inner" id="rib-inner">▸ JARVIS CORE ENGAGING…</div></div>
+
+<!-- Schematic blueprint mode toggle -->
+<button id="schematic-toggle" aria-label="Schematic mode" data-tip="SCHEMATIC · MODE">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="18" height="18"/>
+    <line x1="9" y1="3" x2="9" y2="21"/>
+    <line x1="15" y1="3" x2="15" y2="21"/>
+    <line x1="3" y1="9" x2="21" y2="9"/>
+    <line x1="3" y1="15" x2="21" y2="15"/>
+  </svg>
+</button>
 
 <button id="voice-fab" aria-label="JARVIS">
   <span class="arc-halo"></span>
@@ -1575,10 +1968,22 @@ function renderGauge(id, value) {
   const color = g.dataset.color || 'cyan';
   const lab = g.dataset.label || '';
   const C = { cyan: '#00d9ff', bright: '#4d9fff', red: '#ff3333', orange: '#ff6600', white: '#ffffff' }[color] || '#00d9ff';
-  const R = 44, CIRC = 2 * Math.PI * R;
+  const R = 38, CIRC = 2 * Math.PI * R;
   if (!g.querySelector('svg')) {
+    // Tick marks around perimeter
+    let ticks = '';
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 24) * Math.PI * 2 - Math.PI / 2;
+      const r1 = 47, r2 = i % 6 === 0 ? 43 : 45;
+      const x1 = 50 + Math.cos(a) * r1, y1 = 50 + Math.sin(a) * r1;
+      const x2 = 50 + Math.cos(a) * r2, y2 = 50 + Math.sin(a) * r2;
+      ticks += `<line class="ring-ticks" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+    }
     g.innerHTML = `
       <svg viewBox="0 0 100 100">
+        <circle class="ring-outer" cx="50" cy="50" r="48"/>
+        <circle class="ring-mid"   cx="50" cy="50" r="32"/>
+        ${ticks}
         <circle class="track" cx="50" cy="50" r="${R}"/>
         <circle class="fill"  cx="50" cy="50" r="${R}" stroke="${C}"
           stroke-dasharray="${CIRC}" stroke-dashoffset="${CIRC}"
@@ -2073,10 +2478,15 @@ window.addEventListener('pointerdown', () => {
 /* ════════════════════════════════════════════════════════════════════
    VOICE — JARVIS speech I/O
    ════════════════════════════════════════════════════════════════════ */
-const voiceFab = document.getElementById('voice-fab');
-const vcWake   = document.getElementById('vc-wake');
-const vcAlerts = document.getElementById('vc-alerts');
-const vcMute   = document.getElementById('vc-mute');
+const voiceFab    = document.getElementById('voice-fab');
+const vcWake      = document.getElementById('vc-wake');
+const vcAlerts    = document.getElementById('vc-alerts');
+const vcMute      = document.getElementById('vc-mute');
+// Voice picker DOM — must be looked up BEFORE pickJarvisVoice() runs,
+// otherwise Chrome's synchronous getVoices() trips the const TDZ.
+const voicePicker = document.getElementById('voice-picker');
+const voiceList   = document.getElementById('voice-list');
+const vcVoice     = document.getElementById('vc-voice');
 
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 const TTS = window.speechSynthesis || null;
@@ -2527,10 +2937,7 @@ vcMute.addEventListener('click', () => {
   haptic('light');
 });
 
-// Voice picker
-const voicePicker = document.getElementById('voice-picker');
-const voiceList   = document.getElementById('voice-list');
-const vcVoice     = document.getElementById('vc-voice');
+// Voice picker (DOM consts declared above with the other voice handles)
 function rebuildVoicePicker() {
   if (!voiceList) return;
   const top = _availableVoices.filter(v => /^en/i.test(v.lang) || scoreVoice(v) >= 300).slice(0, 14);
@@ -2721,6 +3128,289 @@ jmTestVoice.addEventListener('click', () => { haptic('light'); speak("Hello sir.
   voiceFab.addEventListener('click', (e) => {
     if (pressActive === 'consumed') { e.stopImmediatePropagation(); pressActive = false; }
   }, true);
+})();
+
+/* ════════════════════════════════════════════════════════════════════
+   SOUND DESIGN PACK — subtle UI taps, locks, ambient hum
+   ════════════════════════════════════════════════════════════════════ */
+const sfx = {
+  click()  { beep(1800, 0.03, 'square',   0.025); },
+  tap()    { beep(2400, 0.025, 'triangle', 0.02); },
+  lock()   { beep(900,  0.04, 'square',   0.035); setTimeout(() => beep(1400, 0.04, 'square', 0.03), 30); },
+  engage() { beep(220,  0.08, 'sawtooth', 0.04); setTimeout(() => beep(440, 0.06, 'sine', 0.04), 60); },
+  alert()  { beep(660,  0.05, 'square',   0.05); setTimeout(() => beep(990, 0.05, 'square', 0.04), 80); },
+  swoosh() { for (let i = 0; i < 8; i++) setTimeout(() => beep(200 + i * 80, 0.04, 'sine', 0.025), i * 20); },
+  hover()  { beep(1500, 0.015, 'sine',    0.012); },
+};
+// Hover sounds on panels (desktop only)
+if (window.matchMedia('(pointer: fine)').matches) {
+  document.querySelectorAll('.panel').forEach(p => p.addEventListener('mouseenter', () => sfx.hover()));
+}
+// Add panel corner brackets to every panel (4 corners each)
+document.querySelectorAll('.panel').forEach(p => {
+  ['tl','tr','bl','br'].forEach(c => {
+    const d = document.createElement('div');
+    d.className = `panel-accent-${c}`;
+    p.appendChild(d);
+  });
+});
+// Click sounds on every button + agent card
+document.querySelectorAll('button, .agent-card').forEach(b => {
+  b.addEventListener('click', () => sfx.click(), { passive: true });
+});
+
+/* ════════════════════════════════════════════════════════════════════
+   MOUSE-FOLLOWING RETICLE (desktop)
+   ════════════════════════════════════════════════════════════════════ */
+const reticle = document.getElementById('reticle');
+let mx = 0, my = 0, rx = 0, ry = 0;
+if (window.matchMedia('(pointer: fine)').matches) {
+  document.body.classList.add('has-mouse');
+  window.addEventListener('mousemove', (e) => { mx = e.clientX; my = e.clientY; });
+  function reticleTick() {
+    rx += (mx - rx) * 0.18;
+    ry += (my - ry) * 0.18;
+    reticle.style.left = rx + 'px';
+    reticle.style.top  = ry + 'px';
+    requestAnimationFrame(reticleTick);
+  }
+  requestAnimationFrame(reticleTick);
+  // Lock when hovering interactive elements
+  document.querySelectorAll('button, .agent-card, .panel').forEach(el => {
+    el.addEventListener('mouseenter', () => reticle.classList.add('locked'));
+    el.addEventListener('mouseleave', () => reticle.classList.remove('locked'));
+  });
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   DATA TICKER COLUMNS
+   ════════════════════════════════════════════════════════════════════ */
+function genTickerStream() {
+  const tokens = ['HRV','SCN','CNF','LRN','WLT','CHT','GMG','PTN','4AM','SOL','MEME','RPC','TLM','RGM','PRB','BAL'];
+  const verbs = ['INIT','SCAN','LOCK','SYNC','FEED','READ','EVAL','PASS','SKIP','HOLD','WAKE','TICK','REPL','OPEN','CLSE','CALC','HARV'];
+  const lines = [];
+  for (let i = 0; i < 240; i++) {
+    const t = tokens[Math.floor(Math.random() * tokens.length)];
+    const v = verbs[Math.floor(Math.random() * verbs.length)];
+    const hex = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
+    const n = (Math.random() * 999).toFixed(0).padStart(3, '0');
+    if (i % 5 === 0) lines.push(`${t}·${v}`);
+    else if (i % 7 === 0) lines.push(`0x${hex}`);
+    else lines.push(`${t}:${n}`);
+  }
+  // Duplicate for seamless scroll
+  return [...lines, ...lines].join('\n');
+}
+function paintTickers() {
+  const L = document.getElementById('ticker-left');
+  const R = document.getElementById('ticker-right');
+  if (L) L.textContent = genTickerStream();
+  if (R) R.textContent = genTickerStream();
+}
+paintTickers();
+setInterval(paintTickers, 180000);
+
+/* ════════════════════════════════════════════════════════════════════
+   STATUS RIBBON — recent events scrolling
+   ════════════════════════════════════════════════════════════════════ */
+const ribInner = document.getElementById('rib-inner');
+const ribEvents = [];
+function pushRib(text, cls = '') {
+  ribEvents.unshift({ text, cls, ts: Date.now() });
+  if (ribEvents.length > 20) ribEvents.length = 20;
+  paintRibbon();
+}
+function paintRibbon() {
+  if (!ribInner) return;
+  const items = ribEvents.length ? ribEvents : [{ text: 'JARVIS CORE NOMINAL', cls: '' }];
+  const html = items.map(e => `<span class="${e.cls}">▸ ${escapeHtml(e.text)}</span>`).join('<span class="rib-sep">·</span>');
+  // duplicate for seamless scroll
+  ribInner.innerHTML = html + '<span class="rib-sep">·</span>' + html;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   SCHEMATIC BLUEPRINT MODE TOGGLE
+   ════════════════════════════════════════════════════════════════════ */
+const schematicToggle = document.getElementById('schematic-toggle');
+let _schematic = false;
+schematicToggle.addEventListener('click', () => {
+  _schematic = !_schematic;
+  document.body.classList.toggle('schematic', _schematic);
+  schematicToggle.classList.toggle('on', _schematic);
+  sfx.engage();
+  haptic('medium');
+  pushRib(_schematic ? 'SCHEMATIC MODE · ENGAGED' : 'STANDARD VIEW · RESTORED', 'rib-token');
+});
+
+/* ════════════════════════════════════════════════════════════════════
+   BOOT SEQUENCE
+   ════════════════════════════════════════════════════════════════════ */
+const bootOverlay = document.getElementById('boot-overlay');
+const bootStatus = document.getElementById('boot-status');
+const BOOT_LINES = [
+  'INITIALIZING CORE…',
+  'LINKING HELIUS RPC…',
+  'AUTH · OPERATOR · GEO',
+  'AGENT GRID ONLINE',
+  'NEURAL CORE ENGAGED',
+  'JARVIS · READY',
+];
+function runBoot() {
+  let i = 0;
+  const interval = setInterval(() => {
+    if (i < BOOT_LINES.length) {
+      bootStatus.textContent = BOOT_LINES[i++];
+      sfx.tap();
+    } else {
+      clearInterval(interval);
+      bootOverlay.classList.add('gone');
+      document.querySelector('main').classList.add('booted');
+      sfx.engage();
+      pushRib('JARVIS CORE · ONLINE', 'rib-token');
+      // Trigger JARVIS boot voiceline once particles + main fade in
+      setTimeout(() => maybeJarvisBootGreeting(), 800);
+      setTimeout(() => bootOverlay.remove(), 1200);
+    }
+  }, 380);
+}
+// Run boot after a tick so the DOM is fully laid out
+setTimeout(runBoot, 80);
+
+let _bootGreeted = false;
+async function maybeJarvisBootGreeting() {
+  if (_bootGreeted || !LS.alerts) return;
+  _bootGreeted = true;
+  const hour = new Date().getHours();
+  const tod = hour < 5 ? 'late_night' : hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : hour < 22 ? 'evening' : 'night';
+  jarvisSay('boot_greeting', {
+    time_of_day: tod,
+    balance: _latest && _latest.paper ? _latest.paper.balance : null,
+    open_pos: _latest && _latest.performance ? _latest.performance.open_pos : null,
+    regime:   _latest && _latest.system ? _latest.system.regime : null,
+    uptime:   _latest && _latest.system ? _latest.system.uptime_label : null,
+  });
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   TOOLTIP DATA ATTRIBUTES — bracket-frame tooltips on key numbers
+   ════════════════════════════════════════════════════════════════════ */
+function applyTooltips() {
+  const map = {
+    'h-balance':  'PAPER · BALANCE · SOL',
+    'h-mode':     'TRADE · MODE',
+    'h-decision': 'DECISION · LAYER',
+    'p-today':    'TODAY · NET · PnL',
+    'p-alltime':  'ALL · TIME · PnL',
+    'p-winrate':  'WINS · CLOSED',
+    'p-open':     'CURRENTLY · OPEN',
+    'p-trades':   'TRADES · 24H',
+    'p-exp':      'PnL · PER · TRADE',
+    't-balance':  'LIVE · PAPER · BALANCE',
+    't-dd':       'MAX · DRAWDOWN · %',
+    't-probe':    'BASE · PROBE · SIZE',
+    's-spend':    'CLAUDE · SPEND · TODAY',
+    's-calls':    'CLAUDE · CALL · COUNT',
+    's-regime':   'MARKET · REGIME',
+    's-uptime':   'PROCESS · UPTIME',
+  };
+  Object.keys(map).forEach(id => {
+    const el = document.getElementById(id);
+    if (el && !el.dataset.tip) {
+      const wrap = el.parentElement;
+      if (wrap) wrap.setAttribute('data-tip', map[id]);
+    }
+  });
+}
+setTimeout(applyTooltips, 200);
+
+/* ════════════════════════════════════════════════════════════════════
+   DASHBOARD POLL → STATUS RIBBON FEED
+   ════════════════════════════════════════════════════════════════════ */
+const _ribbonSeen = new Set();
+let _ribbonInitialized = false;
+function feedRibbon(d) {
+  if (!d) return;
+  if (!_ribbonInitialized) {
+    pushRib(`REGIME · ${d.system.regime}`);
+    pushRib(`BAL · ${d.paper.balance.toFixed(2)} SOL`);
+    pushRib(`OPEN · ${d.performance.open_pos} / ${d.performance.max_open}`);
+    pushRib(`WR · ${d.performance.win_rate}%`);
+    for (const a of d.agents) _ribbonSeen.add('agent_' + a.key + ':' + a.state);
+    for (const t of d.trades) _ribbonSeen.add('trade_' + t.id);
+    _ribbonInitialized = true;
+    return;
+  }
+  for (const a of d.agents) {
+    const k = 'agent_' + a.key + ':' + a.state;
+    if (!_ribbonSeen.has(k)) {
+      _ribbonSeen.add(k);
+      pushRib(`${a.name} · ${a.state}`, a.state === 'ONLINE' ? 'rib-token' : 'rib-warn');
+    }
+  }
+  for (const t of d.trades) {
+    const k = 'trade_' + t.id;
+    if (!_ribbonSeen.has(k)) {
+      _ribbonSeen.add(k);
+      const cls = t.win ? 'rib-token' : t.open ? '' : 'rib-warn';
+      const label = t.open ? `OPEN · ${t.token}` : `CLOSE · ${t.token} · ${t.pnl}`;
+      pushRib(label, cls);
+    }
+  }
+}
+// Hook into render
+const _renderOrig2 = render;
+render = function(data) {
+  _renderOrig2(data);
+  try { feedRibbon(data); } catch (e) {}
+};
+
+/* ════════════════════════════════════════════════════════════════════
+   THREE.js — WIREFRAME SOLANA GLOBE
+   ════════════════════════════════════════════════════════════════════ */
+(() => {
+  const mount = document.getElementById('globe-3d');
+  if (!mount || !window.THREE) return;
+  const W = 140, H = 140;
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(45, W/H, 0.1, 100);
+  cam.position.z = 3;
+  const renderer = new THREE.WebGLRenderer({ canvas: mount, alpha: true, antialias: true });
+  renderer.setSize(W, H);
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+
+  const geo = new THREE.SphereGeometry(1, 18, 14);
+  const wireMat = new THREE.LineBasicMaterial({ color: 0x00d9ff, transparent: true, opacity: 0.7 });
+  const wire = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 1), wireMat);
+  scene.add(wire);
+
+  // Outer faint glow sphere
+  const outerMat = new THREE.MeshBasicMaterial({ color: 0x4d9fff, transparent: true, opacity: 0.05, wireframe: true });
+  const outer = new THREE.Mesh(new THREE.SphereGeometry(1.15, 12, 8), outerMat);
+  scene.add(outer);
+
+  // Random "connection" points on the surface
+  const dotsGeo = new THREE.BufferGeometry();
+  const positions = [];
+  for (let i = 0; i < 40; i++) {
+    const u = Math.random(), v = Math.random();
+    const theta = 2 * Math.PI * u, phi = Math.acos(2 * v - 1);
+    positions.push(Math.sin(phi) * Math.cos(theta), Math.sin(phi) * Math.sin(theta), Math.cos(phi));
+  }
+  dotsGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  const dotsMat = new THREE.PointsMaterial({ color: 0x00d9ff, size: 0.05, transparent: true, opacity: 0.9 });
+  const dots = new THREE.Points(dotsGeo, dotsMat);
+  scene.add(dots);
+
+  function tick(t) {
+    const s = t * 0.0005;
+    wire.rotation.y = s;
+    wire.rotation.x = Math.sin(s * 0.4) * 0.2;
+    outer.rotation.y = -s * 0.6;
+    dots.rotation.y = s;
+    renderer.render(scene, cam);
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
 })();
 
 /* ════════════════════════════════════════════════════════════════════
