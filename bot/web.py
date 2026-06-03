@@ -645,6 +645,76 @@ async def jarvis_say(request: Request) -> JSONResponse:
     return JSONResponse({"line": line, "source": "claude"})
 
 
+@app.get("/api/timezones")
+async def api_timezones() -> JSONResponse:
+    """Aggregate closed paper trades by hour-of-day (UTC) and map hours
+    onto six global trading sessions: Tokyo, Shanghai, Mumbai, London,
+    NYC, LA. Powers the interactive globe in the dashboard."""
+    from sqlalchemy import select as _sel
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            _sel(PaperTrade.opened_at, PaperTrade.paper_pnl_sol)
+            .where(
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.status == "closed",
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).all()
+
+    hours = {h: {"total": 0, "wins": 0, "pnl": 0.0} for h in range(24)}
+    for opened_at, pnl in rows:
+        if opened_at is None or pnl is None:
+            continue
+        h = int(opened_at.hour)
+        hours[h]["total"] += 1
+        if pnl > 0:
+            hours[h]["wins"] += 1
+        hours[h]["pnl"] += float(pnl)
+
+    for h, d in hours.items():
+        d["win_rate"]   = round((d["wins"] / d["total"]) * 100, 1) if d["total"] else 0.0
+        d["expectancy"] = round(d["pnl"] / d["total"], 4) if d["total"] else 0.0
+
+    REGIONS = [
+        {"name": "Tokyo",    "lat":  35.68, "lon":  139.65, "hours": [0, 1, 2, 3]},
+        {"name": "Shanghai", "lat":  31.23, "lon":  121.47, "hours": [4, 5]},
+        {"name": "Mumbai",   "lat":  19.08, "lon":   72.88, "hours": [6, 7, 8]},
+        {"name": "London",   "lat":  51.51, "lon":   -0.13, "hours": [9, 10, 11, 12]},
+        {"name": "NYC",      "lat":  40.71, "lon":  -74.01, "hours": [13, 14, 15, 16, 17]},
+        {"name": "LA",       "lat":  34.05, "lon": -118.24, "hours": [18, 19, 20, 21, 22, 23]},
+    ]
+
+    regions = []
+    for r in REGIONS:
+        total = sum(hours[h]["total"] for h in r["hours"])
+        wins  = sum(hours[h]["wins"]  for h in r["hours"])
+        pnl   = sum(hours[h]["pnl"]   for h in r["hours"])
+        regions.append({
+            "name":       r["name"],
+            "lat":        r["lat"],
+            "lon":        r["lon"],
+            "hours":      r["hours"],
+            "total":      total,
+            "wins":       wins,
+            "pnl":        round(pnl, 4),
+            "win_rate":   round((wins / total) * 100, 1) if total else 0.0,
+            "expectancy": round(pnl / total, 4) if total else 0.0,
+        })
+
+    ranked = sorted(regions, key=lambda r: r["pnl"], reverse=True)
+    top = ranked[0] if ranked and ranked[0]["total"] > 0 else None
+    worst = ranked[-1] if ranked and ranked[-1]["total"] > 0 and ranked[-1]["pnl"] < 0 else None
+
+    return JSONResponse({
+        "hours":   hours,
+        "regions": regions,
+        "top":     top,
+        "worst":   worst,
+        "total_closed": sum(h["total"] for h in hours.values()),
+    })
+
+
 @app.post("/api/jarvis/ask")
 async def jarvis_ask(request: Request) -> JSONResponse:
     """Conversational JARVIS endpoint — Claude answers ANY question with

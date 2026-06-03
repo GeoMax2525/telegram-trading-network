@@ -1259,17 +1259,146 @@
   }
   [data-tip]:hover::after, [data-tip]:hover::before { opacity: 1; }
 
-  /* ═══════════════════════ WIREFRAME GLOBE ═══════════════════════ */
+  /* ═══════════════════════ WIREFRAME GLOBE (corner) ═══════════════════════ */
   #globe-3d {
     position: fixed;
     right: 22px; top: 100px;
     width: 140px; height: 140px;
     z-index: 4;
-    pointer-events: none;
+    pointer-events: auto;
+    cursor: pointer;
     opacity: 0.85;
     filter: drop-shadow(0 0 18px var(--cyan-glow));
+    transition: transform 0.25s, filter 0.25s;
   }
-  @media (max-width: 768px) { #globe-3d { display: none; } }
+  #globe-3d:hover { transform: scale(1.08); filter: drop-shadow(0 0 26px var(--cyan-primary)); }
+  @media (max-width: 768px) {
+    #globe-3d { width: 92px; height: 92px; right: 14px; top: 76px; opacity: 0.95; }
+  }
+
+  /* ═══════════════════════ INTERACTIVE GLOBE MODAL ═══════════════════════ */
+  #globe-modal {
+    position: fixed; inset: 0;
+    z-index: 9700;
+    display: none;
+    background: radial-gradient(circle at center, rgba(5,11,24,0.96) 0%, rgba(0,0,0,0.98) 100%);
+    backdrop-filter: blur(10px);
+  }
+  #globe-modal.open { display: block; }
+  #globe-modal .gm-canvas-wrap {
+    position: absolute;
+    inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #globe-big-canvas {
+    width: min(80vmin, 600px);
+    height: min(80vmin, 600px);
+    cursor: grab;
+    touch-action: none;
+  }
+  #globe-big-canvas:active { cursor: grabbing; }
+  .gm-header {
+    position: absolute;
+    top: 24px; left: 24px;
+    z-index: 2;
+    font-family: 'Orbitron', sans-serif;
+  }
+  .gm-header .gm-title {
+    font-size: 18px; font-weight: 900;
+    letter-spacing: 0.28em;
+    color: var(--cyan-primary);
+    text-shadow: 0 0 14px var(--cyan-glow);
+  }
+  .gm-header .gm-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.28em;
+    color: var(--cyan-pale);
+    margin-top: 4px; opacity: 0.7;
+  }
+  .gm-close {
+    position: absolute;
+    top: 22px; right: 22px;
+    z-index: 2;
+    width: 38px; height: 38px;
+    background: rgba(5,11,24,0.7);
+    border: 1px solid var(--cyan-primary);
+    color: var(--cyan-primary);
+    font-size: 18px; cursor: pointer;
+    box-shadow: 0 0 14px var(--cyan-glow);
+  }
+  .gm-close:hover { background: rgba(0,217,255,0.18); }
+  .gm-regions {
+    position: absolute;
+    left: 24px; bottom: 24px; top: 80px;
+    width: min(280px, 32vw);
+    z-index: 2;
+    overflow-y: auto;
+    padding-right: 8px;
+  }
+  .gm-region {
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    background: rgba(10,22,40,0.7);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--cyan-primary);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+  }
+  .gm-region:hover { border-color: var(--cyan-primary); background: rgba(0,217,255,0.08); }
+  .gm-region.top  { border-left-color: var(--cyan-primary); box-shadow: 0 0 12px var(--cyan-glow); }
+  .gm-region.bad  { border-left-color: var(--orange-warn); }
+  .gm-region .gm-name {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 13px; letter-spacing: 0.18em;
+    color: var(--white); margin-bottom: 4px;
+  }
+  .gm-region .gm-stats { display: flex; justify-content: space-between; color: var(--cyan-pale); opacity: 0.85; }
+  .gm-region .gm-pnl.pos { color: var(--cyan-primary); }
+  .gm-region .gm-pnl.neg { color: var(--orange-warn); }
+  .gm-region .gm-hours { font-size: 9px; opacity: 0.6; margin-top: 4px; letter-spacing: 0.18em; }
+  .gm-stat-overlay {
+    position: absolute;
+    right: 24px; bottom: 24px; top: 80px;
+    width: min(280px, 32vw);
+    z-index: 2;
+    background: rgba(10,22,40,0.85);
+    border: 1px solid var(--cyan-primary);
+    padding: 16px;
+    box-shadow: 0 0 18px var(--cyan-glow);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--cyan-faint);
+    overflow-y: auto;
+  }
+  .gm-stat-overlay::before {
+    content: '// JARVIS · ANALYSIS';
+    display: block;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 10px; letter-spacing: 0.28em;
+    color: var(--cyan-primary);
+    margin-bottom: 8px;
+  }
+  @media (max-width: 768px) {
+    .gm-regions { width: 92vw; left: 4vw; top: auto; bottom: 90px; max-height: 35vh; }
+    .gm-stat-overlay { display: none; }
+    #globe-big-canvas { width: 76vmin; height: 76vmin; }
+    .gm-header { left: 14px; top: 14px; }
+    .gm-header .gm-title { font-size: 15px; }
+    .gm-close { top: 14px; right: 14px; width: 32px; height: 32px; }
+  }
+  .gm-hint {
+    position: absolute;
+    left: 50%; bottom: 14px;
+    transform: translateX(-50%);
+    z-index: 2;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.3em;
+    color: var(--cyan-pale); opacity: 0.6;
+    pointer-events: none;
+  }
+  @media (max-width: 768px) { .gm-hint { display: none; } }
 
   /* ═══════════════════════ TOGGLE BUTTON (schematic) ═══════════════════════ */
   #schematic-toggle {
@@ -1541,6 +1670,19 @@
 </main>
 
 <div id="conn" class="ok">SYNC · INIT</div>
+
+<!-- Interactive globe modal -->
+<div id="globe-modal" role="dialog" aria-modal="true">
+  <div class="gm-header">
+    <div class="gm-title">// GEO · ATLAS</div>
+    <div class="gm-sub">TRADING · PRODUCTIVITY · BY · SESSION</div>
+  </div>
+  <button class="gm-close" id="gm-close" aria-label="Close">×</button>
+  <div class="gm-canvas-wrap"><canvas id="globe-big-canvas"></canvas></div>
+  <div class="gm-regions" id="gm-regions"></div>
+  <div class="gm-stat-overlay" id="gm-stats">Querying JARVIS…</div>
+  <div class="gm-hint">DRAG · TO · ROTATE</div>
+</div>
 
 <!-- Status ribbon at bottom -->
 <div id="status-ribbon"><div class="rib-inner" id="rib-inner">▸ JARVIS CORE ENGAGING…</div></div>
@@ -3363,6 +3505,277 @@ render = function(data) {
   _renderOrig2(data);
   try { feedRibbon(data); } catch (e) {}
 };
+
+/* ════════════════════════════════════════════════════════════════════
+   INTERACTIVE GLOBE — click corner globe to expand, drag to rotate,
+   color points by region productivity, Claude analysis spoken aloud
+   ════════════════════════════════════════════════════════════════════ */
+const globeModal   = document.getElementById('globe-modal');
+const globeBig     = document.getElementById('globe-big-canvas');
+const gmRegions    = document.getElementById('gm-regions');
+const gmStats      = document.getElementById('gm-stats');
+const gmCloseBtn   = document.getElementById('gm-close');
+
+let bigGlobeReady = false;
+let bigGlobeData  = null;
+let bigGlobeState = null;
+
+function latLonToVec3(lat, lon, r = 1) {
+  const phi = (90 - lat) * Math.PI / 180;
+  const theta = (lon + 180) * Math.PI / 180;
+  return new THREE.Vector3(
+    -r * Math.sin(phi) * Math.cos(theta),
+     r * Math.cos(phi),
+     r * Math.sin(phi) * Math.sin(theta),
+  );
+}
+
+async function fetchTimezones() {
+  try {
+    const r = await fetch('/api/timezones');
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
+function buildBigGlobe() {
+  if (bigGlobeReady || !window.THREE) return;
+  bigGlobeReady = true;
+  const size = globeBig.clientWidth || 500;
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+  cam.position.z = 3.4;
+  const renderer = new THREE.WebGLRenderer({ canvas: globeBig, alpha: true, antialias: true });
+  renderer.setSize(size, size);
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+
+  const group = new THREE.Group();
+  scene.add(group);
+
+  // Wireframe earth
+  const sphereGeo = new THREE.SphereGeometry(1, 36, 28);
+  const edgesGeo  = new THREE.EdgesGeometry(sphereGeo, 1);
+  const wireMat   = new THREE.LineBasicMaterial({ color: 0x00d9ff, transparent: true, opacity: 0.55 });
+  const wire      = new THREE.LineSegments(edgesGeo, wireMat);
+  group.add(wire);
+
+  // Outer faint shell
+  const outerMat = new THREE.MeshBasicMaterial({ color: 0x4d9fff, transparent: true, opacity: 0.06, wireframe: true });
+  const outer    = new THREE.Mesh(new THREE.SphereGeometry(1.18, 16, 12), outerMat);
+  group.add(outer);
+
+  // Latitude rings (subtle)
+  const latRings = [];
+  [-45, 0, 45].forEach((lat) => {
+    const r = Math.cos(lat * Math.PI / 180);
+    const y = Math.sin(lat * Math.PI / 180);
+    const pts = [];
+    for (let i = 0; i <= 64; i++) {
+      const a = (i / 64) * Math.PI * 2;
+      pts.push(new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r));
+    }
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    const ring = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x00d9ff, transparent: true, opacity: 0.18 }));
+    group.add(ring);
+    latRings.push(ring);
+  });
+
+  // Region markers — created later when data arrives
+  const markerGroup = new THREE.Group();
+  group.add(markerGroup);
+
+  bigGlobeState = { scene, cam, renderer, group, markerGroup, size };
+
+  // Drag-to-rotate
+  let dragging = false, lx = 0, ly = 0;
+  let rotV = { x: 0, y: 0 };
+  globeBig.addEventListener('pointerdown', (e) => {
+    dragging = true; lx = e.clientX; ly = e.clientY;
+    globeBig.setPointerCapture(e.pointerId);
+  });
+  globeBig.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - lx, dy = e.clientY - ly;
+    rotV.y += dx * 0.005;
+    rotV.x += dy * 0.005;
+    rotV.x = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, rotV.x));
+    lx = e.clientX; ly = e.clientY;
+  });
+  globeBig.addEventListener('pointerup',     () => { dragging = false; });
+  globeBig.addEventListener('pointerleave',  () => { dragging = false; });
+  globeBig.addEventListener('pointercancel', () => { dragging = false; });
+
+  // Resize on window resize while modal is open
+  function resize() {
+    const s = globeBig.clientWidth;
+    renderer.setSize(s, s);
+    cam.aspect = 1; cam.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', resize);
+
+  function animate() {
+    if (!dragging) {
+      rotV.y += 0.002;
+    }
+    group.rotation.y = rotV.y;
+    group.rotation.x = rotV.x;
+    renderer.render(scene, cam);
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+}
+
+function paintGlobeMarkers(data) {
+  if (!bigGlobeState || !data || !data.regions) return;
+  const { markerGroup } = bigGlobeState;
+  // Clear previous
+  while (markerGroup.children.length) {
+    const c = markerGroup.children.pop();
+    c.geometry && c.geometry.dispose();
+    c.material && c.material.dispose();
+  }
+
+  // Compute max pnl magnitude for color scaling
+  const pnls = data.regions.map(r => r.pnl);
+  const maxPnl = Math.max(...pnls, 0.0001);
+  const minPnl = Math.min(...pnls, -0.0001);
+
+  data.regions.forEach((r) => {
+    const pos = latLonToVec3(r.lat, r.lon, 1.02);
+    // Color: cyan for positive, scaled; orange for negative; grey for zero
+    let color = 0x4d9fff;
+    let intensity = 0.35;
+    if (r.total === 0) { color = 0x666666; intensity = 0.25; }
+    else if (r.pnl > 0) {
+      color = 0x00d9ff;
+      intensity = 0.5 + 0.5 * (r.pnl / maxPnl);
+    }
+    else if (r.pnl < 0) {
+      color = 0xff6600;
+      intensity = 0.5 + 0.5 * (r.pnl / minPnl);
+    }
+
+    // Marker dot
+    const dotSize = 0.04 + intensity * 0.06;
+    const dot = new THREE.Mesh(
+      new THREE.SphereGeometry(dotSize, 12, 8),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 }),
+    );
+    dot.position.copy(pos);
+    markerGroup.add(dot);
+
+    // Glow halo
+    const halo = new THREE.Mesh(
+      new THREE.SphereGeometry(dotSize * 2.2, 12, 8),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18 }),
+    );
+    halo.position.copy(pos);
+    markerGroup.add(halo);
+
+    // Vertical pin from surface
+    const top = pos.clone().multiplyScalar(1 + intensity * 0.18);
+    const pinGeo = new THREE.BufferGeometry().setFromPoints([pos, top]);
+    const pin = new THREE.Line(pinGeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.8 }));
+    markerGroup.add(pin);
+  });
+
+  // Connection lines between top regions
+  const top3 = data.regions.filter(r => r.total > 0).sort((a, b) => b.pnl - a.pnl).slice(0, 3);
+  for (let i = 0; i < top3.length - 1; i++) {
+    const a = latLonToVec3(top3[i].lat,     top3[i].lon,     1.05);
+    const b = latLonToVec3(top3[i + 1].lat, top3[i + 1].lon, 1.05);
+    // Curve through midpoint pulled outward
+    const mid = a.clone().add(b).multiplyScalar(0.5).normalize().multiplyScalar(1.35);
+    const curve = new THREE.QuadraticBezierCurve3(a, mid, b);
+    const pts = curve.getPoints(40);
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x00d9ff, transparent: true, opacity: 0.55 }));
+    markerGroup.add(line);
+  }
+}
+
+function paintRegionList(data) {
+  if (!gmRegions) return;
+  gmRegions.innerHTML = '';
+  const ranked = [...data.regions].sort((a, b) => b.pnl - a.pnl);
+  ranked.forEach((r, i) => {
+    const isTop = i === 0 && r.total > 0 && r.pnl > 0;
+    const isBad = r.pnl < 0;
+    const div = document.createElement('div');
+    div.className = 'gm-region' + (isTop ? ' top' : '') + (isBad ? ' bad' : '');
+    const pnlCls = r.pnl > 0 ? 'pos' : r.pnl < 0 ? 'neg' : '';
+    div.innerHTML = `
+      <div class="gm-name">${r.name}</div>
+      <div class="gm-stats">
+        <span>${r.total} trades · ${r.win_rate}%</span>
+        <span class="gm-pnl ${pnlCls}">${r.pnl >= 0 ? '+' : ''}${r.pnl.toFixed(2)} SOL</span>
+      </div>
+      <div class="gm-hours">UTC ${r.hours[0].toString().padStart(2, '0')}-${r.hours[r.hours.length - 1].toString().padStart(2, '0')}</div>`;
+    gmRegions.appendChild(div);
+  });
+}
+
+async function paintGlobeAnalysis(data) {
+  if (!gmStats || !data) return;
+  gmStats.textContent = 'Querying JARVIS…';
+  try {
+    const r = await fetch('/api/jarvis/ask', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(TG_INITDATA ? { 'X-Telegram-InitData': TG_INITDATA } : {}),
+      },
+      body: JSON.stringify({
+        question: 'Based on the per-region trading data, which sessions have been most and least productive for me? Give me one or two specific takeaways.',
+        context: {
+          total_closed: data.total_closed,
+          regions: data.regions,
+          top:   data.top,
+          worst: data.worst,
+        },
+      }),
+    });
+    if (!r.ok) { gmStats.textContent = '— JARVIS unavailable —'; return; }
+    const j = await r.json();
+    if (j && j.line) {
+      gmStats.textContent = j.line;
+      if (!LS.mute) speak(j.line, { priority: 'high' });
+    } else gmStats.textContent = '— no analysis returned —';
+  } catch (e) { gmStats.textContent = 'Network error.'; }
+}
+
+async function openGlobeModal() {
+  globeModal.classList.add('open');
+  haptic('medium');
+  sfx.engage();
+  buildBigGlobe();
+  // Resize canvas to actual rendered size now that it's visible
+  setTimeout(() => {
+    if (bigGlobeState) {
+      const s = globeBig.clientWidth;
+      bigGlobeState.renderer.setSize(s, s);
+    }
+  }, 100);
+
+  if (!bigGlobeData) bigGlobeData = await fetchTimezones();
+  if (bigGlobeData) {
+    paintGlobeMarkers(bigGlobeData);
+    paintRegionList(bigGlobeData);
+    paintGlobeAnalysis(bigGlobeData);
+  } else {
+    gmStats.textContent = 'Could not load timezone data.';
+  }
+}
+function closeGlobeModal() { globeModal.classList.remove('open'); haptic('light'); sfx.click(); }
+
+// Click the corner globe to open
+const cornerGlobe = document.getElementById('globe-3d');
+if (cornerGlobe) {
+  cornerGlobe.addEventListener('click', openGlobeModal);
+}
+gmCloseBtn.addEventListener('click', closeGlobeModal);
+globeModal.addEventListener('click', (e) => { if (e.target === globeModal) closeGlobeModal(); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && globeModal.classList.contains('open')) closeGlobeModal(); });
 
 /* ════════════════════════════════════════════════════════════════════
    THREE.js — WIREFRAME SOLANA GLOBE
