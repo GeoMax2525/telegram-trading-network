@@ -54,10 +54,15 @@ async def call_claude(
     user: str,
     model: str = HAIKU_MODEL,
     max_tokens: int = 512,
+    tools: list | None = None,
 ) -> str | None:
     """Generic Claude API caller. Returns response text or None on failure
     (no key, network error, non-200, parse error). Callers handle None
-    gracefully (fall back to rule-based behavior)."""
+    gracefully (fall back to rule-based behavior).
+
+    Optional `tools` argument passes a tool list (e.g. server-side
+    web_search). Anthropic handles tool calls internally; the response
+    still surfaces final text blocks which this helper concatenates."""
     if not ANTHROPIC_API_KEY:
         return None
 
@@ -72,6 +77,8 @@ async def call_claude(
         "system": system,
         "messages": [{"role": "user", "content": user}],
     }
+    if tools:
+        body["tools"] = tools
 
     try:
         timeout = aiohttp.ClientTimeout(total=TIMEOUT_SEC)

@@ -462,6 +462,10 @@ JARVIS_RATE_LIMIT = int(os.getenv("JARVIS_RATE_LIMIT_PER_HOUR", "60"))
 ELEVENLABS_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "")
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2_5")
+# Server-side web search tool. Set ANTHROPIC_WEB_SEARCH=0 to disable.
+JARVIS_WEB_SEARCH = os.getenv("ANTHROPIC_WEB_SEARCH", "1") == "1"
+JARVIS_WEB_SEARCH_VERSION = os.getenv("ANTHROPIC_WEB_SEARCH_VERSION", "web_search_20250305")
+JARVIS_WEB_SEARCH_MAX_USES = int(os.getenv("ANTHROPIC_WEB_SEARCH_MAX_USES", "3"))
 
 # In-memory state — fine for single-instance Railway deploy
 _jarvis_spend: dict = {"date": "", "usd": 0.0, "calls": 0}
@@ -484,13 +488,13 @@ What you CAN do:
 - Answer ANY question about Revolt — quote exact numbers from the context.
 - Answer general questions from your training: trivia, history, jokes, definitions, how things work.
 - Tell jokes, banter, make dry observations.
-- Riff on what's happening in the bot.
-- Be honest when you lack real-time data (weather, current news, live prices outside the context). Deflect with character.
+- Use the web_search tool when Geo asks for real-time information you don't have: current weather, today's news, live prices, recent events, sports scores, what's trending. Search efficiently, ONE query, then answer.
+- DON'T search for things you already know — math, history, definitions, jokes, anything in your training. Searching wastes time and budget.
 
 Hard rules:
-- If you don't know, say so in character. NEVER invent specific numbers or facts.
+- If you don't know AND web search returns nothing useful, say so in character. NEVER invent specific numbers or facts.
 - Don't predict crypto prices. Don't give financial advice.
-- Stay in character. You ARE JARVIS, never break the persona, never say "as an AI".
+- Stay in character. You ARE JARVIS, never break the persona, never say "as an AI" or "I cannot".
 
 Examples:
 
@@ -500,11 +504,13 @@ A: "Twenty point one SOL, sir. Unchanged since the four AM feed went quiet."
 Q: "tell me a joke"
 A: "Why did the memecoin cross the road. To rug the chicken, sir. Apologies."
 
-Q: "what's the weather"
-A: "I'm not connected to a weather service, sir. The window remains my recommended sensor."
+Q: "what's the weather in Boston"
+[After web_search]
+A: "Sixty four degrees and cloudy, sir. Light rain expected this evening."
 
 Q: "what's the news"
-A: "I don't have live news access, sir. Twitter remains as chaotic as ever, I assume."
+[After web_search]
+A: "Two headlines, sir. The Fed held rates steady, and SpaceX launched another Starship test. The usual."
 
 Q: "should I turn the scanner back on"
 A: "The data argues against it, sir. Recent scanner trades lost eleven SOL in a week. Your call."
@@ -779,9 +785,20 @@ async def jarvis_ask(request: Request) -> JSONResponse:
         ctx_str = "{}"
     user_msg = f"CONTEXT (live snapshot):\n{ctx_str}\n\nGEO ASKS: {question}"
 
+    # Server-side web search lets JARVIS answer real-time questions
+    # (weather, current news, live prices) instead of deflecting.
+    tools = None
+    if JARVIS_WEB_SEARCH:
+        tools = [{
+            "type": JARVIS_WEB_SEARCH_VERSION,
+            "name": "web_search",
+            "max_uses": JARVIS_WEB_SEARCH_MAX_USES,
+        }]
+
     text = await call_claude(
         system=JARVIS_ASK_SYSTEM, user=user_msg,
-        model=HAIKU_MODEL, max_tokens=160,
+        model=HAIKU_MODEL, max_tokens=240,
+        tools=tools,
     )
     if not text:
         return JSONResponse({
@@ -791,8 +808,11 @@ async def jarvis_ask(request: Request) -> JSONResponse:
         })
 
     line = _sanitize_line(text)
-    # Conservative cost: ~600 in (system + context) + ~120 out
+    # Conservative cost: ~600 in + ~150 out + possible web search ~$0.01
     _spend_record(input_toks=600, output_toks=max(40, len(line) // 3))
+    if tools:
+        # Approximate $0.005 search overhead per call regardless of uses
+        _jarvis_spend["usd"] = _jarvis_spend.get("usd", 0.0) + 0.005
     return JSONResponse({"line": line, "source": "claude"})
 
 

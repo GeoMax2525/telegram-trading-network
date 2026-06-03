@@ -1275,42 +1275,116 @@
   }
   [data-tip]:hover::after, [data-tip]:hover::before { opacity: 1; }
 
-  /* ═══════════════════════ WIREFRAME GLOBE BUTTON (corner) ═══════════════════════ */
-  #globe-button {
-    position: fixed;
-    right: 22px; top: 24px;
-    z-index: 58;
-    width: 88px;
+  /* ═══════════════════════ HOLOGRAPHIC GLOBE CENTERPIECE ═══════════════════════ */
+  #globe-hero {
+    position: relative;
+    width: 100%;
+    margin: 8px 0 24px;
     display: flex; flex-direction: column; align-items: center;
     cursor: pointer;
     user-select: none;
     -webkit-tap-highlight-color: transparent;
-    transition: transform 0.25s;
   }
-  #globe-button:hover { transform: scale(1.06); }
-  #globe-3d {
-    width: 80px; height: 80px;
-    opacity: 0.95;
-    filter: drop-shadow(0 0 14px var(--cyan-glow));
-    transition: filter 0.25s;
+  .globe-hero-rings {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 340px; height: 340px;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .globe-hero-rings::before,
+  .globe-hero-rings::after {
+    content: ''; position: absolute;
+    border-radius: 50%;
+    border: 1px solid rgba(0,217,255,0.18);
+    box-shadow: 0 0 24px rgba(0,217,255,0.10);
+  }
+  .globe-hero-rings::before {
+    inset: 0;
+    border-style: dashed;
+    animation: spinAll 28s linear infinite;
+  }
+  .globe-hero-rings::after {
+    inset: 30px;
+    border-color: rgba(77,159,255,0.22);
+    animation: spinAll 18s linear infinite reverse;
+  }
+  .globe-hero-pre {
+    position: absolute;
+    top: 8px; left: 50%; transform: translateX(-50%);
+    z-index: 2;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 10px; letter-spacing: 0.32em;
+    color: var(--cyan-pale);
+    opacity: 0.7; text-shadow: 0 0 8px var(--cyan-glow);
     pointer-events: none;
   }
-  #globe-button:hover #globe-3d { filter: drop-shadow(0 0 22px var(--cyan-primary)); }
+  #globe-3d {
+    width: 240px; height: 240px;
+    opacity: 0.96;
+    filter: drop-shadow(0 0 22px var(--cyan-glow));
+    transition: filter 0.25s, transform 0.25s;
+    pointer-events: none;
+    z-index: 1;
+  }
+  #globe-hero:hover #globe-3d { filter: drop-shadow(0 0 30px var(--cyan-primary)); transform: scale(1.03); }
   .globe-label {
-    margin-top: 4px;
+    margin-top: 8px;
     font-family: 'Orbitron', sans-serif;
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.26em;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.32em;
     color: var(--cyan-primary);
-    text-shadow: 0 0 8px var(--cyan-glow);
+    text-shadow: 0 0 10px var(--cyan-glow);
     text-align: center;
     pointer-events: none;
+    z-index: 1;
   }
+  .globe-hint {
+    margin-top: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.28em;
+    color: rgba(160,240,255,0.5);
+    pointer-events: none;
+    z-index: 1;
+  }
+  /* Corner brackets that snap on hover, locking the centerpiece */
+  .globe-hero-frame {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 296px; height: 296px;
+    pointer-events: none;
+    z-index: 1;
+    opacity: 0; transition: opacity 0.2s;
+  }
+  #globe-hero:hover .globe-hero-frame { opacity: 1; }
+  .globe-hero-frame::before, .globe-hero-frame::after,
+  .globe-hero-frame > i, .globe-hero-frame > b {
+    position: absolute;
+    width: 18px; height: 18px;
+    border: 1px solid var(--cyan-primary);
+    box-shadow: 0 0 8px var(--cyan-glow);
+    content: '';
+  }
+  .globe-hero-frame::before { top: 0;    left: 0;    border-right: none; border-bottom: none; }
+  .globe-hero-frame::after  { top: 0;    right: 0;   border-left: none;  border-bottom: none; }
+  .globe-hero-frame > i     { bottom: 0; left: 0;    border-right: none; border-top: none; display: block; }
+  .globe-hero-frame > b     { bottom: 0; right: 0;   border-left: none;  border-top: none; display: block; }
   @media (max-width: 768px) {
-    #globe-button { right: 14px; top: 14px; width: 60px; }
-    #globe-3d { width: 56px; height: 56px; }
-    .globe-label { font-size: 8px; letter-spacing: 0.18em; margin-top: 2px; }
+    #globe-3d { width: 180px; height: 180px; }
+    .globe-hero-rings { width: 260px; height: 260px; }
+    .globe-hero-frame { width: 220px; height: 220px; }
+    .globe-label { font-size: 11px; letter-spacing: 0.22em; }
+  }
+  @media (max-width: 480px) {
+    #globe-3d { width: 150px; height: 150px; }
+    .globe-hero-rings { width: 210px; height: 210px; }
+    .globe-hero-frame { width: 188px; height: 188px; }
+    .globe-hero-pre { font-size: 9px; letter-spacing: 0.22em; top: 4px; }
+    .globe-label { font-size: 10px; }
+    .globe-hint { font-size: 8px; }
   }
 
   /* ═══════════════════════ INTERACTIVE GLOBE MODAL ═══════════════════════ */
@@ -1486,11 +1560,8 @@
 <!-- Mouse reticle -->
 <div id="reticle"><div class="ret-ring"></div></div>
 
-<!-- Wireframe globe button (top-right) -->
-<div id="globe-button" role="button" aria-label="Open Geo Atlas">
-  <canvas id="globe-3d"></canvas>
-  <div class="globe-label">GEO · ATLAS</div>
-</div>
+<!-- Globe centerpiece moved into main flow above the agent grid -->
+
 
 <div class="cockpit-frame">
   <div class="corner tl"></div>
@@ -1549,6 +1620,16 @@
       <div id="sol-3d" class="ml-1 md:ml-2"></div>
     </div>
   </header>
+
+  <!-- Holographic globe centerpiece -->
+  <section id="globe-hero" role="button" aria-label="Open Geo Atlas" tabindex="0">
+    <div class="globe-hero-rings"></div>
+    <div class="globe-hero-pre">// GEO · ATLAS · TRADING SESSIONS</div>
+    <div class="globe-hero-frame"><i></i><b></b></div>
+    <canvas id="globe-3d"></canvas>
+    <div class="globe-label">TAP TO EXPAND</div>
+    <div class="globe-hint">CLAUDE WILL ANALYZE TIMEZONE PERFORMANCE</div>
+  </section>
 
   <div class="grid grid-cols-12 gap-6">
 
@@ -3819,11 +3900,11 @@ async function openGlobeModal() {
 }
 function closeGlobeModal() { globeModal.classList.remove('open'); haptic('light'); sfx.click(); }
 
-// Click the corner globe button to open the atlas
-const globeButton = document.getElementById('globe-button');
-if (globeButton) {
-  globeButton.addEventListener('click', openGlobeModal);
-  globeButton.addEventListener('keydown', (e) => {
+// Click the centered globe hero to open the atlas
+const globeHero = document.getElementById('globe-hero');
+if (globeHero) {
+  globeHero.addEventListener('click', openGlobeModal);
+  globeHero.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openGlobeModal(); }
   });
 }
@@ -3837,13 +3918,23 @@ window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && globeModal
 (() => {
   const mount = document.getElementById('globe-3d');
   if (!mount || !window.THREE) return;
-  const W = 140, H = 140;
+  function globeSize() {
+    const w = window.innerWidth;
+    if (w < 480) return 150;
+    if (w < 768) return 180;
+    return 240;
+  }
+  let W = globeSize(), H = W;
   const scene = new THREE.Scene();
-  const cam = new THREE.PerspectiveCamera(45, W/H, 0.1, 100);
+  const cam = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
   cam.position.z = 3;
   const renderer = new THREE.WebGLRenderer({ canvas: mount, alpha: true, antialias: true });
   renderer.setSize(W, H);
   renderer.setPixelRatio(window.devicePixelRatio || 1);
+  window.addEventListener('resize', () => {
+    const s = globeSize();
+    renderer.setSize(s, s);
+  });
 
   const geo = new THREE.SphereGeometry(1, 18, 14);
   const wireMat = new THREE.LineBasicMaterial({ color: 0x00d9ff, transparent: true, opacity: 0.7 });
