@@ -5088,6 +5088,97 @@ async def cmd_manualmode(message: Message):
     )
 
 
+@router.message(Command("claude_active_on"))
+async def cmd_claude_active_on(message: Message):
+    """Turn ON Claude active position management (Phase 5.5 Stage 2)."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from database.models import set_param
+    await set_param("claude_active_enabled", 1.0, "operator turned ON")
+    await message.reply(
+        "✅ Claude active trader ENABLED.\n\n"
+        "Defaults:\n"
+        "  • 180s cadence per open position\n"
+        "  • $3/day hard cap\n"
+        "  • 3 actions/position/hour max\n"
+        "  • Actions: HOLD / SET_TP / SET_SL / TAKE_PARTIAL / SCALE_IN / EXIT_NOW\n\n"
+        "View activity:   /claude_actions 20\n"
+        "Disable:         /claude_active_off",
+    )
+
+
+@router.message(Command("claude_active_off"))
+async def cmd_claude_active_off(message: Message):
+    """Turn OFF Claude active position management."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from database.models import set_param
+    await set_param("claude_active_enabled", 0.0, "operator turned OFF")
+    await message.reply(
+        "⏸ Claude active trader DISABLED.\n"
+        "Rule layer (TP/SL/trail/time-stop) continues unchanged.",
+    )
+
+
+@router.message(Command("claude_actions"))
+async def cmd_claude_actions(message: Message):
+    """Show recent Claude active-trading actions.
+
+    Usage: /claude_actions [N]   default N=15, max 40
+    """
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from sqlalchemy import select, desc
+    from database.models import AsyncSessionLocal, ClaudePositionAction
+
+    parts = (message.text or "").split()
+    try:
+        n = min(40, max(1, int(parts[1]))) if len(parts) > 1 else 15
+    except ValueError:
+        n = 15
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(ClaudePositionAction)
+            .order_by(desc(ClaudePositionAction.id))
+            .limit(n)
+        )).scalars().all()
+
+    if not rows:
+        await message.reply(
+            "No Claude active-trading actions yet.\n"
+            "Enable with: /claude_active_on",
+            parse_mode="",
+        )
+        return
+
+    lines = [
+        "━" * 28,
+        f"🤖 LAST {len(rows)} CLAUDE ACTIONS",
+        "━" * 28,
+        "",
+    ]
+    for r in rows:
+        ts = r.decided_at.strftime("%m-%d %H:%M") if r.decided_at else "?"
+        emoji = {
+            "HOLD": "⏸", "SET_TP": "🎯", "SET_SL": "🛡",
+            "TAKE_PARTIAL": "💰", "SCALE_IN": "💪", "EXIT_NOW": "🚪",
+        }.get(r.action, "•")
+        flag = "✅" if r.executed else "⏭"
+        name = (r.token_name or (r.token_address or "")[:8])[:18]
+        mult = f"{r.current_mult:.2f}x" if r.current_mult else "—"
+        lines.append(f"{flag} {emoji} {r.action}  {name}  {mult}  ({ts})")
+        if r.params_json and r.params_json != "{}":
+            lines.append(f"   params: {r.params_json[:80]}")
+        if r.reason:
+            lines.append(f"   why: {r.reason[:140]}")
+        if r.exec_note and r.exec_note != "hold":
+            lines.append(f"   exec: {r.exec_note[:140]}")
+        lines.append("")
+
+    await message.reply("\n".join(lines), parse_mode="")
+
+
 @router.message(Command("claude_spend"))
 async def cmd_claude_spend(message: Message):
     """Show today's Claude API spend, daily budget, and remaining headroom."""

@@ -376,6 +376,30 @@ class ClaudeEntryDecision(Base):
     context_json    = Column(Text,     nullable=True)
 
 
+class ClaudePositionAction(Base):
+    """Phase 5.5 Stage 2: log every Claude active-trading action taken on
+    an open position. One row per action. Lets /claude_actions show what
+    he's been doing and lets us attribute PnL to Claude vs rule layer."""
+    __tablename__ = "claude_position_actions"
+
+    id              = Column(Integer,  primary_key=True, autoincrement=True)
+    decided_at      = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    trade_id        = Column(Integer,  nullable=True, index=True)
+    token_name      = Column(String(64),  nullable=True)
+    token_address   = Column(String(64),  nullable=True, index=True)
+    action          = Column(String(24), nullable=False)   # HOLD/SET_TP/SET_SL/TAKE_PARTIAL/SCALE_IN/EXIT_NOW
+    params_json     = Column(Text,     nullable=True)
+    reason          = Column(String(256), nullable=True)
+    confidence      = Column(String(16),  nullable=True)
+    current_mult    = Column(Float,    nullable=True)
+    peak_mult       = Column(Float,    nullable=True)
+    age_min         = Column(Float,    nullable=True)
+    latency_ms      = Column(Integer,  nullable=True)
+    cost_usd        = Column(Float,    nullable=True)
+    executed        = Column(Boolean,  nullable=False, default=False)
+    exec_note       = Column(String(256), nullable=True)
+
+
 # ── Paper Trades table ────────────────────────────────────────────────────────
 
 class PaperTrade(Base):

@@ -107,6 +107,13 @@ GUIDELINES (flex these — they're starting points, not rules):
 - Token age < 60s = often gets sniped before us; downsize or skip
 - If similar_trades shows 4+ losses in last 5, skip this category for now
 
+CRITICAL — about our recent losses
+- The bot has historically had bad EXITS, not bad entries. We've captured ~1.3x average peak while the channel's true peak average is ~8.9x. We've left 85% of the upside on the table.
+- This means "recent similar-band trades are losses" is OFTEN a reflection of OUR bad exits, NOT a signal that the entry was bad.
+- Active position management (claude_active) now adjusts TP/SL/scale-in dynamically. With that running, the historical loss profile is misleading.
+- Weight CHANNEL hit rate at this MC band (if provided) HIGHER than our recent PnL when both are available. If the channel shows 30%+ hit rate at 2x in this band, that's a real edge even if our recent realized PnL has been bad.
+- Default toward GO when liquidity + chart + source are reasonable. Reject for SPECIFIC structural reasons (low liq, late-pump entry, broken chart, rugcheck risk) — NOT for "recent band losses".
+
 NO markdown fences. JSON only. Be specific in "reason" — "low liquidity + weak source" not "looks bad"."""
 
 
