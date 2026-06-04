@@ -797,7 +797,7 @@ async def jarvis_ask(request: Request) -> JSONResponse:
 
     text = await call_claude(
         system=JARVIS_ASK_SYSTEM, user=user_msg,
-        model=HAIKU_MODEL, max_tokens=240,
+        model=HAIKU_MODEL, max_tokens=600,
         tools=tools,
     )
     if not text:
@@ -807,7 +807,9 @@ async def jarvis_ask(request: Request) -> JSONResponse:
             "reason": "api_error",
         })
 
-    line = _sanitize_line(text)
+    # Conversational endpoint — allow longer responses so JARVIS can
+    # finish his thought (atlas analysis, multi-part questions).
+    line = _sanitize_line(text, max_len=1200)
     # Conservative cost: ~600 in + ~150 out + possible web search ~$0.01
     _spend_record(input_toks=600, output_toks=max(40, len(line) // 3))
     if tools:
@@ -903,15 +905,15 @@ def _format_event_for_claude(event_type: str, ctx: dict) -> str:
     return "\n".join(lines)
 
 
-def _sanitize_line(text: str) -> str:
+def _sanitize_line(text: str, max_len: int = 240) -> str:
     line = (text or "").strip()
     # Strip surrounding quotes / asterisks / backticks Claude sometimes adds
     line = line.strip("`*\"' \n")
     # Collapse newlines
     line = " ".join(line.split())
-    # Hard cap so a runaway response doesn't drone for 30 seconds
-    if len(line) > 240:
-        line = line[:237] + "..."
+    # Hard cap so a runaway response doesn't drone forever
+    if len(line) > max_len:
+        line = line[:max_len - 3] + "..."
     return line
 
 
