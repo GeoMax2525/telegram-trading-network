@@ -34,12 +34,15 @@ from database.models import (
     AgentParam,
     AsyncSessionLocal,
     ClaudeEntryDecision,
+    ClaudePositionAction,
     PaperTrade,
+    Token,
     Wallet,
     compute_paper_balance,
     count_open_paper_trades,
     get_all_params,
     get_hub_stats,
+    get_open_paper_trades,
     get_recent_paper_trades,
     get_top_wallets,
 )
@@ -401,23 +404,44 @@ async def api_dashboard(request: Request) -> JSONResponse:
             "wl":    f"{int(w.wins or 0)} / {int(w.losses or 0)}",
         })
 
-    # Neural core gauges — rough heuristics from real data
-    open_trades_for_calc = await _avg_open_trade_pnl_pct()
-    confidence = max(0, min(100, int(params.get("conf_paper_threshold", 45) + 40)))
-    # Risk: scale by drawdown + cold streak
-    cold = 30 if state.session_cold_streak else 0
-    risk = max(0, min(100, int(paper["drawdown_pct"] * 3 + cold)))
-    # Conviction: scale by hot streak + recent win rate
-    hot = 25 if state.session_hot_streak else 0
-    conviction = max(0, min(100, int(win_rate * 0.7 + hot)))
-    # Liquidity: derived from regime
-    regime_bias = {"HOT": 85, "NEUTRAL": 60, "COLD": 35}.get(state.market_regime, 60)
+    # Neural Core gauges — real market signals
+    #
+    #   VOLUME      Solana memecoin market activity vs baseline.
+    #               regime tracker writes meme_regime_volume_ratio
+    #               (current vol / EMA). 1.0 = baseline, >1.5 = HOT.
+    #   BUY/SELL    Aggregate momentum across our currently open
+    #               positions (avg current multiple). Above 1 = pumps
+    #               outweigh dumps right now. No open positions →
+    #               falls back to today's win/loss ratio.
+    #   CONFIDENCE  Claude active's recent action distribution. Lots
+    #               of HOLD / SET_TP / SCALE_IN = high conviction in
+    #               the open book. Lots of EXIT_NOW / TAKE_PARTIAL =
+    #               low conviction. No claude actions → falls back to
+    #               session streak heuristic.
+    #   LIQUIDITY   Avg liquidity USD across currently open positions,
+    #               scaled. Falls back to regime if no open positions.
+    vol_ratio = float(getattr(state, "meme_regime_volume_ratio", 1.0) or 1.0)
+    volume_score = max(0, min(100, int((vol_ratio - 0.5) * 100)))
+
+    if open_positions:
+        avg_mult = sum(p["current_mult"] for p in open_positions) / len(open_positions)
+        buysell_score = max(0, min(100, int((avg_mult - 0.5) * 100)))
+    else:
+        w = state.session_today_wins or 0
+        l = state.session_today_losses or 0
+        buysell_score = int((w / (w + l)) * 100) if (w + l) > 0 else 50
+
+    # Claude conviction — actions in last 60 min
+    confidence_score = await _claude_conviction_score()
+
+    # Liquidity from open positions' cached Token.liquidity_usd
+    liquidity_score = await _open_positions_liquidity_score(open_positions)
 
     neural = {
-        "confidence": confidence,
-        "risk":       risk,
-        "conviction": conviction,
-        "liquidity":  regime_bias,
+        "volume":     volume_score,
+        "buysell":    buysell_score,
+        "confidence": confidence_score,
+        "liquidity":  liquidity_score,
     }
 
     # Decision stream — interleave recent Claude entries + recent trades
@@ -477,6 +501,63 @@ async def api_dashboard(request: Request) -> JSONResponse:
         "system":      system,
         "auth":        auth,
     })
+
+
+async def _claude_conviction_score() -> int:
+    """0-100 score from Claude active's recent action distribution.
+    More HOLD / SET_TP / SCALE_IN = high conviction in the open book.
+    More EXIT_NOW / TAKE_PARTIAL = low conviction. Looks at last 60 min."""
+    try:
+        cutoff = datetime.utcnow() - timedelta(minutes=60)
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(ClaudePositionAction.action)
+                .where(ClaudePositionAction.decided_at >= cutoff)
+            )).all()
+        if rows:
+            total = len(rows)
+            bullish = sum(1 for (a,) in rows if a in ("HOLD", "SET_TP", "SCALE_IN"))
+            return int((bullish / total) * 100)
+    except Exception as exc:
+        logger.debug("conviction score: %s", exc)
+    # Fall back to session streak heuristic when no Claude actions yet
+    if state.session_hot_streak:
+        return 75
+    if state.session_cold_streak:
+        return 25
+    return 50
+
+
+async def _open_positions_liquidity_score(open_positions: list) -> int:
+    """0-100 score from avg liquidity USD of currently open positions.
+    Log-scaled: $1K → 18%, $10K → 40%, $100K → 60%, $1M → 80%, $10M → 100%.
+    Falls back to regime-derived score when no positions open or no liq data."""
+    fallback = {"HOT": 85, "NEUTRAL": 60, "COLD": 35}.get(state.market_regime, 60)
+    if not open_positions:
+        return fallback
+    try:
+        async with AsyncSessionLocal() as session:
+            ids = [p["id"] for p in open_positions]
+            mint_rows = (await session.execute(
+                select(PaperTrade.token_address).where(PaperTrade.id.in_(ids))
+            )).all()
+            mints = [r[0] for r in mint_rows if r[0]]
+            if not mints:
+                return fallback
+            liq_rows = (await session.execute(
+                select(Token.liquidity_usd).where(Token.mint.in_(mints))
+            )).all()
+        liq_vals = [float(r[0]) for r in liq_rows if r[0]]
+        if not liq_vals:
+            return fallback
+        avg_liq = sum(liq_vals) / len(liq_vals)
+        # log10(1K)=3, log10(10K)=4, log10(100K)=5, log10(1M)=6, log10(10M)=7
+        # Scale so 3 → 18%, 7 → 100%
+        scaled = (math.log10(max(avg_liq, 1)) - 2.5) / 4.5 * 100
+        return max(0, min(100, int(scaled)))
+    except Exception as exc:
+        logger.debug("liquidity score: %s", exc)
+        return fallback
 
 
 async def _avg_open_trade_pnl_pct() -> float:

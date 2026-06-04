@@ -1855,10 +1855,10 @@
           <span class="chip ai" id="n-claude">CLAUDE · 4.7</span>
         </div>
         <div class="grid grid-cols-2 gap-4">
-          <div class="gauge" id="g-conf" data-color="cyan"   data-label="CONFIDENCE"></div>
-          <div class="gauge" id="g-risk" data-color="red"    data-label="RISK"></div>
-          <div class="gauge" id="g-conv" data-color="bright" data-label="CONVICTION"></div>
-          <div class="gauge" id="g-liq"  data-color="cyan"   data-label="LIQUIDITY"></div>
+          <div class="gauge" id="g-vol"     data-color="cyan"   data-label="MEME · VOLUME"></div>
+          <div class="gauge" id="g-buysell" data-color="bright" data-label="BUY · / · SELL"></div>
+          <div class="gauge" id="g-conf"    data-color="cyan"   data-label="CONFIDENCE"></div>
+          <div class="gauge" id="g-liq"     data-color="bright" data-label="LIQUIDITY"></div>
         </div>
         <div class="mt-5">
           <div class="font-mono text-[10px] tracking-[0.3em] glow-pale mb-1">CORE · WAVEFORM</div>
@@ -2699,10 +2699,10 @@ function render(data) {
   renderWallets(data.wallets);
   renderTrades(data.trades);
 
-  renderGauge('g-conf', data.neural.confidence);
-  renderGauge('g-risk', data.neural.risk);
-  renderGauge('g-conv', data.neural.conviction);
-  renderGauge('g-liq',  data.neural.liquidity);
+  renderGauge('g-vol',     data.neural.volume);
+  renderGauge('g-buysell', data.neural.buysell);
+  renderGauge('g-conf',    data.neural.confidence);
+  renderGauge('g-liq',     data.neural.liquidity);
 
   renderStream(data.stream);
 
