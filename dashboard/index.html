@@ -2698,15 +2698,22 @@ if (window.matchMedia('(pointer: fine)').matches) {
     }
   });
 
-  container.addEventListener('pointerup', (e) => {
+  container.addEventListener('pointerup', () => {
     if (!dragEl) return;
     const wasDrag = dragEl.classList.contains('dragging');
     dragEl.classList.remove('dragging');
     dragEl.style.transform = '';
-    if (!wasDrag) {
-      const key = dragEl.dataset.key;
-      openAgentModal(key);
+    if (wasDrag) {
+      // Swallow the click that follows a drag so the card doesn't
+      // also open the modal. Without this AND the card's own click
+      // handler, every drag ended in an unwanted modal open.
+      const suppress = (ev) => { ev.stopImmediatePropagation(); ev.preventDefault(); };
+      window.addEventListener('click', suppress, { capture: true, once: true });
     }
+    // For non-drag clicks we do NOTHING here. The card's own click
+    // handler opens the modal exactly once. Calling openAgentModal
+    // from pointerup AS WELL was firing two Claude calls per tap and
+    // making JARVIS talk over himself.
     dragEl = null;
   });
 }
@@ -2832,14 +2839,16 @@ function speakBrowser(text, opts = {}) {
 let _activeAudio = null;
 async function speak(text, opts = {}) {
   if (!text || LS.mute) return;
+  // ALWAYS stop the in-flight voice so JARVIS never talks over himself.
+  // Earlier behavior only cancelled on opts.priority='high', which let
+  // two announcements stack any time something else triggered speak.
+  try { if (_activeAudio) { _activeAudio.pause(); _activeAudio = null; } } catch (e) {}
+  try { if (TTS) TTS.cancel(); } catch (e) {}
+  stopSpeakingParticles();
+
   hudShow(text);
   orbSpeakingOn();
   startSpeakingParticles();
-
-  if (opts.priority === 'high') {
-    try { _activeAudio && _activeAudio.pause(); } catch (e) {}
-    try { TTS && TTS.cancel(); } catch (e) {}
-  }
 
   try {
     const r = await fetch('/api/jarvis/tts', {
@@ -3177,13 +3186,27 @@ function startRecognizer(continuous) {
 }
 function stopRecognizer() {
   userRequestedStop = true;
+  // Immediately reflect the stopped state so a subsequent click can
+  // always start a fresh recognition session, even if onend never fires.
+  recognizing = false;
+  try { voiceFab.classList.remove('listening'); } catch (e) {}
   try { recognizer && recognizer.stop(); } catch (e) {}
+  try { recognizer && recognizer.abort && recognizer.abort(); } catch (e) {}
 }
 
 voiceFab.addEventListener('click', () => {
-  if (recognizing) { stopRecognizer(); return; }
-  startRecognizer(false);
   haptic('light');
+  if (recognizing) {
+    stopRecognizer();
+    return;
+  }
+  // Safety net: clear any stale audio before starting a new turn so
+  // JARVIS never speaks over the operator's incoming command.
+  try { if (_activeAudio) { _activeAudio.pause(); _activeAudio = null; } } catch (e) {}
+  try { if (TTS) TTS.cancel(); } catch (e) {}
+  stopSpeakingParticles();
+  orbSpeakingOff();
+  startRecognizer(false);
 });
 
 vcWake.addEventListener('click', () => {
