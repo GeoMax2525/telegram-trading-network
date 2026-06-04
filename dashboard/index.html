@@ -637,12 +637,30 @@
     0%,100% { box-shadow: 0 0 14px var(--cyan-primary), inset 0 0 6px var(--white); }
     50%     { box-shadow: 0 0 24px var(--cyan-primary), 0 0 40px var(--cyan-glow), inset 0 0 12px var(--white); }
   }
-  #voice-fab.speaking .arc-core { animation: arcCoreSpeak 0.35s ease-in-out infinite; }
-  @keyframes arcCoreSpeak {
-    0%,100% { transform: scale(1);    box-shadow: 0 0 16px var(--cyan-primary), 0 0 28px var(--cyan-glow), inset 0 0 8px var(--white); }
-    50%     { transform: scale(1.22); box-shadow: 0 0 28px var(--cyan-primary), 0 0 52px var(--cyan-glow), inset 0 0 14px var(--white); }
+  /* Calm slow breathing of the core while JARVIS speaks — no rapid
+     flashing. Sonar-style ripples emanate outward to indicate output. */
+  #voice-fab.speaking .arc-core { animation: arcCoreBreathe 2.6s ease-in-out infinite; }
+  @keyframes arcCoreBreathe {
+    0%,100% { transform: scale(1);    box-shadow: 0 0 14px var(--cyan-primary), inset 0 0 6px var(--white); }
+    50%     { transform: scale(1.04); box-shadow: 0 0 22px var(--cyan-primary), 0 0 36px var(--cyan-glow), inset 0 0 8px var(--white); }
   }
-  #voice-fab.speaking .arc-ring  { border-color: var(--cyan-bright); box-shadow: 0 0 34px var(--cyan-bright), inset 0 0 18px rgba(77,159,255,0.4); }
+  #voice-fab.speaking .arc-ring  { border-color: var(--cyan-primary); box-shadow: 0 0 22px var(--cyan-glow), inset 0 0 14px rgba(0,217,255,0.28); }
+  /* Sonar ripples — two rings expand and fade staggered while speaking */
+  #voice-fab .sonar { position: absolute; inset: 0; pointer-events: none; opacity: 0; }
+  #voice-fab .sonar::before, #voice-fab .sonar::after {
+    content: ''; position: absolute; inset: 0;
+    border-radius: 50%;
+    border: 1.5px solid var(--cyan-primary);
+    box-shadow: 0 0 14px var(--cyan-glow);
+  }
+  #voice-fab.speaking .sonar { opacity: 1; }
+  #voice-fab.speaking .sonar::before { animation: sonarRipple 2.4s ease-out infinite; }
+  #voice-fab.speaking .sonar::after  { animation: sonarRipple 2.4s ease-out 1.2s infinite; }
+  @keyframes sonarRipple {
+    0%   { transform: scale(1);   opacity: 0.85; }
+    80%  { opacity: 0.08; }
+    100% { transform: scale(2.4); opacity: 0; }
+  }
   #voice-fab.listening .arc-ring { border-color: var(--cyan-bright); box-shadow: 0 0 32px var(--cyan-bright), inset 0 0 16px rgba(77,159,255,0.45); }
   #voice-fab.listening .arc-core {
     background: radial-gradient(circle, #fff 0%, var(--cyan-bright) 35%, #003a6c 80%);
@@ -1824,6 +1842,7 @@
 
 <button id="voice-fab" aria-label="JARVIS">
   <span class="arc-halo"></span>
+  <span class="sonar"></span>
   <span class="arc-ring"></span>
   <span class="arc-ticks"></span>
   <span class="arc-inner"></span>
@@ -3137,9 +3156,16 @@ function applyIntent(intent, raw) {
 }
 
 let recognizer = null, recognizing = false, userRequestedStop = false;
-function startRecognizer(continuous) {
-  if (!SpeechRec) { return; }
+let _explicitTap = false;
+let _gotResult = false;
+function startRecognizer(continuous, explicit = false) {
+  if (!SpeechRec) {
+    showToast("Speech recognition not supported", "→ try Chrome or Edge");
+    return;
+  }
   if (recognizing) return;
+  _explicitTap = explicit;
+  _gotResult = false;
   recognizer = new SpeechRec();
   recognizer.lang = 'en-US';
   recognizer.continuous = !!continuous;
@@ -3152,16 +3178,28 @@ function startRecognizer(continuous) {
     voiceFab.classList.add('listening');
     activityLevel = Math.min(1, activityLevel + 0.4);
     beep(700, 0.08, 'sine', 0.06);
+    hudShow('Listening, sir.');
+  };
+  recognizer.onspeechstart = () => {
+    hudShow('Hearing you, sir...');
+  };
+  recognizer.onnomatch = () => {
+    hudShow("Didn't catch that, sir.");
   };
   recognizer.onresult = (ev) => {
+    _gotResult = true;
     const last = ev.results[ev.results.length - 1];
-    const transcript = last[0].transcript.trim();
+    const transcript = (last[0].transcript || '').trim();
+    if (!transcript) { hudShow("Silence, sir."); return; }
     let toParse = transcript;
-    if (LS.wake) {
+    // Wake word only applies in continuous-listen auto-cycles, NOT
+    // when the operator explicitly tapped the orb to speak.
+    if (LS.wake && !_explicitTap) {
       const stripped = stripWake(transcript);
-      if (stripped === null) return;
+      if (stripped === null) { return; }
       toParse = stripped;
     }
+    hudShow('Heard: ' + transcript);
     haptic('light');
     beep(1200, 0.06, 'sine', 0.05);
 
@@ -3176,13 +3214,45 @@ function startRecognizer(continuous) {
     // Everything else → Claude with full dashboard context.
     jarvisAsk(toParse);
   };
-  recognizer.onerror = () => {};
+  recognizer.onerror = (ev) => {
+    const err = (ev && ev.error) || 'unknown';
+    console.warn('JARVIS recognition error:', err, ev);
+    let msg;
+    switch (err) {
+      case 'not-allowed':
+      case 'service-not-allowed':
+        msg = "Microphone permission denied. Click the mic icon in the address bar and allow access.";
+        break;
+      case 'no-speech':
+        msg = "No speech detected, sir.";
+        break;
+      case 'audio-capture':
+        msg = "Microphone unavailable. Check your input device.";
+        break;
+      case 'network':
+        msg = "Speech service unreachable, sir. Network blip.";
+        break;
+      case 'aborted':
+        return; // user-initiated, no feedback needed
+      default:
+        msg = "Speech error: " + err;
+    }
+    hudShow(msg);
+    showToast(msg, '→ ' + err);
+  };
   recognizer.onend = () => {
     recognizing = false;
     voiceFab.classList.remove('listening');
+    if (_explicitTap && !_gotResult && !userRequestedStop) {
+      hudShow("Didn't hear you, sir. Tap and try again.");
+    }
     if (LS.wake && !userRequestedStop) setTimeout(() => { if (LS.wake) startRecognizer(true); }, 250);
   };
-  try { recognizer.start(); } catch (e) {}
+  try { recognizer.start(); }
+  catch (e) {
+    console.warn('JARVIS recognizer.start threw:', e);
+    showToast("Could not start mic: " + e.message, "→ permissions?");
+  }
 }
 function stopRecognizer() {
   userRequestedStop = true;
@@ -3206,7 +3276,8 @@ voiceFab.addEventListener('click', () => {
   try { if (TTS) TTS.cancel(); } catch (e) {}
   stopSpeakingParticles();
   orbSpeakingOff();
-  startRecognizer(false);
+  // explicit=true → bypass wake-word filter even if continuous mode is on
+  startRecognizer(false, true);
 });
 
 vcWake.addEventListener('click', () => {
