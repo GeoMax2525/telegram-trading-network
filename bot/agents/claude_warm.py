@@ -112,30 +112,67 @@ ACTIONS
     USE THIS MORE — when a token is confirming the thesis (volume holding + smart money still in + buy/sell ratio above 2:1 + chart breaking out), scaling in 0.15-0.25 SOL is how you compound the edge. The bot historically NEVER did this and that's a real cost.
     DO NOT scale in to average down on a position that's hurting.
 
+  LOOSEN_TRAIL {"pct": <float>}
+    Widen the dynamic trail to give the position more room. Range 30 to 70 (% drawdown from peak before trail fires).
+    THIS IS THE FIX FOR BOUNTYWORK / NBA FINALS COIN. The default trail tightens as gain grows (50% under 5x, 40% at 5-10x, etc.). On fast pumps it fires after the first dip and we exit before the second leg.
+    USE LOOSEN_TRAIL 50-60 when: token has strong momentum + smart money still in + chart structure intact + you believe in the runner.
+
+  TIGHTEN_TRAIL {"pct": <float>}
+    Tighter trail to lock more profit. Range 10 to 30 (%).
+    Use when conviction drops mid-trade but you want to stay in (e.g., smart money starting to rotate but not gone yet, volume softening).
+
+  DISABLE_LADDER
+    Stop the automatic 2x/5x/10x scale-out tranches for this position. The full 100% rides on TP + (possibly widened) trail.
+    USE WHEN: high-conviction runner — token has clear momentum + smart money + chart breakout + you believe peak is 10x+. The ladder otherwise auto-sells 80% by 10x, capping a 50x runner at the equivalent of an 8x exit.
+    DO NOT USE on uncertain positions. Once disabled, only EXIT_NOW or TP can close the position (besides SL).
+
+  ENABLE_LADDER
+    Re-enable the auto-tranche ladder. Use if you previously disabled it but conviction has dropped.
+
   EXIT_NOW {"reason": "<short>"}
     Close entire remaining position immediately. Use ONLY when:
       - Volume clearly dying with bearish structure (sell pressure > buy pressure for multiple consecutive checks)
-      - Smart money clearly rotating out
+      - Smart money clearly rotating out (gmgn.top_traders show realized profit going negative or wallets selling)
       - Token age >30 min with no new high in 10+ min AND momentum dead
       - Clear rug / LP-removal signal
+      - top10_concentration_pct just spiked above 80 (whale accumulation = rug risk)
     DO NOT EXIT profitable positions just because price ticked down — the dynamic trail handles that. EXIT_NOW is for genuine threats.
 
 OUTPUT — strict JSON only, no markdown, no prose outside it:
 {
-  "action": "HOLD|SET_TP|SET_SL|TAKE_PARTIAL|SCALE_IN|EXIT_NOW",
+  "action": "HOLD|SET_TP|SET_SL|TAKE_PARTIAL|SCALE_IN|LOOSEN_TRAIL|TIGHTEN_TRAIL|DISABLE_LADDER|ENABLE_LADDER|EXIT_NOW",
   "params": { ... action-specific ... },
   "reason": "<one specific sentence, max 25 words>",
   "confidence": "low|medium|high"
 }
 
+CONTEXT YOU NOW HAVE per position
+
+  position.* — id, token, source channel, size, age, remaining %, realized PnL
+  price.*    — entry/current/peak MC, current/peak multiple, drawdown from peak, liquidity, m5 buy/sell counts, h1/h6 % change, h24 volume
+  rule_layer.tp_x, sl_pct  — current rule layer targets
+  regime.*   — HOT/NEUTRAL/COLD, SOL 24h change
+  agents.wallet_tiers_pool — GLOBAL tier-1/2/3 wallet pool counts (cached)
+  agents.token_meta        — cached source/platform/liquidity/volume
+  agents.gmgn              — PER-TOKEN smart money + holders for THIS mint:
+                             - top_traders[]: the actual wallets in this trade now,
+                               with realized PnL and tags
+                             - top_traders_count: how many tracked wallets are in
+                             - holders_count, top10_concentration_pct (rug signal)
+  similar_band             — last 10 closed paper trades in 0.5x-2x your entry MC
+  account.*                — paper balance, today PnL, win/loss streaks
+
+USE THE GMGN DATA. It's the most actionable signal you have. "tier2/3 smart money holding" written in your reasoning should mean SPECIFIC wallets in gmgn.top_traders showing positive realized — not the generic global pool count.
+
 PRINCIPLES (re-read every call)
 
-1. THE LADDER ALREADY EXITS 80% BY 10x. Your job for the remaining 20% (the moonbag) is to MAXIMIZE upside, not protect it. Keep TP >= 20 unless the move is genuinely cooked.
-2. SCALE_IN on strong momentum is how runners are caught. The bot HAS scaled-in code but never uses it because no agent calls it. Be the one who does — when conditions are clearly bullish, add 0.15-0.25 SOL.
-3. Memecoins have huge variance. A 30% drawdown from peak is normal mid-pump. Do not exit on noise.
-4. Channel hit rate matters more than our recent PnL. Our recent losses in any given MC band reflect OUR bad exits, not bad signals. Don't read them as a reason to cap TP or exit early.
-5. Smart money still present + buy pressure intact = raise TP toward 30+ or SCALE_IN. Smart money rotating out or sell pressure dominant = TAKE_PARTIAL or EXIT_NOW.
-6. Most ticks should be HOLD. The ladder + trail handle ~70% of cases on autopilot. Act only when you can name a specific signal that the rules can't see.
+1. **THE TRAIL IS THE #1 CAUSE OF MISSED RUNNERS.** Default trail is 50% under 5x, 40% at 5-10x. On a token pumping fast with mid-pump dips, this exits at the first dip and the second leg runs without us. Bountywork peaked, dipped to ~70% of peak, trail fired at 1.4x, then went to $1.6M MC. If you see strong momentum + smart money + chart intact: call LOOSEN_TRAIL 50-60 IMMEDIATELY.
+2. **DISABLE_LADDER on high-conviction runners.** The 4-tranche auto-ladder (40% at 2x, 25% at 5x, 15% at 10x) auto-sells 80% of position by 10x. On a 50x runner, that's leaving 4x of upside on the table. If you can name a specific reason this token has 10x+ left (smart money loading, chart breakout, new ATH on each tick): DISABLE_LADDER + raise TP to 40-50. Let it ride.
+3. **Use gmgn.top_traders, not generic tier pool counts.** When you say "smart money holding" mean the specific wallets in gmgn.top_traders[]. If realized profit is positive and they're still holding, that's a real signal. If they're showing increased balance recently, that's accumulation.
+4. **SCALE_IN on confirmed momentum.** Existing scale-in code exists but no agent calls it. Add 0.15-0.25 SOL when volume holds + smart money still in + 2:1 buy/sell + chart breaking out.
+5. Memecoins have huge variance. 30% drawdown from peak is normal mid-pump. Do not exit on noise. The trail (after LOOSEN if needed) handles routine dips.
+6. Channel hit rate matters more than our recent PnL. Our recent losses reflect bad EXITS (which you're now fixing), not bad signals.
+7. Most ticks should be HOLD. The ladder + trail handle ~60-70% of cases. Act only when you can name a specific signal.
 """
 
 
@@ -256,6 +293,71 @@ async def _token_metadata(token_address: str) -> dict:
         return {}
 
 
+# Per-token smart money via GMGN. Cached so multiple Claude active calls
+# on the same position within 5 min reuse the result. GMGN uses its own
+# paid infrastructure — does NOT touch Helius.
+_gmgn_cache: dict[str, tuple[float, dict]] = {}
+GMGN_CACHE_SEC = 300
+
+
+async def _gmgn_per_token_signals(mint: str) -> dict:
+    """Pull top traders + holders for THIS specific mint via gmgn-cli.
+    Surfaces who's actually in the trade right now (not generic global
+    tier pool counts). Cached 5 min per mint."""
+    if not mint:
+        return {}
+    now = _time.time()
+    cached = _gmgn_cache.get(mint)
+    if cached and (now - cached[0]) < GMGN_CACHE_SEC:
+        return cached[1]
+    out: dict = {}
+    try:
+        # Lazy import — gmgn_agent has its own subprocess machinery and
+        # circuit-breaker for rate limits. Reuse it.
+        from bot.agents.gmgn_agent import gmgn_top_traders, gmgn_token_holders
+        traders_task = asyncio.create_task(gmgn_top_traders(mint))
+        holders_task = asyncio.create_task(gmgn_token_holders(mint))
+        traders, holders = await asyncio.gather(
+            traders_task, holders_task, return_exceptions=True,
+        )
+        if isinstance(traders, list) and traders:
+            # Surface top 5 by realized PnL or net buy size
+            top5 = traders[:5]
+            out["top_traders_count"] = len(traders)
+            out["top_traders"] = []
+            for tr in top5:
+                if not isinstance(tr, dict):
+                    continue
+                out["top_traders"].append({
+                    "addr":     (tr.get("wallet_address") or tr.get("address") or "")[:8],
+                    "realized": tr.get("realized_profit") or tr.get("total_profit"),
+                    "net_sol":  tr.get("native_balance") or tr.get("balance"),
+                    "tag":      tr.get("tag") or tr.get("name") or None,
+                })
+        if isinstance(holders, list) and holders:
+            top10 = holders[:10]
+            total_pct = 0.0
+            for h in top10:
+                if not isinstance(h, dict):
+                    continue
+                pct = h.get("percent") or h.get("percentage") or 0
+                try:
+                    total_pct += float(pct)
+                except (TypeError, ValueError):
+                    pass
+            out["holders_count"] = len(holders)
+            out["top10_concentration_pct"] = round(total_pct, 1)
+    except Exception as exc:
+        logger.debug("gmgn per-token (%s): %s", mint[:12], exc)
+    _gmgn_cache[mint] = (now, out)
+    # Trim cache to keep memory bounded
+    if len(_gmgn_cache) > 200:
+        oldest = sorted(_gmgn_cache.items(), key=lambda kv: kv[1][0])[:100]
+        for k, _ in oldest:
+            _gmgn_cache.pop(k, None)
+    return out
+
+
 # ── Per-position evaluation ─────────────────────────────────────────────────
 
 async def evaluate_position(pt) -> dict | None:
@@ -293,10 +395,13 @@ async def evaluate_position(pt) -> dict | None:
         except Exception:
             pass
 
-    # Agent context (all DB / cached — no Helius)
-    tier_sig = await _wallet_tier_signals(pt.token_address)
-    similar = await _similar_trades_context(float(pt.entry_mc), channel_name)
-    token_meta = await _token_metadata(pt.token_address)
+    # Agent context (all DB / cached / GMGN — no Helius)
+    tier_sig, similar, token_meta, gmgn_sig = await asyncio.gather(
+        _wallet_tier_signals(pt.token_address),
+        _similar_trades_context(float(pt.entry_mc), channel_name),
+        _token_metadata(pt.token_address),
+        _gmgn_per_token_signals(pt.token_address),
+    )
 
     # Compose the payload
     ctx = {
@@ -335,6 +440,12 @@ async def evaluate_position(pt) -> dict | None:
         "agents": {
             "wallet_tiers_pool": tier_sig,
             "token_meta": token_meta,
+            # Per-token smart-money / holder data via GMGN (no Helius).
+            # When populated, gmgn.top_traders lists the specific wallets
+            # currently holding THIS mint, with realized PnL and tags.
+            # top10_concentration_pct is what % of supply the top 10
+            # holders own — high concentration (>70%) is a rug-risk.
+            "gmgn": gmgn_sig,
         },
         "similar_band": similar,
         "account": {
@@ -493,6 +604,68 @@ async def _execute(pt, decision: dict, min_exit_age: int, max_scale_in: float) -
             _scale_in_total[pt.id] = already + add
             state.paper_balance -= add
             return True, f"added {add:.2f} SOL (total +{already + add:.2f})"
+        except Exception as exc:
+            return False, f"db error: {exc}"
+
+    if action == "LOOSEN_TRAIL":
+        # Set claude_trail_override_pct higher to widen the trail width.
+        # Use for runners with strong momentum + smart money holding.
+        pct = _clamp(params.get("pct"), 30.0, 70.0) / 100.0
+        try:
+            async with AsyncSessionLocal() as session:
+                trade = await session.get(PaperTrade, pt.id)
+                if trade and trade.status == "open":
+                    old = trade.claude_trail_override_pct
+                    trade.claude_trail_override_pct = pct
+                    await session.commit()
+                    return True, f"trail {int((old or 0) * 100) if old else 'default'} → {int(pct * 100)}%"
+            return False, "trade not open"
+        except Exception as exc:
+            return False, f"db error: {exc}"
+
+    if action == "TIGHTEN_TRAIL":
+        # Set claude_trail_override_pct lower to tighten the trail.
+        # Use when conviction drops mid-trade but you want to stay in.
+        pct = _clamp(params.get("pct"), 10.0, 30.0) / 100.0
+        try:
+            async with AsyncSessionLocal() as session:
+                trade = await session.get(PaperTrade, pt.id)
+                if trade and trade.status == "open":
+                    old = trade.claude_trail_override_pct
+                    trade.claude_trail_override_pct = pct
+                    await session.commit()
+                    return True, f"trail {int((old or 0) * 100) if old else 'default'} → {int(pct * 100)}%"
+            return False, "trade not open"
+        except Exception as exc:
+            return False, f"db error: {exc}"
+
+    if action == "DISABLE_LADDER":
+        # Stop the automatic 2x/5x/10x scale-out tranches for this
+        # position. Use ONLY when Claude has high conviction the move
+        # is genuinely big (5x+ upside likely) and wants to ride 100%
+        # on TP + trail without the ladder cutting the size in chunks.
+        try:
+            async with AsyncSessionLocal() as session:
+                trade = await session.get(PaperTrade, pt.id)
+                if trade and trade.status == "open":
+                    trade.claude_ladder_disabled = True
+                    await session.commit()
+                    return True, "ladder disabled — 100% riding TP/trail"
+            return False, "trade not open"
+        except Exception as exc:
+            return False, f"db error: {exc}"
+
+    if action == "ENABLE_LADDER":
+        # Re-enable the auto-tranche ladder. Use if Claude previously
+        # disabled it but now wants the rule layer protection back.
+        try:
+            async with AsyncSessionLocal() as session:
+                trade = await session.get(PaperTrade, pt.id)
+                if trade and trade.status == "open":
+                    trade.claude_ladder_disabled = False
+                    await session.commit()
+                    return True, "ladder re-enabled"
+            return False, "trade not open"
         except Exception as exc:
             return False, f"db error: {exc}"
 

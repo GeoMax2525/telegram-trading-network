@@ -415,7 +415,16 @@ async def _check_open_trades(bot) -> None:
             # Trail tightens as gain grows. Wide early lets the move
             # breathe (memecoins are noisy); tight late locks the meat.
             # Research consensus (ATR-style trailing, multiple sources).
+            #
+            # Phase 5.5 Stage 2.5: Claude active can override the trail
+            # width per-position via claude_trail_override_pct. When set
+            # (0.0-1.0), it replaces the dynamic ladder for THIS trade
+            # only — letting Claude loosen the trail on a runner he
+            # believes in, or tighten it on a fading position.
             def _dynamic_trail_pct(peak_m: float) -> float:
+                override = getattr(pt, "claude_trail_override_pct", None)
+                if override is not None and 0.05 <= override <= 0.80:
+                    return float(override)
                 if peak_m < 5.0:    return 0.50  # 2-5x: room to breathe
                 if peak_m < 10.0:   return 0.40  # 5-10x: tighten
                 if peak_m < 25.0:   return 0.30  # 10-25x: lock more
@@ -678,8 +687,17 @@ async def _check_open_trades(bot) -> None:
             # 15% at 10x (lock most of meat)
             # 20% rides on dynamic trail (the moonbag)
             scale_out_done = False
+            # Phase 5.5 Stage 2.5: Claude active can disable the auto
+            # 2x/5x/10x ladder per-position. When ladder is disabled,
+            # the position keeps 100% in flight and rides the (Claude-
+            # widened) trail + TP. Use this when Claude has high
+            # conviction the move has way more upside than the ladder
+            # tranches would let through.
+            ladder_disabled = bool(getattr(pt, "claude_ladder_disabled", False))
             if pt.subscriber_id is not None:
                 pass  # skip scale-out for subscribers
+            elif ladder_disabled:
+                pass  # Claude let it ride — no auto-tranche exits
             elif remaining > 80 and current_mult >= 2.0:
                 # First scale: 40% at 2x (Phase 2: was 30%)
                 # Recovers initial cost + 40% profit on the slice sold

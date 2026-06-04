@@ -443,6 +443,12 @@ class PaperTrade(Base):
     # Owner: NULL = admin (HQ), telegram_id = subscriber relay copy.
     # Admin-only stats/learning queries filter WHERE subscriber_id IS NULL.
     subscriber_id     = Column(BigInteger,  nullable=True, index=True)
+    # Phase 5.5 Stage 2.5: Claude active overrides. When set, paper_monitor
+    # uses these instead of the global trail / ladder defaults. Lets Claude
+    # let a clear runner ride without the 2x/5x/10x ladder cutting it
+    # short, or widen the trail beyond the default 30-35%.
+    claude_trail_override_pct = Column(Float,    nullable=True)   # NULL = use global default
+    claude_ladder_disabled    = Column(Boolean,  nullable=False, default=False, server_default="false")
 
     # Aliases so PaperTrade instances can be consumed by code written against Position
     # (Agent 6 learning loop treats paper trades as first-class learning signal).
@@ -613,6 +619,8 @@ _NEW_PAPER_TRADE_COLS = [
     ("last_move_at",      "TIMESTAMP"),
     ("last_move_mc",      "REAL"),
     ("subscriber_id",     "BIGINT"),
+    ("claude_trail_override_pct", "REAL"),
+    ("claude_ladder_disabled",    "BOOLEAN"),
     ("remaining_pct",     "REAL DEFAULT 100"),
     ("realized_pnl_sol",  "REAL DEFAULT 0"),
     ("trade_reasoning",   "TEXT"),
