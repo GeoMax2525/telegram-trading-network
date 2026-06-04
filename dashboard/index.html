@@ -1441,32 +1441,56 @@
   .gm-stat-overlay {
     position: absolute;
     right: 24px; bottom: 24px; top: 80px;
-    width: min(280px, 32vw);
+    width: min(320px, 34vw);
     z-index: 2;
-    background: rgba(10,22,40,0.85);
+    background: rgba(10,22,40,0.92);
     border: 1px solid var(--cyan-primary);
-    padding: 16px;
+    padding: 18px 16px;
     box-shadow: 0 0 18px var(--cyan-glow);
     font-family: 'JetBrains Mono', monospace;
-    font-size: 11px;
+    font-size: 12px;
+    line-height: 1.6;
     color: var(--cyan-faint);
     overflow-y: auto;
+    overflow-x: hidden;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    white-space: normal;
+    /* Custom scrollbar */
+    scrollbar-width: thin;
+    scrollbar-color: var(--cyan-primary) rgba(0,217,255,0.08);
   }
+  .gm-stat-overlay::-webkit-scrollbar { width: 6px; }
+  .gm-stat-overlay::-webkit-scrollbar-track { background: rgba(0,217,255,0.08); }
+  .gm-stat-overlay::-webkit-scrollbar-thumb { background: var(--cyan-primary); box-shadow: 0 0 6px var(--cyan-glow); }
   .gm-stat-overlay::before {
     content: '// JARVIS · ANALYSIS';
     display: block;
     font-family: 'Orbitron', sans-serif;
     font-size: 10px; letter-spacing: 0.28em;
     color: var(--cyan-primary);
-    margin-bottom: 8px;
+    margin-bottom: 10px;
+    position: sticky;
+    top: -18px;
+    background: rgba(10,22,40,0.95);
+    padding: 6px 0;
   }
   @media (max-width: 768px) {
-    .gm-regions { width: 92vw; left: 4vw; top: auto; bottom: 90px; max-height: 35vh; }
-    .gm-stat-overlay { display: none; }
-    #globe-big-canvas { width: 76vmin; height: 76vmin; }
+    .gm-regions { width: 92vw; left: 4vw; top: auto; bottom: 14px; max-height: 30vh; }
+    .gm-stat-overlay {
+      position: absolute;
+      top: 60px; left: 14px; right: 14px;
+      width: auto;
+      max-height: 26vh;
+      bottom: auto;
+      font-size: 11px;
+      padding: 12px 14px;
+    }
+    #globe-big-canvas { width: 70vmin; height: 70vmin; max-width: 60vh; max-height: 60vh; }
     .gm-header { left: 14px; top: 14px; }
     .gm-header .gm-title { font-size: 15px; }
     .gm-close { top: 14px; right: 14px; width: 32px; height: 32px; }
+    .gm-canvas-wrap { padding-top: 28vh; padding-bottom: 34vh; align-items: flex-start; }
   }
   .gm-hint {
     position: absolute;
@@ -3625,6 +3649,66 @@ async function fetchTimezones() {
   } catch (e) { return null; }
 }
 
+// Load a NASA-derived earth texture and sample land pixels, projecting
+// each onto the unit sphere. Returns Float32Array of [x,y,z, x,y,z, ...]
+// for THREE.Points. Falls back gracefully if the CDN texture fails.
+let _earthLandCache = null;
+async function loadEarthLandPositions(sampleStep = 3, brightnessMin = 60) {
+  if (_earthLandCache) return _earthLandCache;
+  const sources = [
+    'https://unpkg.com/three-globe@2.27.2/example/img/earth-blue-marble.jpg',
+    'https://cdn.jsdelivr.net/npm/three-globe@2.27.2/example/img/earth-blue-marble.jpg',
+  ];
+  for (const url of sources) {
+    try {
+      const out = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        const timer = setTimeout(() => reject(new Error('timeout')), 9000);
+        img.onload = () => {
+          clearTimeout(timer);
+          const W = 720, H = 360;
+          const canvas = document.createElement('canvas');
+          canvas.width = W; canvas.height = H;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, W, H);
+          let data;
+          try { data = ctx.getImageData(0, 0, W, H).data; }
+          catch (e) { reject(new Error('canvas tainted')); return; }
+          const positions = [];
+          for (let y = 0; y < H; y += sampleStep) {
+            for (let x = 0; x < W; x += sampleStep) {
+              const i = (y * W + x) * 4;
+              const r = data[i], g = data[i+1], b = data[i+2];
+              const avg = (r + g + b) / 3;
+              // Earth-blue-marble: water is dominantly blue, land is more
+              // mixed (greens, browns, whites). Reject blue-dominant px.
+              const blueDom = b > r + 15 && b > g + 5;
+              if (avg > brightnessMin && !blueDom) {
+                const lon = (x / W) * 360 - 180;
+                const lat = 90 - (y / H) * 180;
+                const phi = (90 - lat) * Math.PI / 180;
+                const theta = (lon + 180) * Math.PI / 180;
+                positions.push(
+                  -Math.sin(phi) * Math.cos(theta),
+                   Math.cos(phi),
+                   Math.sin(phi) * Math.sin(theta),
+                );
+              }
+            }
+          }
+          resolve(positions);
+        };
+        img.onerror = () => { clearTimeout(timer); reject(new Error('image load failed')); };
+        img.src = url;
+      });
+      _earthLandCache = out;
+      return out;
+    } catch (e) { /* try next source */ }
+  }
+  return null;
+}
+
 function buildBigGlobe() {
   if (bigGlobeReady || !window.THREE) return;
   bigGlobeReady = true;
@@ -3639,17 +3723,44 @@ function buildBigGlobe() {
   const group = new THREE.Group();
   scene.add(group);
 
-  // Wireframe earth
-  const sphereGeo = new THREE.SphereGeometry(1, 36, 28);
-  const edgesGeo  = new THREE.EdgesGeometry(sphereGeo, 1);
-  const wireMat   = new THREE.LineBasicMaterial({ color: 0x00d9ff, transparent: true, opacity: 0.55 });
-  const wire      = new THREE.LineSegments(edgesGeo, wireMat);
+  // Solid dark blue base sphere — water effect under the land dots
+  const baseMat = new THREE.MeshBasicMaterial({ color: 0x041729, transparent: true, opacity: 0.92 });
+  const base = new THREE.Mesh(new THREE.SphereGeometry(0.995, 48, 36), baseMat);
+  group.add(base);
+
+  // Wireframe overlay — meridians/parallels — subtle when dots present
+  const wireGeo = new THREE.SphereGeometry(1.001, 28, 20);
+  const edgesGeo = new THREE.EdgesGeometry(wireGeo, 1);
+  const wireMat  = new THREE.LineBasicMaterial({ color: 0x00d9ff, transparent: true, opacity: 0.18 });
+  const wire     = new THREE.LineSegments(edgesGeo, wireMat);
   group.add(wire);
 
-  // Outer faint shell
+  // Outer faint atmospheric shell
   const outerMat = new THREE.MeshBasicMaterial({ color: 0x4d9fff, transparent: true, opacity: 0.06, wireframe: true });
   const outer    = new THREE.Mesh(new THREE.SphereGeometry(1.18, 16, 12), outerMat);
   group.add(outer);
+
+  // Realistic continents — async load + project a NASA-derived land mask
+  // onto the sphere as glowing cyan dots. Falls back silently to plain
+  // wireframe if the CDN texture can't be reached or is CORS-tainted.
+  loadEarthLandPositions(3, 60).then((positions) => {
+    if (!positions || !positions.length || !bigGlobeState) return;
+    const earthGeo = new THREE.BufferGeometry();
+    earthGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    const earthMat = new THREE.PointsMaterial({
+      color: 0x00d9ff,
+      size: 0.018,
+      transparent: true,
+      opacity: 0.92,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const earth = new THREE.Points(earthGeo, earthMat);
+    bigGlobeState.group.add(earth);
+    // Once continents render, dim the wireframe grid further so the
+    // landmasses are the dominant feature.
+    wireMat.opacity = 0.10;
+  });
 
   // Latitude rings (subtle)
   const latRings = [];
