@@ -362,6 +362,87 @@
   .digit { font-family: 'Orbitron', sans-serif; font-weight: 800; font-variant-numeric: tabular-nums; }
 
   /* ── Trade row ── */
+  /* ─── Open positions ─── */
+  #open-positions { display: flex; flex-direction: column; gap: 8px; }
+  .open-pos-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 1.4fr) repeat(6, minmax(72px, 1fr));
+    gap: 10px;
+    align-items: center;
+    padding: 10px 14px;
+    background: rgba(0,217,255,0.05);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--cyan-primary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    transition: background 0.15s, border-color 0.15s, transform 0.15s;
+  }
+  .open-pos-row:hover {
+    background: rgba(0,217,255,0.10);
+    border-color: var(--cyan-primary);
+    transform: translateX(2px);
+  }
+  .open-pos-row.up   { border-left-color: var(--cyan-primary); }
+  .open-pos-row.down { border-left-color: var(--orange-warn); background: rgba(255,102,0,0.05); }
+  .open-pos-row.win  { border-left-color: var(--cyan-bright); box-shadow: 0 0 14px rgba(77,159,255,0.18); }
+  .op-token {
+    display: flex; flex-direction: column; gap: 2px;
+    min-width: 0;
+  }
+  .op-token .nm {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    color: var(--white);
+    text-shadow: 0 0 8px var(--cyan-glow);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .op-token .meta {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    opacity: 0.6;
+    display: flex; gap: 8px;
+  }
+  .op-token .src {
+    color: var(--cyan-primary);
+    padding: 0 4px; border: 1px solid var(--cyan-glow);
+    font-size: 8px;
+  }
+  .op-stat { text-align: center; }
+  .op-stat .lbl {
+    font-size: 8.5px;
+    letter-spacing: 0.18em;
+    opacity: 0.55;
+    text-transform: uppercase;
+    margin-bottom: 3px;
+  }
+  .op-stat .val {
+    font-family: 'Orbitron', sans-serif;
+    font-weight: 700;
+    font-size: 13px;
+    color: var(--cyan-faint);
+  }
+  .op-stat .val.up   { color: var(--cyan-primary); text-shadow: 0 0 8px var(--cyan-glow); }
+  .op-stat .val.down { color: var(--orange-warn); text-shadow: 0 0 8px var(--orange-soft); }
+  .op-stat .val.target { color: var(--cyan-bright); text-shadow: 0 0 8px var(--bright-glow); }
+  @media (max-width: 768px) {
+    .open-pos-row {
+      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-rows: auto auto;
+      gap: 6px 12px;
+      padding: 10px;
+    }
+    .op-token { grid-column: 1 / 4; }
+    .op-stat .val { font-size: 12px; }
+    .op-stat .lbl { font-size: 8px; }
+    /* hide the less-critical stats on mobile */
+    .op-stat.hide-mobile { display: none; }
+  }
+  @media (max-width: 480px) {
+    .open-pos-row { grid-template-columns: 1fr 1fr; }
+    .op-stat.hide-tiny { display: none; }
+  }
+
   .trade-row {
     position: relative;
     display: grid;
@@ -1732,6 +1813,15 @@
         </div>
       </section>
 
+      <!-- OPEN POSITIONS -->
+      <section class="panel p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div class="panel-title">// OPEN · POSITIONS</div>
+          <span class="chip live" id="op-count">— OPEN</span>
+        </div>
+        <div id="open-positions"></div>
+      </section>
+
       <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
         <section class="panel p-5 lg:col-span-2">
           <div class="flex items-center justify-between mb-4">
@@ -2435,11 +2525,74 @@ function renderWallets(wallets) {
 let _seenTradeIds = new Set();
 let _firstTradeLoad = true;
 
+function formatMC(n) {
+  if (!n) return '—';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+  if (n >= 1_000)     return (n / 1_000).toFixed(0) + 'K';
+  return String(n);
+}
+function formatAge(min) {
+  if (min < 60) return Math.round(min) + 'm';
+  if (min < 1440) return (min / 60).toFixed(1) + 'h';
+  return (min / 1440).toFixed(1) + 'd';
+}
+
+function renderOpenPositions(positions) {
+  const c = document.getElementById('open-positions');
+  const counter = document.getElementById('op-count');
+  if (!positions || !positions.length) {
+    c.innerHTML = `<div class="opacity-50 px-3 py-6 font-mono text-xs text-center">No open positions.</div>`;
+    if (counter) counter.textContent = '0 OPEN';
+    return;
+  }
+  if (counter) counter.textContent = `${positions.length} OPEN`;
+  c.innerHTML = positions.map((p) => {
+    const up = p.current_mult >= 1;
+    const valCls = up ? 'up' : 'down';
+    const rowCls = p.current_mult >= 2 ? 'win' : (up ? 'up' : 'down');
+    const sign = p.pnl_pct >= 0 ? '+' : '';
+    return `
+      <div class="open-pos-row ${rowCls}">
+        <div class="op-token">
+          <span class="nm">${escapeHtml(p.token)}</span>
+          <span class="meta"><span class="src">${escapeHtml(p.source)}</span><span>${p.size_sol} SOL</span></span>
+        </div>
+        <div class="op-stat">
+          <div class="lbl">ENTRY</div>
+          <div class="val">$${formatMC(p.entry_mc)}</div>
+        </div>
+        <div class="op-stat">
+          <div class="lbl">NOW</div>
+          <div class="val ${valCls}">${p.current_mult.toFixed(2)}x</div>
+        </div>
+        <div class="op-stat">
+          <div class="lbl">PnL</div>
+          <div class="val ${valCls}">${sign}${Math.round(p.pnl_pct)}%</div>
+        </div>
+        <div class="op-stat hide-tiny">
+          <div class="lbl">TP</div>
+          <div class="val target">${p.tp_x}x</div>
+        </div>
+        <div class="op-stat hide-mobile">
+          <div class="lbl">REMAIN</div>
+          <div class="val">${p.remaining_pct}%</div>
+        </div>
+        <div class="op-stat">
+          <div class="lbl">TIME</div>
+          <div class="val">${formatAge(p.age_min)}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
 function renderTrades(trades) {
   const tl = document.getElementById('trade-list');
   tl.innerHTML = '';
+  // Open trades have their own panel now — only show CLOSED here.
+  trades = (trades || []).filter(t => !t.open);
   if (!trades.length) {
-    tl.innerHTML = `<div class="opacity-50 px-3 py-4 font-mono text-xs">No trades yet.</div>`;
+    tl.innerHTML = `<div class="opacity-50 px-3 py-4 font-mono text-xs">No closed trades yet.</div>`;
     return;
   }
 
@@ -2542,6 +2695,7 @@ function render(data) {
   document.getElementById('t-mode-chip').textContent = (data.system.trade_mode || 'off').toUpperCase() + ' · MODE';
 
   renderAgents(data.agents);
+  renderOpenPositions(data.open_positions);
   renderWallets(data.wallets);
   renderTrades(data.trades);
 
@@ -2869,8 +3023,9 @@ async function speak(text, opts = {}) {
   orbSpeakingOn();
   startSpeakingParticles();
 
+  let r;
   try {
-    const r = await fetch('/api/jarvis/tts', {
+    r = await fetch('/api/jarvis/tts', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -2878,21 +3033,74 @@ async function speak(text, opts = {}) {
       },
       body: JSON.stringify({ text }),
     });
-    const ctype = r.headers.get('content-type') || '';
-    if (r.ok && ctype.startsWith('audio/')) {
+  } catch (e) {
+    console.warn('[speak] fetch failed:', e);
+    showToast('TTS fetch failed', '→ ' + (e.message || 'network'));
+    speakBrowser(text, opts);
+    return;
+  }
+
+  if (r.status === 429) {
+    console.warn('[speak] TTS rate limit (429)');
+    showToast('ElevenLabs rate-limited', '→ falling back to browser TTS');
+    speakBrowser(text, opts);
+    return;
+  }
+  if (r.status >= 500) {
+    console.warn('[speak] TTS server error', r.status);
+    showToast(`TTS server ${r.status}`, '→ falling back to browser TTS');
+    speakBrowser(text, opts);
+    return;
+  }
+
+  const ctype = r.headers.get('content-type') || '';
+  if (r.ok && ctype.startsWith('audio/')) {
+    try {
       const blob = await r.blob();
+      if (!blob.size) throw new Error('empty audio body');
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       _activeAudio = audio;
       audio.onended = () => { URL.revokeObjectURL(url); orbSpeakingOff(); hudHide(); stopSpeakingParticles(); _activeAudio = null; };
-      audio.onerror = () => { URL.revokeObjectURL(url); orbSpeakingOff(); hudHide(); stopSpeakingParticles(); _activeAudio = null; };
-      await audio.play();
+      audio.onerror = () => {
+        console.warn('[speak] audio element error');
+        showToast('Audio playback error', '→ falling back to browser TTS');
+        URL.revokeObjectURL(url); orbSpeakingOff(); hudHide(); stopSpeakingParticles(); _activeAudio = null;
+        speakBrowser(text, opts);
+      };
+      try {
+        await audio.play();
+      } catch (playErr) {
+        console.warn('[speak] audio.play rejected:', playErr);
+        showToast('Audio.play blocked', '→ ' + (playErr.name || 'NotAllowed'));
+        URL.revokeObjectURL(url); _activeAudio = null;
+        speakBrowser(text, opts);
+      }
+      return;
+    } catch (e) {
+      console.warn('[speak] blob/audio init failed:', e);
+      showToast('Audio init failed', '→ ' + (e.message || '?'));
+      speakBrowser(text, opts);
       return;
     }
-    speakBrowser(text, opts);
-  } catch (e) {
-    speakBrowser(text, opts);
   }
+
+  // Backend signaled "use browser TTS" via JSON (no key, ElevenLabs error, etc.)
+  if (r.ok && ctype.includes('application/json')) {
+    try {
+      const data = await r.json();
+      if (data && data.reason && data.reason !== 'no_elevenlabs_config') {
+        console.warn('[speak] backend fallback:', data.reason);
+        showToast('ElevenLabs upstream', '→ ' + data.reason);
+      }
+    } catch (e) { /* ignore */ }
+    speakBrowser(text, opts);
+    return;
+  }
+
+  console.warn('[speak] unexpected response', r.status, ctype);
+  showToast(`TTS ${r.status} ${ctype || 'no-type'}`, '→ browser TTS');
+  speakBrowser(text, opts);
 }
 
 async function jarvisSay(eventType, context = {}) {

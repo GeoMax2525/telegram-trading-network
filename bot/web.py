@@ -309,6 +309,40 @@ async def api_dashboard(request: Request) -> JSONResponse:
             "last_run": last.isoformat() if last else None,
         })
 
+    # Open positions — full live state (every open admin trade)
+    open_positions = []
+    # We need ALL currently-open positions, not just from the last 12 recent.
+    # The recent list may not include long-held opens.
+    all_open = await get_open_paper_trades()
+    now = datetime.utcnow()
+    for t in all_open:
+        if t.subscriber_id is not None:
+            continue
+        age_min = (now - t.opened_at).total_seconds() / 60.0 if t.opened_at else 0.0
+        peak_mult = float(t.peak_multiple or 1.0)
+        peak_mc   = float(t.peak_mc or t.entry_mc or 0)
+        entry_mc  = float(t.entry_mc or 0)
+        current_mult = peak_mult if peak_mult >= 1.0 else (peak_mc / entry_mc if entry_mc else 1.0)
+        pnl_pct = (current_mult - 1.0) * 100.0
+        open_positions.append({
+            "id":            t.id,
+            "token":         (t.token_name or t.token_address[:8])[:16],
+            "address":       t.token_address[:12] + "..." if t.token_address else "",
+            "source":        "4AM" if "tg_signal" in (t.pattern_type or "") else "Scanner",
+            "entry_mc":      int(entry_mc),
+            "current_mc":    int(peak_mc),
+            "current_mult":  round(current_mult, 2),
+            "peak_mult":     round(peak_mult, 2),
+            "pnl_pct":       round(pnl_pct, 1),
+            "tp_x":          round(float(t.take_profit_x or 0), 1),
+            "sl_pct":        round(float(t.stop_loss_pct or 0), 0),
+            "remaining_pct": round(float(t.remaining_pct or 100), 0),
+            "realized_pnl":  round(float(t.realized_pnl_sol or 0), 4),
+            "size_sol":      round(float(t.paper_sol_spent or 0), 3),
+            "age_min":       round(age_min, 1),
+        })
+    open_positions.sort(key=lambda p: p["age_min"])  # newest first
+
     # Recent trades — 12 newest, HQ-only
     trades = []
     for t in recent:
@@ -415,6 +449,7 @@ async def api_dashboard(request: Request) -> JSONResponse:
         "paper":       paper,
         "wallets":     wallets,
         "trades":      trades,
+        "open_positions": open_positions,
         "neural":      neural,
         "stream":      stream,
         "system":      system,
@@ -459,6 +494,8 @@ def _fmt_uptime(s: int) -> str:
 
 JARVIS_DAILY_BUDGET = float(os.getenv("JARVIS_DAILY_BUDGET_USD", "2.0"))
 JARVIS_RATE_LIMIT = int(os.getenv("JARVIS_RATE_LIMIT_PER_HOUR", "60"))
+# TTS is hit much more often (one per spoken line) so it gets a wider cap.
+JARVIS_TTS_RATE_LIMIT = int(os.getenv("JARVIS_TTS_RATE_LIMIT_PER_HOUR", "300"))
 ELEVENLABS_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "")
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2_5")
@@ -547,14 +584,15 @@ def _today_key() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d")
 
 
-def _rate_check(fingerprint: str) -> bool:
+def _rate_check(fingerprint: str, limit: int | None = None) -> bool:
     """Sliding-window limit per fingerprint. Returns True if allowed."""
+    cap = JARVIS_RATE_LIMIT if limit is None else limit
     now = time.time()
     cutoff = now - 3600
     q = _jarvis_rate[fingerprint]
     while q and q[0] < cutoff:
         q.popleft()
-    if len(q) >= JARVIS_RATE_LIMIT:
+    if len(q) >= cap:
         return False
     q.append(now)
     return True
@@ -822,10 +860,6 @@ async def jarvis_ask(request: Request) -> JSONResponse:
 async def jarvis_tts(request: Request) -> Response:
     """Synthesize text to speech via ElevenLabs. Falls back to a JSON signal
     when ELEVENLABS_API_KEY is unset, so the frontend uses browser TTS."""
-    fingerprint = _fingerprint(request)
-    if not _rate_check(fingerprint + ":tts"):
-        raise HTTPException(status_code=429, detail="TTS rate limit exceeded")
-
     try:
         body = await request.json()
     except Exception:
@@ -842,11 +876,17 @@ async def jarvis_tts(request: Request) -> Response:
             "reason": "no_elevenlabs_config",
         })
 
+    # Cache check BEFORE rate limit so duplicate lines never burn quota.
     cache_key = hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()
     if cache_key in _eleven_cache:
         ts, mp3 = _eleven_cache[cache_key]
         if time.time() - ts < 60:
             return Response(content=mp3, media_type="audio/mpeg")
+
+    # Rate-limit check applies only when we actually call ElevenLabs.
+    fingerprint = _fingerprint(request)
+    if not _rate_check(fingerprint + ":tts", limit=JARVIS_TTS_RATE_LIMIT):
+        raise HTTPException(status_code=429, detail="TTS rate limit exceeded")
 
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}"
     headers = {
