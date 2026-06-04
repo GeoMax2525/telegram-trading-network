@@ -138,16 +138,19 @@ async def api_sol() -> JSONResponse:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-# Map dashboard agent slots → (display name, AgentLog row name, meta builder)
+# Map dashboard agent slots → (display name, AgentLog row name, proxy_fallback)
+# Some agents (confidence_engine, chart_detector) run inline inside the
+# scanner pipeline and never log on their own. We use the scanner's
+# last-run timestamp as a proxy so they don't sit perpetually red.
 AGENT_SLOTS = [
-    ("SCN", "SCANNER",    "scanner_agent"),
-    ("HRV", "HARVESTER",  "harvester"),
-    ("WLT", "WALLETS",    "wallet_analyst"),
-    ("GMG", "GMGN",       "gmgn_agent"),
-    ("PTN", "PATTERNS",   "pattern_engine"),
-    ("CNF", "CONFIDENCE", "confidence_engine"),
-    ("LRN", "LEARNING",   "learning_loop"),
-    ("CHT", "CHARTS",     "chart_detector"),
+    ("SCN", "SCANNER",    "scanner",        None),
+    ("HRV", "HARVESTER",  "harvester",      None),
+    ("WLT", "WALLETS",    "wallet_analyst", None),
+    ("GMG", "GMGN",       "gmgn_wallets",   None),
+    ("PTN", "PATTERNS",   "pattern_engine", None),
+    ("CNF", "CONFIDENCE", "confidence_engine", "scanner"),
+    ("LRN", "LEARNING",   "learning_loop",  None),
+    ("CHT", "CHARTS",     "chart_detector", "scanner"),
 ]
 
 
@@ -165,9 +168,9 @@ def _agent_state(last_run: datetime | None) -> str:
     if last_run is None:
         return "WARN"
     age = (datetime.utcnow() - last_run).total_seconds()
-    if age < 180:
+    if age < 300:           # < 5 min: ONLINE
         return "ONLINE"
-    if age < 900:
+    if age < 1800:          # < 30 min: WARN (legitimate slow-cadence agents)
         return "WARN"
     return "ERR"
 
@@ -238,12 +241,27 @@ async def api_dashboard(request: Request) -> JSONResponse:
     last_runs = await _last_agent_runs()
     claude = await _claude_today()
 
-    # Header block
+    # Header block — decision string reflects BOTH layers:
+    #   "RULES"        — rule-based entry, rule-based mid-trade management
+    #   "AI · ENTRY"   — Claude decides entries, rules run mid-trade
+    #   "AI · ACTIVE"  — rules let signals through, Claude manages mid-trade
+    #   "AI · FULL"    — Claude does both entries AND mid-trade
+    entry_on  = int(params.get("claude_strategist_enabled", 0)) >= 1
+    active_on = int(params.get("claude_active_enabled", 0)) >= 1
+    if entry_on and active_on:
+        decision_str = "AI · FULL"
+    elif entry_on:
+        decision_str = "AI · ENTRY"
+    elif active_on:
+        decision_str = "AI · ACTIVE"
+    else:
+        decision_str = "RULES"
+
     header = {
         "brand":      "REVOLT",
         "operator":   "GEO",
         "trade_mode": state.trade_mode.upper(),
-        "decision":   "AI · CLAUDE" if int(params.get("claude_strategist_enabled", 0)) else "RULES",
+        "decision":   decision_str,
         "balance":    round(balance, 4),
         "balance_unit": "SOL",
     }
@@ -277,8 +295,12 @@ async def api_dashboard(request: Request) -> JSONResponse:
 
     # Agents (8 slots)
     agents = []
-    for key, name, log_name in AGENT_SLOTS:
+    for key, name, log_name, proxy_log in AGENT_SLOTS:
         last = last_runs.get(log_name)
+        if last is None and proxy_log:
+            # Use a related agent's last_run as freshness proxy for the
+            # agents that don't log on their own (confidence, charts).
+            last = last_runs.get(proxy_log)
         st = _agent_state(last)
         meta_bits = []
         if log_name == "scanner_agent":
