@@ -5324,6 +5324,52 @@ async def cmd_community_test(message: Message):
         )
 
 
+@router.message(Command("claude_report"))
+async def cmd_claude_report(message: Message):
+    """Full Claude analyst report over the trade history.
+
+    Usage: /claude_report          last 7 days
+           /claude_report 14       last 14 days
+           /claude_report all      everything
+    """
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from bot.agents.claude_cold import run_full_report
+    from bot.agents.claude_reasoning import claude_available
+
+    if not claude_available():
+        await message.reply("❌  ANTHROPIC_API_KEY not set.", parse_mode="")
+        return
+
+    parts = (message.text or "").split()
+    days = 7
+    if len(parts) > 1:
+        if parts[1].lower() == "all":
+            days = 0
+        else:
+            try:
+                days = max(1, min(90, int(parts[1])))
+            except ValueError:
+                pass
+
+    window = "all time" if days == 0 else f"last {days}d"
+    await message.reply(f"🧠  Claude is reviewing the full book ({window})… ~30s", parse_mode="")
+
+    try:
+        text = await run_full_report(days)
+    except Exception as exc:
+        await message.reply(f"Report failed: {exc}", parse_mode="")
+        return
+    if not text:
+        await message.reply("Report failed — Claude returned nothing. Check Railway logs.", parse_mode="")
+        return
+
+    header = "━" * 28 + f"\n🧠  CLAUDE FULL REPORT ({window})\n" + "━" * 28 + "\n\n"
+    full = header + text
+    for i in range(0, len(full), 3500):
+        await message.reply(full[i:i + 3500], parse_mode="")
+
+
 @router.message(Command("strategy_review"))
 @router.message(Command("review"))
 async def cmd_strategy_review(message: Message):
