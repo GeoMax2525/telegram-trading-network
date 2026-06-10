@@ -55,6 +55,7 @@ async def call_claude(
     model: str = HAIKU_MODEL,
     max_tokens: int = 512,
     tools: list | None = None,
+    timeout_sec: float = TIMEOUT_SEC,
 ) -> str | None:
     """Generic Claude API caller. Returns response text or None on failure
     (no key, network error, non-200, parse error). Callers handle None
@@ -81,7 +82,7 @@ async def call_claude(
         body["tools"] = tools
 
     try:
-        timeout = aiohttp.ClientTimeout(total=TIMEOUT_SEC)
+        timeout = aiohttp.ClientTimeout(total=timeout_sec)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(ANTHROPIC_URL, headers=headers, json=body) as resp:
                 if resp.status != 200:

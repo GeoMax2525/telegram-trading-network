@@ -200,6 +200,15 @@ def _build_full_digest(trades: list, actions: list, all_params: dict, days: int)
         for t in worst
     ]
 
+    # Claude's own per-close postmortems (persisted from close commentary)
+    with_pm = [t for t in trades if t.close_commentary]
+    pm_recent = sorted(with_pm, key=lambda t: t.closed_at or datetime.min, reverse=True)[:15]
+    pm_lines = [
+        f"  {(t.token_name or '?')[:16]} ({t.paper_pnl_sol:+.3f}): "
+        f"{t.close_commentary[:150]}"
+        for t in pm_recent
+    ] or ["  (none persisted yet — only trades closed after this feature shipped have one)"]
+
     act_counts: dict[str, int] = {}
     for a in actions:
         act_counts[a.action] = act_counts.get(a.action, 0) + 1
@@ -235,6 +244,8 @@ def _build_full_digest(trades: list, actions: list, all_params: dict, days: int)
         f"WORST CAPTURE GAPS (peak vs realized)\n" + "\n".join(gap_lines) + "\n\n"
         f"TOP 5 WINS\n" + "\n".join(best_lines) + "\n\n"
         f"TOP 5 LOSSES\n" + "\n".join(worst_lines) + "\n\n"
+        f"YOUR OWN CLOSE POSTMORTEMS (most recent {len(pm_recent)} of {len(with_pm)})\n"
+        + "\n".join(pm_lines) + "\n\n"
         f"ACTIVE TRADER ACTION COUNTS (last {len(actions)} logged)\n"
         + "\n".join(action_lines) + "\n\n"
         f"MOST RECENT ACTIONS\n" + "\n".join(recent_action_lines) + "\n\n"
@@ -274,6 +285,7 @@ async def run_full_report(days: int = 7) -> str | None:
         user=digest,
         model=SONNET_MODEL,
         max_tokens=1500,
+        timeout_sec=120.0,
     )
     if not text:
         logger.warning("claude_cold: full report call returned no text")
@@ -307,6 +319,7 @@ async def run_daily_review() -> dict | None:
         user=user_msg,
         model=SONNET_MODEL,
         max_tokens=2048,
+        timeout_sec=120.0,
     )
     if not text:
         logger.warning("claude_cold: Claude call returned no text")

@@ -72,10 +72,26 @@ async def _send_close_commentary(bot, pt, pnl: float, peak_mult: float, close_re
         text = await call_claude(
             system=system, user=user, model=HAIKU_MODEL, max_tokens=200,
         )
-        if not text or not bot:
+        if not text:
             return
-
         text = text.strip()
+
+        # Persist postmortem so /claude_report can analyze it later
+        try:
+            from sqlalchemy import update as _update
+            from database.models import AsyncSessionLocal, PaperTrade
+            async with AsyncSessionLocal() as s:
+                await s.execute(
+                    _update(PaperTrade)
+                    .where(PaperTrade.id == pt.id)
+                    .values(close_commentary=text[:1000])
+                )
+                await s.commit()
+        except Exception as exc:
+            logger.debug("close commentary persist failed: %s", exc)
+
+        if not bot:
+            return
         await bot.send_message(
             CALLER_GROUP_ID,
             f"🧠 {text}",

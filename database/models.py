@@ -427,6 +427,7 @@ class PaperTrade(Base):
     remaining_pct     = Column(Float,       nullable=False, default=100.0)  # % of position still open
     realized_pnl_sol  = Column(Float,       nullable=False, default=0.0)   # profit already taken
     trade_reasoning   = Column(String(512), nullable=True)  # why the trade was opened
+    close_commentary  = Column(String(1024), nullable=True)  # Claude's postmortem at close
     opened_at         = Column(DateTime,    default=datetime.utcnow, nullable=False)
     closed_at         = Column(DateTime,    nullable=True)
     # Post-close tracking (filled by monitor over 24h after close)
@@ -624,6 +625,7 @@ _NEW_PAPER_TRADE_COLS = [
     ("remaining_pct",     "REAL DEFAULT 100"),
     ("realized_pnl_sol",  "REAL DEFAULT 0"),
     ("trade_reasoning",   "TEXT"),
+    ("close_commentary",  "TEXT"),
 ]
 
 _NEW_AI_TRADE_PARAMS_COLS = [
