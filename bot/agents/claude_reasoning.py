@@ -42,6 +42,10 @@ SONNET_MODEL = os.getenv("ANTHROPIC_SONNET_MODEL", "claude-sonnet-4-6")
 
 TIMEOUT_SEC = 15.0
 
+# Last failure detail from call_claude — lets operator commands show the
+# real error instead of "check Railway logs".
+LAST_ERROR: str | None = None
+
 
 def claude_available() -> bool:
     """Master check — Phase 5 components no-op when this returns False."""
@@ -64,7 +68,9 @@ async def call_claude(
     Optional `tools` argument passes a tool list (e.g. server-side
     web_search). Anthropic handles tool calls internally; the response
     still surfaces final text blocks which this helper concatenates."""
+    global LAST_ERROR
     if not ANTHROPIC_API_KEY:
+        LAST_ERROR = "ANTHROPIC_API_KEY not set"
         return None
 
     headers = {
@@ -88,10 +94,12 @@ async def call_claude(
                 if resp.status != 200:
                     err = await resp.text()
                     logger.warning("Claude HTTP %d: %s", resp.status, err[:300])
+                    LAST_ERROR = f"HTTP {resp.status} (model={model}): {err[:200]}"
                     return None
                 data = await resp.json()
     except Exception as exc:
         logger.warning("Claude API failed: %s", exc)
+        LAST_ERROR = f"{type(exc).__name__}: {exc} (model={model}, timeout={timeout_sec}s)"
         return None
 
     blocks = data.get("content", []) or []
@@ -99,7 +107,11 @@ async def call_claude(
         b.get("text", "") for b in blocks
         if isinstance(b, dict) and b.get("type") == "text"
     )
-    return text or None
+    if text:
+        LAST_ERROR = None
+        return text
+    LAST_ERROR = f"200 OK but no text blocks (model={model}, stop={data.get('stop_reason')})"
+    return None
 
 
 def parse_json_response(text: str) -> dict | None:

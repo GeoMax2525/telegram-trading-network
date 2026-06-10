@@ -5361,7 +5361,9 @@ async def cmd_claude_report(message: Message):
         await message.reply(f"Report failed: {exc}", parse_mode="")
         return
     if not text:
-        await message.reply("Report failed — Claude returned nothing. Check Railway logs.", parse_mode="")
+        from bot.agents import claude_reasoning
+        detail = claude_reasoning.LAST_ERROR or "unknown — check Railway logs"
+        await message.reply(f"Report failed.\nError: {detail}", parse_mode="")
         return
 
     header = "━" * 28 + f"\n🧠  CLAUDE FULL REPORT ({window})\n" + "━" * 28 + "\n\n"
