@@ -5163,6 +5163,8 @@ async def cmd_claude_actions(message: Message):
         emoji = {
             "HOLD": "⏸", "SET_TP": "🎯", "SET_SL": "🛡",
             "TAKE_PARTIAL": "💰", "SCALE_IN": "💪", "EXIT_NOW": "🚪",
+            "LOOSEN_TRAIL": "🪁", "TIGHTEN_TRAIL": "🪢",
+            "DISABLE_LADDER": "🚀", "ENABLE_LADDER": "🪜",
         }.get(r.action, "•")
         flag = "✅" if r.executed else "⏭"
         name = (r.token_name or (r.token_address or "")[:8])[:18]
@@ -5176,7 +5178,17 @@ async def cmd_claude_actions(message: Message):
             lines.append(f"   exec: {r.exec_note[:140]}")
         lines.append("")
 
-    await message.reply("\n".join(lines), parse_mode="")
+    # Telegram caps messages at 4096 chars — send in line-aligned chunks
+    chunk: list[str] = []
+    size = 0
+    for line in lines:
+        if size + len(line) + 1 > 3500 and chunk:
+            await message.reply("\n".join(chunk), parse_mode="")
+            chunk, size = [], 0
+        chunk.append(line)
+        size += len(line) + 1
+    if chunk:
+        await message.reply("\n".join(chunk), parse_mode="")
 
 
 @router.message(Command("claude_spend"))
