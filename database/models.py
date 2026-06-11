@@ -2877,20 +2877,28 @@ async def reset_ai_trade_params_samples() -> int:
 
 async def close_paper_trade(
     trade_id: int, close_reason: str, pnl_sol: float, peak_mc: float | None, peak_mult: float | None,
-) -> None:
+) -> bool:
+    """Close a paper trade. Atomic guard on status=='open' so concurrent
+    closers (rule trail vs Claude EXIT_NOW) can't both book PnL — only the
+    first wins. Returns True if this call performed the close."""
+    values: dict = {
+        "status": "closed",
+        "close_reason": close_reason,
+        "paper_pnl_sol": pnl_sol,
+        "closed_at": datetime.utcnow(),
+    }
+    if peak_mc:
+        values["peak_mc"] = peak_mc
+    if peak_mult:
+        values["peak_multiple"] = peak_mult
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(PaperTrade).where(PaperTrade.id == trade_id))
-        pt = result.scalar_one_or_none()
-        if pt:
-            pt.status = "closed"
-            pt.close_reason = close_reason
-            pt.paper_pnl_sol = pnl_sol
-            pt.closed_at = datetime.utcnow()
-            if peak_mc:
-                pt.peak_mc = peak_mc
-            if peak_mult:
-                pt.peak_multiple = peak_mult
-            await session.commit()
+        result = await session.execute(
+            update(PaperTrade)
+            .where(PaperTrade.id == trade_id, PaperTrade.status == "open")
+            .values(**values)
+        )
+        await session.commit()
+        return bool(result.rowcount)
 
 
 async def update_paper_trade_peak(trade_id: int, current_mc: float, peak_mc: float, peak_mult: float) -> None:

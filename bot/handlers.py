@@ -5101,7 +5101,7 @@ async def cmd_claude_active_on(message: Message):
         "  • 180s cadence per open position\n"
         "  • $3/day hard cap\n"
         "  • 3 actions/position/hour max\n"
-        "  • Actions: HOLD / SET_TP / SET_SL / TAKE_PARTIAL / SCALE_IN / EXIT_NOW\n\n"
+        "  • Actions: HOLD / SET_TP / SET_SL / TAKE_PARTIAL / trail / ladder / EXIT_NOW\n\n"
         "View activity:   /claude_actions 20\n"
         "Disable:         /claude_active_off",
     )

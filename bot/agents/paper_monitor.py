@@ -140,13 +140,18 @@ MAX_FETCH_FAILS    = 5     # consecutive failures before auto-close
 _fetch_fail_counts: dict[int, int] = {}
 
 
-async def _close_and_track(trade_id, reason, pnl, peak_mc, peak_mult, is_admin: bool = True):
+async def _close_and_track(trade_id, reason, pnl, peak_mc, peak_mult, is_admin: bool = True) -> bool:
     """Close a paper trade AND update session context in one call.
+    Returns False if the trade was already closed (lost the race to a
+    concurrent closer) — callers must skip refunds/cards/streaks then.
     Session context only tracks admin (HQ) outcomes — subscriber relay
     closes don't influence HQ session streaks."""
-    await close_paper_trade(trade_id, reason, pnl, peak_mc, peak_mult)
+    closed = await close_paper_trade(trade_id, reason, pnl, peak_mc, peak_mult)
+    if not closed:
+        logger.info("paper close skipped — trade %s already closed (race)", trade_id)
+        return False
     if not is_admin:
-        return
+        return True
     if reason in ("tp_hit", "trail_hit", "profit_trail"):
         _update_session_context("win")
     elif reason in ("breakeven_stop",):
@@ -156,6 +161,7 @@ async def _close_and_track(trade_id, reason, pnl, peak_mc, peak_mult, is_admin: 
     # dead_api / dead_token are backup-SL meta closes — not counted as
     # strategy losses for streak/regime detection (they bypassed the
     # primary SL window via grace period or fetch failure).
+    return True
 
 
 async def _refund_subscriber_balance(sub_id: int, locked_sol: float, pnl: float) -> float:
@@ -191,7 +197,11 @@ async def _finalize_paper_close(
     HQ feed is NOT touched and HQ session streak is NOT influenced.
     """
     is_admin = pt.subscriber_id is None
-    await _close_and_track(pt.id, reason, pnl, peak_mc, peak_mult, is_admin=is_admin)
+    closed = await _close_and_track(pt.id, reason, pnl, peak_mc, peak_mult, is_admin=is_admin)
+    if not closed:
+        # Lost the race to a concurrent closer — no card, no refund,
+        # no streak. The winning close already handled all of it.
+        return state.paper_balance
 
     # Source tag — append to every close card so user can see at-a-glance
     # which source each trade came from. Also include trade age so user
@@ -253,7 +263,9 @@ async def _finalize_silent_close(pt, reason, pnl, peak_mc, peak_mult):
     """Close trade without posting any notification — used for time-based
     cleanups (stale/expired) and dead_api closes that intentionally stay
     quiet. Still refunds balance for the correct owner."""
-    await _close_and_track(pt.id, reason, pnl, peak_mc, peak_mult)
+    closed = await _close_and_track(pt.id, reason, pnl, peak_mc, peak_mult)
+    if not closed:
+        return state.paper_balance
     if pt.subscriber_id is None:
         if reason == "sl_hit":
             _update_session_context("loss")
@@ -638,64 +650,14 @@ async def _check_open_trades(bot) -> None:
                     )
                     continue
 
-            # ── Scale IN: add size when token proves itself ────────────────
-            # Probe with 0.1 SOL, then scale up if the token pumps.
-            # This is how real traders work — don't risk big until it proves.
-            # HQ-only: subscriber relay rows have a fixed 0.1 SOL probe and
-            # don't scale; scaling them would also drain admin paper_balance.
-            #
-            # Upper cap at 1.95x: above 2.0x the scale-out branch fires in
-            # the same tick, which used to mean we'd add 0.2 SOL THEN sell
-            # 30% of it at the same price — wasteful round-trip. Confirmation
-            # zone is 1.5x-1.95x (token is moving but not yet at first profit
-            # target); scale-out owns 2.0x+.
-            age_min = age_hours * 60
-            if (pt.subscriber_id is None
-                    and 1.5 <= current_mult < 1.95 and age_min >= 2 and age_min <= 10
-                    and sol < 0.25 and remaining >= 100):
-                # Token pumped 50%+ in first 2-10 min — add more size
-                add_sol = 0.2
-                if state.paper_balance >= add_sol + 0.1:
-                    try:
-                        async with AsyncSessionLocal() as sess:
-                            trade = await sess.get(PaperTrade, pt.id)
-                            if trade:
-                                trade.paper_sol_spent = round(trade.paper_sol_spent + add_sol, 4)
-                                await sess.commit()
-                                sol = trade.paper_sol_spent  # update local var
-                    except Exception:
-                        pass
-                    state.paper_balance -= add_sol
-                    logger.info(
-                        "Paper SCALE IN %s: added %.2f SOL at %.1fx | total position: %.2f SOL",
-                        name, add_sol, current_mult, sol,
-                    )
-                    src_tag = "⚡ 4AM" if is_tg_signal else "🔍 Scanner"
-                    _scale_in_text = "\n".join([
-                        f"💪 PAPER TRADE — SCALE IN ({src_tag})",
-                        f"🪙 {name} | {current_mult:.1f}x confirmed | +{add_sol} SOL added",
-                        f"Total position: {sol:.2f} SOL",
-                    ])
-                    try:
-                        await bot.send_message(
-                            CALLER_GROUP_ID, _scale_in_text,
-                            message_thread_id=SCAN_TOPIC_ID,
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        from bot.community_feed import post_to_community
-                        await post_to_community(bot, _scale_in_text)
-                    except Exception as exc:
-                        logger.debug("community_feed scale-in mirror failed: %s", exc)
+            # Scale-in removed (June 10 2026 audit): adding SOL mid-trade
+            # without adjusting entry_mc booked phantom profit (~2x inflated
+            # wins), and adds at 1.5-1.95x bought into the launch-chop bleed
+            # zone right before the 2x ladder sold. May return later via the
+            # Fable escalation lane with weighted-average entry math.
 
             # ── Scale OUT: sell partial at milestones ────────────────────
             # 30% at 2x, 25% at 5x, trail the remaining 45%
-            # remaining + realized hoisted earlier — re-read in case scale-in
-            # mutated paper_sol_spent (it doesn't touch remaining_pct, but
-            # safer to refresh against the row state).
-            remaining = float(getattr(pt, "remaining_pct", 100) or 100)
-            realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
 
             # Scale-out partial sells are HQ-only — subscriber relay rows
             # ride the full position to TP/SL/trail. Realized PnL on relay

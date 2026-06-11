@@ -3,9 +3,9 @@ claude_warm.py — Phase 5.5 Stage 2: Claude as active position manager.
 
 For every open paper trade, Claude gets the full picture (price, on-chain
 proxies via cached agents, regime, similar trades) on a ~3-min cadence
-and takes a real action: HOLD, SET_TP, SET_SL, TAKE_PARTIAL, SCALE_IN,
-or EXIT_NOW. All actions execute. All actions are logged to the
-claude_position_actions table.
+and takes a real action: HOLD, SET_TP, SET_SL, TAKE_PARTIAL, trail
+overrides, ladder toggles, or EXIT_NOW. All actions execute. All actions
+are logged to the claude_position_actions table.
 
 Why this exists: rule-based exits were closing 1000x runners at 1.1x.
 Claude reads the live state and the comparable-trade history and adjusts
@@ -22,7 +22,9 @@ Safety
   - Max 3 actions per position per hour
   - EXIT only allowed after position age >= 60s
   - SL widening capped at -50% absolute from entry
-  - Scale-in total capped at +0.5 SOL per position
+  - SCALE_IN removed (June 10 2026 audit): adding SOL without adjusting
+    entry_mc booked phantom profit. May return via the Fable lane with
+    weighted-average entry math once clean data supports it.
   - SET_TP in [1.5, 20.0], SET_SL in [10, 50]
   - EXIT_NOW gated below 1.3x on positions younger than the time stop
     (all-time sub-1.3x claude_exit record: 81 closes, 1 win, -2.0 SOL)
@@ -61,7 +63,6 @@ DEFAULT_SKIP_PCT       = 5.0          # skip if price within +/- this % since la
 DEFAULT_DAILY_BUDGET   = 3.0          # $/day cap
 DEFAULT_MAX_ACTIONS_HR = 3            # per position
 DEFAULT_MIN_EXIT_AGE   = 60           # seconds before EXIT_NOW is allowed
-DEFAULT_MAX_SCALE_IN   = 0.5          # SOL ceiling on additive scale-in per position
 
 # Conservative cost estimate per call. Haiku 4.5 ≈ $1/M in + $5/M out.
 # 1500 in + 150 out ≈ $0.002 per call.
@@ -81,7 +82,6 @@ _fable_spend: dict = {"date": "", "usd": 0.0}
 _last_checked_ts: dict[int, float] = {}        # trade_id → last unix ts
 _last_checked_mc: dict[int, float] = {}        # trade_id → MC at last check
 _actions_per_trade: dict[int, list[float]] = {} # trade_id → recent action timestamps
-_scale_in_total: dict[int, float] = {}         # trade_id → cumulative scale-in SOL
 _daily_spend: dict = {"date": "", "usd": 0.0}
 
 
@@ -120,11 +120,6 @@ ACTIONS
     Sell pct% of remaining position OUTSIDE the ladder. Range 10 to 50.
     Use ON TOP OF the 2x/5x/10x ladder when you want to lock more at a specific moment (e.g., 20% partial at 7x to bank extra ahead of suspected exhaustion). NOT a substitute for raising TP.
 
-  SCALE_IN {"sol": <float>}
-    Add SOL to the position. Range 0.05 to 0.3 per single action, total capped at +0.5 SOL per position.
-    USE THIS MORE — when a token is confirming the thesis (volume holding + smart money still in + buy/sell ratio above 2:1 + chart breaking out), scaling in 0.15-0.25 SOL is how you compound the edge. The bot historically NEVER did this and that's a real cost.
-    DO NOT scale in to average down on a position that's hurting.
-
   LOOSEN_TRAIL {"pct": <float>}
     Widen the dynamic trail to give the position more room. Range 30 to 70 (% drawdown from peak before trail fires).
     THIS IS THE FIX FOR BOUNTYWORK / NBA FINALS COIN. The default trail tightens as gain grows (50% under 5x, 40% at 5-10x, etc.). On fast pumps it fires after the first dip and we exit before the second leg.
@@ -154,7 +149,7 @@ ACTIONS
 
 OUTPUT — strict JSON only, no markdown, no prose outside it:
 {
-  "action": "HOLD|SET_TP|SET_SL|TAKE_PARTIAL|SCALE_IN|LOOSEN_TRAIL|TIGHTEN_TRAIL|DISABLE_LADDER|ENABLE_LADDER|EXIT_NOW",
+  "action": "HOLD|SET_TP|SET_SL|TAKE_PARTIAL|LOOSEN_TRAIL|TIGHTEN_TRAIL|DISABLE_LADDER|ENABLE_LADDER|EXIT_NOW",
   "params": { ... action-specific ... },
   "reason": "<one specific sentence, max 25 words>",
   "confidence": "low|medium|high"
@@ -183,10 +178,10 @@ PRINCIPLES (re-read every call)
 1. **THE TRAIL IS THE #1 CAUSE OF MISSED RUNNERS.** Default trail is tiered: 50% giveback below 3x, 30% at 3-6x, 20% above 6x. On a token pumping fast with mid-pump dips, a tight trail exits at the first dip and the second leg runs without us. Bountywork peaked, dipped to ~70% of peak, trail fired at 1.4x, then went to $1.6M MC. If you see strong momentum + smart money + chart intact: call LOOSEN_TRAIL 50-60 IMMEDIATELY (your override replaces the tiers for this position).
 2. **DISABLE_LADDER on high-conviction runners.** The 4-tranche auto-ladder (40% at 2x, 25% at 5x, 15% at 10x) auto-sells 80% of position by 10x. On a 20x runner, that's leaving most of the upside on the table. If you can name a specific reason this token has 10x+ left (smart money loading, chart breakout, new ATH on each tick): DISABLE_LADDER + raise TP to 20. Let it ride.
 3. **Use gmgn.top_traders, not generic tier pool counts.** When you say "smart money holding" mean the specific wallets in gmgn.top_traders[]. If realized profit is positive and they're still holding, that's a real signal. If they're showing increased balance recently, that's accumulation.
-4. **SCALE_IN on confirmed momentum.** Existing scale-in code exists but no agent calls it. Add 0.15-0.25 SOL when volume holds + smart money still in + 2:1 buy/sell + chart breaking out.
-5. Memecoins have huge variance. 30% drawdown from peak is normal mid-pump. Do not exit on noise. The trail (after LOOSEN if needed) handles routine dips.
-6. Channel hit rate matters more than our recent PnL. Our recent losses reflect bad EXITS (which you're now fixing), not bad signals.
-7. Most ticks should be HOLD. The ladder + trail handle ~60-70% of cases. Act only when you can name a specific signal.
+4. Memecoins have huge variance. 30% drawdown from peak is normal mid-pump. Do not exit on noise. The trail (after LOOSEN if needed) handles routine dips.
+5. Channel hit rate matters more than our recent PnL. Our recent losses reflect bad EXITS (which you're now fixing), not bad signals.
+6. Most ticks should be HOLD. The ladder + trail handle ~60-70% of cases. Act only when you can name a specific signal.
+7. There is NO scale-in. You cannot add size to a position. Manage what was bought at entry.
 """
 
 
@@ -580,7 +575,7 @@ async def _log_action(pt, decision: dict, executed: bool, exec_note: str = "") -
         logger.warning("claude_active: failed to log action: %s", exc)
 
 
-async def _execute(pt, decision: dict, min_exit_age: int, max_scale_in: float) -> tuple[bool, str]:
+async def _execute(pt, decision: dict, min_exit_age: int) -> tuple[bool, str]:
     """Execute one Claude action. Returns (executed, note)."""
     action = decision["action"]
     params = decision.get("params") or {}
@@ -642,24 +637,7 @@ async def _execute(pt, decision: dict, min_exit_age: int, max_scale_in: float) -
             return False, f"db error: {exc}"
 
     if action == "SCALE_IN":
-        add = _clamp(params.get("sol"), 0.05, 0.3)
-        already = _scale_in_total.get(pt.id, 0.0)
-        if already + add > max_scale_in:
-            return False, f"scale-in cap: already +{already:.2f}, asked {add:.2f}, max {max_scale_in:.2f}"
-        if state.paper_balance < add + 0.1:
-            return False, f"balance {state.paper_balance:.3f} insufficient for +{add:.2f}"
-        try:
-            async with AsyncSessionLocal() as session:
-                trade = await session.get(PaperTrade, pt.id)
-                if not trade or trade.status != "open":
-                    return False, "trade not open"
-                trade.paper_sol_spent = round(float(trade.paper_sol_spent or 0) + add, 4)
-                await session.commit()
-            _scale_in_total[pt.id] = already + add
-            state.paper_balance -= add
-            return True, f"added {add:.2f} SOL (total +{already + add:.2f})"
-        except Exception as exc:
-            return False, f"db error: {exc}"
+        return False, "SCALE_IN disabled (June 10 2026 audit — phantom-profit accounting)"
 
     if action == "LOOSEN_TRAIL":
         # Set claude_trail_override_pct higher to widen the trail width.
@@ -749,14 +727,17 @@ async def _execute(pt, decision: dict, min_exit_age: int, max_scale_in: float) -
         remaining_sol = size_sol * (remaining / 100.0)
         pnl = round(float(pt.realized_pnl_sol or 0) + remaining_sol * (current_mult - 1), 4)
         try:
-            await close_paper_trade(
+            closed = await close_paper_trade(
                 trade_id=pt.id,
                 close_reason="claude_exit",
                 pnl_sol=pnl,
                 peak_mc=float(pt.peak_mc) if pt.peak_mc else None,
                 peak_mult=decision.get("peak_mult"),
             )
-            state.paper_balance += size_sol + pnl
+            if not closed:
+                return False, "already closed (race with rule layer)"
+            # No manual paper_balance mutation — compute_paper_balance
+            # recomputes from the DB on every monitor pass.
             return True, f"closed at {current_mult:.2f}x → {pnl:+.4f} SOL"
         except Exception as exc:
             return False, f"close failed: {exc}"
@@ -783,7 +764,7 @@ async def claude_warm_loop() -> None:
                 "claude_active_daily_budget_usd",
                 "claude_active_max_actions_per_hour",
                 "claude_active_min_exit_age_sec",
-                "claude_active_max_scale_in_sol",
+                "time_stop_minutes",
             )
             enabled = float(cfg.get("claude_active_enabled") or 0.0) >= 0.5
             if not enabled:
@@ -796,7 +777,7 @@ async def claude_warm_loop() -> None:
             daily_budget = float(cfg.get("claude_active_daily_budget_usd") or DEFAULT_DAILY_BUDGET)
             max_actions  = int(cfg.get("claude_active_max_actions_per_hour") or DEFAULT_MAX_ACTIONS_HR)
             min_exit_age = int(cfg.get("claude_active_min_exit_age_sec") or DEFAULT_MIN_EXIT_AGE)
-            max_scale_in = float(cfg.get("claude_active_max_scale_in_sol") or DEFAULT_MAX_SCALE_IN)
+            ts_min       = float(cfg.get("time_stop_minutes") or 10.0)
 
             # Budget gate
             if _spend_remaining(daily_budget) < COST_PER_CALL_USD:
@@ -813,6 +794,13 @@ async def claude_warm_loop() -> None:
                     continue
                 age_s = (datetime.utcnow() - pt.opened_at).total_seconds() if pt.opened_at else 0
                 if age_s < min_age:
+                    continue
+                # Time-stop-doomed: never confirmed (peak < 1.5x) and past
+                # the halfway mark to the time stop. The time stop closes
+                # these and the EXIT gate rejects Claude below 1.3x anyway —
+                # don't spend a call on a position the rules already own.
+                peak = float(pt.peak_multiple or 1.0)
+                if peak < 1.5 and age_s >= (ts_min * 60) / 2:
                     continue
                 last = _last_checked_ts.get(pt.id, 0)
                 if (now - last) < interval:
@@ -872,7 +860,7 @@ async def claude_warm_loop() -> None:
                 if decision.get("model_tier") != "fable":
                     _spend_record(COST_PER_CALL_USD)
 
-                executed, note = await _execute(pt, decision, min_exit_age, max_scale_in)
+                executed, note = await _execute(pt, decision, min_exit_age)
                 if executed and decision["action"] != "HOLD":
                     _record_action_ts(pt.id)
                 await _log_action(pt, decision, executed, note)
