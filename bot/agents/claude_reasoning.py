@@ -39,6 +39,8 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 # Model selection — Haiku for high-frequency, Sonnet for reasoning
 HAIKU_MODEL = os.getenv("ANTHROPIC_HAIKU_MODEL", "claude-haiku-4-5").strip()
 SONNET_MODEL = os.getenv("ANTHROPIC_SONNET_MODEL", "claude-sonnet-4-6").strip()
+# Deep-reasoning model for escalated mid-trade decisions (winners only)
+FABLE_MODEL = os.getenv("ANTHROPIC_FABLE_MODEL", "claude-fable-5").strip()
 
 TIMEOUT_SEC = 15.0
 

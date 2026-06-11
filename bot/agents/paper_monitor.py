@@ -361,6 +361,7 @@ async def _check_open_trades(bot) -> None:
         "expired_exit_hours", "expired_exit_threshold",
         "breakeven_trigger", "profit_trail_trigger", "profit_trail_pct",
         "tg_signal_trail_pct", "dead_token_threshold_usd",
+        "paper_stop_slippage_pct",
     )
 
     for pt in trades:
@@ -441,11 +442,13 @@ async def _check_open_trades(bot) -> None:
                 override = getattr(pt, "claude_trail_override_pct", None)
                 if override is not None and 0.05 <= override <= 0.80:
                     return float(override)
-                if peak_m < 5.0:    return 0.50  # 2-5x: room to breathe
-                if peak_m < 10.0:   return 0.40  # 5-10x: tighten
-                if peak_m < 25.0:   return 0.30  # 10-25x: lock more
-                if peak_m < 50.0:   return 0.22  # 25-50x
-                return 0.18                       # 50x+: protect moonshot
+                # All-time data: avg peak 1.52x vs realized 1.03x — the old
+                # 40-50% giveback up to 10x returned 60%+ of runner profit
+                # (Korea is Awesome: peaked 6.3x, kept 2.4x). Tighter tiers
+                # mechanize what profitable manual closes were doing.
+                if peak_m < 3.0:    return 0.50  # below 3x: room to breathe
+                if peak_m < 6.0:    return 0.30  # 3-6x: lock the meat
+                return 0.20                       # 6x+: protect the runner
 
             # ── SANITY CAP on corrupt MC readings ──────────────────────
             # DexScreener occasionally returns absurd MC values for new
@@ -860,9 +863,15 @@ async def _check_open_trades(bot) -> None:
                 should_sl = current_mult <= sl_threshold
 
             if should_sl:
-                # PnL accounts for remaining position + already realized profit
+                # PnL accounts for remaining position + already realized profit.
+                # Slippage penalty: real stop fills on illiquid pump.fun
+                # launches gap well past the stop level (observed sl_hit avg
+                # -0.127 SOL where the nominal stop implies -0.036). Model a
+                # worse fill so paper PnL stops flattering the stops.
+                slip = float(cfg.get("paper_stop_slippage_pct", 15.0) or 15.0) / 100.0
+                fill_mult = current_mult * (1.0 - slip)
                 remaining_sol = sol * (remaining / 100.0)
-                loss_on_remaining = round(-remaining_sol * (1.0 - current_mult), 4)
+                loss_on_remaining = round(-remaining_sol * (1.0 - fill_mult), 4)
                 pnl = round(realized + loss_on_remaining, 4)
                 logger.info(
                     "Paper: SL hit %s — %.2fx %.4f SOL tags=%s",

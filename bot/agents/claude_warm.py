@@ -23,7 +23,9 @@ Safety
   - EXIT only allowed after position age >= 60s
   - SL widening capped at -50% absolute from entry
   - Scale-in total capped at +0.5 SOL per position
-  - SET_TP in [1.5, 50.0], SET_SL in [10, 50]
+  - SET_TP in [1.5, 20.0], SET_SL in [10, 50]
+  - EXIT_NOW gated below 1.3x on positions younger than the time stop
+    (all-time sub-1.3x claude_exit record: 81 closes, 1 win, -2.0 SOL)
 
 NO Helius polling is introduced. Wallet context comes from the cached
 Wallet table scoring (no live re-query). GMGN is consulted via the
@@ -40,7 +42,8 @@ from sqlalchemy import select, func
 
 from bot import state
 from bot.agents.claude_reasoning import (
-    HAIKU_MODEL, call_claude, claude_available, parse_json_response,
+    FABLE_MODEL, HAIKU_MODEL, call_claude, claude_available,
+    parse_json_response,
 )
 from bot.scanner import fetch_token_data, parse_token_metrics
 from database.models import (
@@ -63,6 +66,16 @@ DEFAULT_MAX_SCALE_IN   = 0.5          # SOL ceiling on additive scale-in per pos
 # Conservative cost estimate per call. Haiku 4.5 ≈ $1/M in + $5/M out.
 # 1500 in + 150 out ≈ $0.002 per call.
 COST_PER_CALL_USD = 0.002
+
+# Fable 5 escalation — deep reasoning ONLY on winner decisions, where the
+# all-time data says Claude adds value (HOLD/LOOSEN/DISABLE_LADDER calls on
+# runners). Sub-1x management stays on Haiku + the EXIT gate.
+# ~2.5k in @ $10/M + ~3.5k out incl. thinking @ $50/M ≈ $0.20/call.
+FABLE_COST_PER_CALL_USD = 0.20
+FABLE_COOLDOWN_SEC = 600              # max 1 escalated call per position / 10 min
+DEFAULT_FABLE_BUDGET = 3.0            # $/day, falls back to Haiku when spent
+_fable_last_call: dict[int, float] = {}   # trade_id → unix ts of last Fable call
+_fable_spend: dict = {"date": "", "usd": 0.0}
 
 # ── Module state (in-process) ───────────────────────────────────────────────
 _last_checked_ts: dict[int, float] = {}        # trade_id → last unix ts
@@ -95,10 +108,10 @@ ACTIONS
     Rules keep monitoring. Use ~60-70% of the time when there's no clear signal.
 
   SET_TP {"tp_x": <float>}
-    Update the moonbag cap. Range 1.5 to 50.
-    FLOOR: do NOT set tp_x below 20 unless you see clear exhaustion (top wallets selling, volume collapse, structural break). The moonbag's job is to catch 30x-1000x runners; capping it at 5-10x defeats the entire strategy.
-    RAISE tp_x toward 50 on tokens with strong momentum + smart money holding + chart intact.
-    LOWER below 20 ONLY when you're SURE the move is exhausted (then you should probably EXIT_NOW instead).
+    Update the moonbag cap. Range 1.5 to 20.
+    FLOOR: do NOT set tp_x below 12 unless you see clear exhaustion (top wallets selling, volume collapse, structural break). The tiered trail (20% giveback above 6x) is the runner-capture mechanism now — TP is just the hard ceiling.
+    RAISE tp_x toward 20 on tokens with strong momentum + smart money holding + chart intact.
+    LOWER below 12 ONLY when you're SURE the move is exhausted (then you should probably EXIT_NOW instead).
 
   SET_SL {"sl_pct": <float>}
     Update the stop-loss percentage. Range 10 to 50. Tighter (lower) = locks more. Wider = gives room.
@@ -137,6 +150,7 @@ ACTIONS
       - Clear rug / LP-removal signal
       - top10_concentration_pct just spiked above 80 (whale accumulation = rug risk)
     DO NOT EXIT profitable positions just because price ticked down — the dynamic trail handles that. EXIT_NOW is for genuine threats.
+    HARD GATE: EXIT_NOW below 1.3x on a position younger than the time stop is REJECTED by the execution layer. Your all-time record force-exiting sub-1.3x positions is 81 closes / 1 win / -2.0 SOL — the 8-minute time_stop handles early chop better than you do. Don't waste the call; HOLD instead.
 
 OUTPUT — strict JSON only, no markdown, no prose outside it:
 {
@@ -166,8 +180,8 @@ USE THE GMGN DATA. It's the most actionable signal you have. "tier2/3 smart mone
 
 PRINCIPLES (re-read every call)
 
-1. **THE TRAIL IS THE #1 CAUSE OF MISSED RUNNERS.** Default trail is 50% under 5x, 40% at 5-10x. On a token pumping fast with mid-pump dips, this exits at the first dip and the second leg runs without us. Bountywork peaked, dipped to ~70% of peak, trail fired at 1.4x, then went to $1.6M MC. If you see strong momentum + smart money + chart intact: call LOOSEN_TRAIL 50-60 IMMEDIATELY.
-2. **DISABLE_LADDER on high-conviction runners.** The 4-tranche auto-ladder (40% at 2x, 25% at 5x, 15% at 10x) auto-sells 80% of position by 10x. On a 50x runner, that's leaving 4x of upside on the table. If you can name a specific reason this token has 10x+ left (smart money loading, chart breakout, new ATH on each tick): DISABLE_LADDER + raise TP to 40-50. Let it ride.
+1. **THE TRAIL IS THE #1 CAUSE OF MISSED RUNNERS.** Default trail is tiered: 50% giveback below 3x, 30% at 3-6x, 20% above 6x. On a token pumping fast with mid-pump dips, a tight trail exits at the first dip and the second leg runs without us. Bountywork peaked, dipped to ~70% of peak, trail fired at 1.4x, then went to $1.6M MC. If you see strong momentum + smart money + chart intact: call LOOSEN_TRAIL 50-60 IMMEDIATELY (your override replaces the tiers for this position).
+2. **DISABLE_LADDER on high-conviction runners.** The 4-tranche auto-ladder (40% at 2x, 25% at 5x, 15% at 10x) auto-sells 80% of position by 10x. On a 20x runner, that's leaving most of the upside on the table. If you can name a specific reason this token has 10x+ left (smart money loading, chart breakout, new ATH on each tick): DISABLE_LADDER + raise TP to 20. Let it ride.
 3. **Use gmgn.top_traders, not generic tier pool counts.** When you say "smart money holding" mean the specific wallets in gmgn.top_traders[]. If realized profit is positive and they're still holding, that's a real signal. If they're showing increased balance recently, that's accumulation.
 4. **SCALE_IN on confirmed momentum.** Existing scale-in code exists but no agent calls it. Add 0.15-0.25 SOL when volume holds + smart money still in + 2:1 buy/sell + chart breaking out.
 5. Memecoins have huge variance. 30% drawdown from peak is normal mid-pump. Do not exit on noise. The trail (after LOOSEN if needed) handles routine dips.
@@ -194,6 +208,33 @@ def _spend_record(usd: float) -> None:
         _daily_spend["date"] = today
         _daily_spend["usd"] = 0.0
     _daily_spend["usd"] += usd
+
+
+async def _should_escalate_to_fable(
+    trade_id: int, current_mult: float, peak_mult: float, drawdown_pct: float,
+) -> bool:
+    """Escalate to Fable 5 only at the decision moments that decide the
+    week: position crossing 2x (ladder/trail/ride decisions) or a big
+    drawdown on a position that was winning (second leg vs distribution).
+    Guarded by per-position cooldown and a separate daily budget."""
+    hot = current_mult >= 2.0 or (peak_mult >= 1.5 and drawdown_pct >= 30.0)
+    if not hot:
+        return False
+    now = _time.time()
+    if now - _fable_last_call.get(trade_id, 0) < FABLE_COOLDOWN_SEC:
+        return False
+    try:
+        cfg = await get_params("fable_daily_budget_usd")
+        budget = float(cfg.get("fable_daily_budget_usd") or DEFAULT_FABLE_BUDGET)
+    except Exception:
+        budget = DEFAULT_FABLE_BUDGET
+    today = _today_key()
+    if _fable_spend["date"] != today:
+        _fable_spend["date"] = today
+        _fable_spend["usd"] = 0.0
+    if _fable_spend["usd"] + FABLE_COST_PER_CALL_USD > budget:
+        return False
+    return True
 
 
 def _actions_in_last_hour(trade_id: int) -> int:
@@ -458,12 +499,22 @@ async def evaluate_position(pt) -> dict | None:
 
     user_msg = "POSITION CONTEXT\n\n" + json.dumps(ctx, separators=(",", ":"), default=str)
 
+    drawdown_pct = (1 - current_mult / max(peak_mult, 0.01)) * 100 if peak_mult > 0 else 0.0
+    use_fable = await _should_escalate_to_fable(
+        pt.id, current_mult, peak_mult, drawdown_pct,
+    )
+    if use_fable:
+        _fable_last_call[pt.id] = _time.time()
+        _fable_spend["usd"] += FABLE_COST_PER_CALL_USD
+
     t0 = _time.time()
     text = await call_claude(
         system=SYSTEM_PROMPT,
         user=user_msg,
-        model=HAIKU_MODEL,
-        max_tokens=300,
+        model=FABLE_MODEL if use_fable else HAIKU_MODEL,
+        # Reasoning models spend output budget on thinking before any text
+        max_tokens=4000 if use_fable else 300,
+        timeout_sec=90.0 if use_fable else 15.0,
     )
     latency_ms = int((_time.time() - t0) * 1000)
     if not text:
@@ -473,11 +524,14 @@ async def evaluate_position(pt) -> dict | None:
         logger.debug("claude_active: unparseable response for trade %s", pt.id)
         return None
 
+    reason = str(parsed.get("reason", ""))[:230]
     return {
         "action": str(parsed.get("action", "HOLD")).upper(),
         "params": parsed.get("params") or {},
-        "reason": str(parsed.get("reason", ""))[:240],
+        "reason": ("[F5] " + reason) if use_fable else reason,
         "confidence": str(parsed.get("confidence", "low")).lower(),
+        "model_tier": "fable" if use_fable else "haiku",
+        "cost_usd": FABLE_COST_PER_CALL_USD if use_fable else COST_PER_CALL_USD,
         "trade_id": pt.id,
         "name": name,
         "current_mc": current_mc,
@@ -516,7 +570,7 @@ async def _log_action(pt, decision: dict, executed: bool, exec_note: str = "") -
                 peak_mult     = decision.get("peak_mult"),
                 age_min       = round((decision.get("age_s") or 0) / 60.0, 2),
                 latency_ms    = decision.get("latency_ms"),
-                cost_usd      = COST_PER_CALL_USD,
+                cost_usd      = decision.get("cost_usd", COST_PER_CALL_USD),
                 executed      = executed,
                 exec_note     = (exec_note or "")[:256],
             )
@@ -535,7 +589,7 @@ async def _execute(pt, decision: dict, min_exit_age: int, max_scale_in: float) -
         return True, "hold"
 
     if action == "SET_TP":
-        new_tp = _clamp(params.get("tp_x"), 1.5, 50.0)
+        new_tp = _clamp(params.get("tp_x"), 1.5, 20.0)
         try:
             async with AsyncSessionLocal() as session:
                 trade = await session.get(PaperTrade, pt.id)
@@ -673,6 +727,21 @@ async def _execute(pt, decision: dict, min_exit_age: int, max_scale_in: float) -
         if (decision.get("age_s") or 0) < min_exit_age:
             return False, f"position too young ({decision.get('age_s', 0):.0f}s < {min_exit_age}s)"
         current_mult = decision.get("current_mult", 1.0)
+        # Gate: all-time claude_exit record below ~1.3x was 81 closes,
+        # 1 win, -2.0 SOL — strictly worse than letting time_stop work.
+        # Sub-1.3x exits on young positions belong to the rule layer.
+        if current_mult < 1.3:
+            age_s = decision.get("age_s") or 0
+            try:
+                from database.models import get_param
+                ts_min = float(await get_param("time_stop_minutes") or 10.0)
+            except Exception:
+                ts_min = 10.0
+            if age_s < ts_min * 60:
+                return False, (
+                    f"gated: {current_mult:.2f}x < 1.3x, age {age_s / 60:.1f}m "
+                    f"< time_stop {ts_min:.0f}m — rules own this exit"
+                )
         current_mc = decision.get("current_mc", 0)
         # Calc PnL: remaining * size * (mult - 1) + realized_pnl_sol
         remaining = float(pt.remaining_pct or 100)
@@ -798,7 +867,10 @@ async def claude_warm_loop() -> None:
                 decision = await evaluate_position(pt)
                 if decision is None:
                     continue
-                _spend_record(COST_PER_CALL_USD)
+                # Fable escalations charge their own budget (recorded in
+                # evaluate_position); only Haiku calls hit the active budget.
+                if decision.get("model_tier") != "fable":
+                    _spend_record(COST_PER_CALL_USD)
 
                 executed, note = await _execute(pt, decision, min_exit_age, max_scale_in)
                 if executed and decision["action"] != "HOLD":
