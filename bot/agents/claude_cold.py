@@ -284,8 +284,10 @@ async def run_full_report(days: int = 7) -> str | None:
         system=REPORT_SYSTEM_PROMPT,
         user=digest,
         model=SONNET_MODEL,
-        max_tokens=1500,
-        timeout_sec=120.0,
+        # Reasoning models (Fable 5) burn output budget on thinking blocks
+        # before emitting text — needs far more headroom than the text alone.
+        max_tokens=8000,
+        timeout_sec=180.0,
     )
     if not text:
         logger.warning("claude_cold: full report call returned no text")
@@ -318,8 +320,8 @@ async def run_daily_review() -> dict | None:
         system=SYSTEM_PROMPT,
         user=user_msg,
         model=SONNET_MODEL,
-        max_tokens=2048,
-        timeout_sec=120.0,
+        max_tokens=6000,
+        timeout_sec=180.0,
     )
     if not text:
         logger.warning("claude_cold: Claude call returned no text")
