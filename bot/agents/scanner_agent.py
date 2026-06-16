@@ -1472,7 +1472,9 @@ async def run_once() -> tuple[int, int]:
             # audit showed leaked -5.5 SOL. Fails open on missing txn data.
             from bot.scanner import passes_momentum_gate
             mom_ok, mom_reason = await passes_momentum_gate(
-                fresh_buys_m5, fresh_sells_m5, label=(token_name or "?")[:20],
+                fresh_buys_m5, fresh_sells_m5,
+                price_change_m5=(fresh_metrics_full or {}).get("price_change_m5"),
+                label=(token_name or "?")[:20],
             )
             if not mom_ok:
                 logger.info(

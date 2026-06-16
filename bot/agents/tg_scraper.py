@@ -385,6 +385,7 @@ async def _handle_message(event, channel_name: str) -> None:
                 from bot.scanner import passes_momentum_gate
                 mom_ok, mom_reason = await passes_momentum_gate(
                     metrics.get("buys_m5"), metrics.get("sells_m5"),
+                    price_change_m5=metrics.get("price_change_m5"),
                     label=token_name,
                 )
                 if not mom_ok:

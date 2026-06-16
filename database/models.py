@@ -3317,6 +3317,10 @@ AGENT_PARAM_DEFAULTS = {
     "entry_momentum_gate_enabled": 1.0,   # 0 = off
     "entry_min_buy_sell_ratio":    1.0,   # require m5 buys >= sells (net buying)
     "entry_min_m5_buys":           0.0,   # min m5 buy count (0 = ratio gate only)
+    # Reject backside entries: skip if m5 price already falling harder than
+    # this % at signal time ("caught the backside of the dump"). -25 = skip if
+    # down >25% in 5m. /setparam entry_max_m5_decline_pct.
+    "entry_max_m5_decline_pct":   -25.0,
 
     # Post-entry momentum eject (report rec). Cut a dead-on-arrival entry
     # at ~90s if it never moved (peak < eject_peak) and is below entry,

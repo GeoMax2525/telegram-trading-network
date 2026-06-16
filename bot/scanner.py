@@ -204,6 +204,7 @@ def parse_token_metrics(pair: dict) -> dict:
         "price_change_24h": pc_h24,
         "price_change_h1":  pc_h1,
         "price_change_h6":  pc_h6,
+        "price_change_m5":  float(price_change.get("m5") or 0),
         "estimated_holders": estimated_holders,
         "age_hours":      age_hours,
         "buys_m5":        buys_m5,
@@ -216,17 +217,22 @@ def parse_token_metrics(pair: dict) -> dict:
 
 # ── Entry momentum gate ───────────────────────────────────────────────────────
 
-async def passes_momentum_gate(buys_m5, sells_m5, label: str = "") -> tuple[bool, str]:
+async def passes_momentum_gate(buys_m5, sells_m5, price_change_m5=None, label: str = "") -> tuple[bool, str]:
     """Hard momentum gate at entry, shared by scanner + 4am paths.
 
     The 7d/233-trade audit showed the money leak is dead-on-arrival entries:
     sl_hit (26 trades, 0 wins, -3.48 SOL) + dead_token (14, -2.07 SOL). Those
-    are tokens entered while net-SELLING or with no buyers. This gate blocks
-    them deterministically at the rule layer instead of relying on the Claude
-    strategist's discretion.
+    are tokens entered while net-SELLING, with no buyers, or on the BACKSIDE of
+    a pump that's already dumping. This gate blocks them deterministically at
+    the rule layer instead of relying on the Claude strategist's discretion.
 
-    Returns (passed, reason). Fails OPEN when txn data is missing (a fresh
-    launch or a DexScreener gap must never halt the pipeline). Fully tunable /
+    Three checks: (1) min buyers, (2) buy/sell ratio (net buying), (3) price
+    direction — reject if m5 price is already falling hard at entry (the
+    "caught the backside of the whale dump" failure the live scanner postmortems
+    flagged; report rec: "do not enter if MC declining at signal time").
+
+    Returns (passed, reason). Fails OPEN when data is missing (a fresh launch
+    or a DexScreener gap must never halt the pipeline). Fully tunable /
     disable-able live: /setparam entry_momentum_gate_enabled 0.
     """
     from database.models import get_params
@@ -234,9 +240,17 @@ async def passes_momentum_gate(buys_m5, sells_m5, label: str = "") -> tuple[bool
         "entry_momentum_gate_enabled",
         "entry_min_buy_sell_ratio",
         "entry_min_m5_buys",
+        "entry_max_m5_decline_pct",
     )
     if float(cfg.get("entry_momentum_gate_enabled") or 0) < 1.0:
         return True, "gate_off"
+
+    # Price-direction gate — reject the backside of a dump even if buy count
+    # still looks ok (a pump-and-dump has buys >= sells right as it rolls over).
+    if price_change_m5 is not None:
+        max_decline = float(cfg.get("entry_max_m5_decline_pct") or -25.0)
+        if float(price_change_m5) < max_decline:
+            return False, f"declining_entry(m5={float(price_change_m5):.0f}%<{max_decline:.0f}%)"
 
     b = float(buys_m5 or 0)
     s = float(sells_m5 or 0)
