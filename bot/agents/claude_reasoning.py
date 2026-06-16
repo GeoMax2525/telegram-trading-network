@@ -39,8 +39,11 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 # Model selection — Haiku for high-frequency, Sonnet for reasoning
 HAIKU_MODEL = os.getenv("ANTHROPIC_HAIKU_MODEL", "claude-haiku-4-5").strip()
 SONNET_MODEL = os.getenv("ANTHROPIC_SONNET_MODEL", "claude-sonnet-4-6").strip()
-# Deep-reasoning model for escalated mid-trade decisions (winners only)
-FABLE_MODEL = os.getenv("ANTHROPIC_FABLE_MODEL", "claude-fable-5").strip()
+# Deep-reasoning model for escalated mid-trade decisions (winners only).
+# Was claude-fable-5 — retired by Anthropic (API 404s with "use Opus 4.8").
+# Defaulting to Opus 4.8 per that migration notice so the winner-drawdown
+# escalation lane (claude_warm) doesn't silently fall back to a dead model.
+FABLE_MODEL = os.getenv("ANTHROPIC_FABLE_MODEL", "claude-opus-4-8").strip()
 
 TIMEOUT_SEC = 15.0
 
