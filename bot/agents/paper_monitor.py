@@ -734,6 +734,13 @@ async def _check_open_trades(bot) -> None:
                     await post_to_community(bot, _scale_out_text)
                 except Exception as exc:
                     logger.debug("community_feed scale-out 40 mirror failed: %s", exc)
+                # Live mirror: sell the same tranche on-chain (sell_pct of the
+                # pre-sale remaining = fraction of current live balance).
+                try:
+                    from bot.live_mirror import mirror_partial
+                    await mirror_partial(pt.id, pt.token_address, sell_pct / max(remaining, 1.0))
+                except Exception as exc:
+                    logger.error("live_mirror partial(40) hook failed: %s", exc)
                 scale_out_done = True
 
             elif pt.subscriber_id is None and remaining > 50 and remaining <= 80 and current_mult >= 5.0:
@@ -773,6 +780,12 @@ async def _check_open_trades(bot) -> None:
                     await post_to_community(bot, _scale_out_text)
                 except Exception as exc:
                     logger.debug("community_feed scale-out 25 mirror failed: %s", exc)
+                # Live mirror: sell the same tranche on-chain.
+                try:
+                    from bot.live_mirror import mirror_partial
+                    await mirror_partial(pt.id, pt.token_address, sell_pct / max(remaining, 1.0))
+                except Exception as exc:
+                    logger.error("live_mirror partial(25) hook failed: %s", exc)
                 scale_out_done = True
 
             # Check TP — only on remaining position

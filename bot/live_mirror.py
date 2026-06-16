@@ -92,6 +92,54 @@ async def mirror_open(paper_trade_id: int, mint: str, subscriber_id, paper_sol: 
         logger.error("live_mirror: LIVE BUY FAILED %s: %s", (mint or "?")[:8], exc)
 
 
+async def mirror_partial(paper_trade_id: int, mint: str, frac_of_current: float) -> None:
+    """Mirror a paper scale-out partial — sell frac_of_current of the live
+    position's CURRENT on-chain balance (paper passes sell_pct/remaining so the
+    fraction lines up with its tranche math). No-op unless armed AND this trade
+    was bought live. Safe by construction: a failed/missed partial just means
+    more rides to the final exit, which mirror_close fully sells."""
+    if not frac_of_current or frac_of_current <= 0:
+        return
+    frac = min(float(frac_of_current), 1.0)
+    cfg = await _armed_cfg()
+    if cfg is None:
+        return
+
+    from database.models import AsyncSessionLocal, LiveMirror, select, get_param
+    from bot.wallet import get_keypair
+    from bot.trading import get_token_balance, get_ultra_order, execute_ultra_order, SOL_MINT
+
+    async with AsyncSessionLocal() as session:
+        lm = (await session.execute(
+            select(LiveMirror).where(
+                LiveMirror.paper_trade_id == paper_trade_id,
+                LiveMirror.status == "open",
+            )
+        )).scalar_one_or_none()
+    if lm is None:
+        return
+
+    keypair = get_keypair()
+    if keypair is None:
+        return
+
+    try:
+        wallet = str(keypair.pubkey())
+        bal = await get_token_balance(wallet, mint)
+        if not bal or bal <= 0:
+            return
+        sell_amt = int(bal * frac)
+        if sell_amt <= 0:
+            return
+        slip = max(int(float(await get_param("slippage_tolerance_bps") or 500)), 1000)
+        order = await get_ultra_order(SOL_MINT, sell_amt, wallet, input_mint=mint, slippage_bps=slip)
+        sig = await execute_ultra_order(order, keypair)
+        logger.info("live_mirror: LIVE PARTIAL sold %.0f%% of %s  sig=%s",
+                    frac * 100, (mint or "?")[:8], (sig or "")[:10])
+    except Exception as exc:
+        logger.error("live_mirror: LIVE PARTIAL FAILED %s: %s (final exit cleans up)", (mint or "?")[:8], exc)
+
+
 async def _execute_sell(mint: str, keypair) -> str | None:
     """Sell the entire on-chain token balance back to SOL. Returns sig or None
     if nothing to sell. Raises on execution failure (caller handles retry)."""
