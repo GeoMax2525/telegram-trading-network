@@ -128,10 +128,13 @@ from bot.agents.trade_profiles import resolve_trade_params, parse_pattern_tags
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL      = 30    # 30 seconds — faster SL/TP checks (was 60s,
-                           #   too long for pump.fun volatility; trades
-                           #   could drop below SL and recover between
-                           #   ticks so SL never fired at check time)
+POLL_INTERVAL      = 15    # 15 seconds — Profit Protection v2 (was 30s, was
+                           #   60s). pump.fun tokens round-trip 1.0x→2.4x→0.9x
+                           #   inside a 30-60s window, so the peak (max of poll
+                           #   snapshots) never recorded the spike and the trail
+                           #   never armed. 15s + cache-bypass on the live fetch
+                           #   below halves the blind window. Real fix (ws/Helius
+                           #   high-water feed) is a later project.
 POST_CLOSE_INTERVAL = 600  # 10 minutes — post-close tracking
 STARTUP_DELAY      = 60
 MAX_FETCH_FAILS    = 5     # consecutive failures before auto-close
@@ -378,7 +381,10 @@ async def _check_open_trades(bot) -> None:
 
     for pt in trades:
         try:
-            live = await fetch_live_data(pt.token_address)
+            # bypass_cache: the 60s scanner cache made each poll read price up
+            # to 60s stale, compounding the polling blind window. Open positions
+            # need the freshest possible MC to catch fast reversals.
+            live = await fetch_live_data(pt.token_address, bypass_cache=True)
             if not live or (live.get("market_cap") or 0) <= 0:
                 _fetch_fail_counts[pt.id] = _fetch_fail_counts.get(pt.id, 0) + 1
                 fails = _fetch_fail_counts[pt.id]
@@ -454,12 +460,14 @@ async def _check_open_trades(bot) -> None:
                 override = getattr(pt, "claude_trail_override_pct", None)
                 if override is not None and 0.05 <= override <= 0.80:
                     return float(override)
-                # All-time data: avg peak 1.52x vs realized 1.03x — the old
-                # 40-50% giveback up to 10x returned 60%+ of runner profit
-                # (Korea is Awesome: peaked 6.3x, kept 2.4x). Tighter tiers
-                # mechanize what profitable manual closes were doing.
-                if peak_m < 3.0:    return 0.50  # below 3x: room to breathe
-                if peak_m < 6.0:    return 0.30  # 3-6x: lock the meat
+                # Profit Protection v2 (7d/233-trade audit): avg peak 1.45x vs
+                # realized 0.96x — trades round-tripped past breakeven into
+                # sl_hit. The old 50% trail below 3x gave back the ENTIRE gain
+                # (2x peak * 0.50 = 1.0x exit = breakeven). Tighten the low tier
+                # to lock the median winner; keep the 6x+ tier loose so the rare
+                # fat-tail runner (which carries the P&L) still runs.
+                if peak_m < 3.0:    return 0.30  # 1.3-3x: lock the gain (was 0.50)
+                if peak_m < 6.0:    return 0.28  # 3-6x: lock the meat (was 0.30)
                 return 0.20                       # 6x+: protect the runner
 
             # ── SANITY CAP on corrupt MC readings ──────────────────────
