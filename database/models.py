@@ -3228,7 +3228,9 @@ AGENT_PARAM_DEFAULTS = {
     # Paper trading probe size (SOL per trade). Used to be hardcoded 0.1 in
     # scanner_agent and signal_relay; promoted to a param so it can be
     # /setparam'd without a deploy. Phase 1 default 0.2 (was 0.1).
-    "paper_probe_size": 0.2,
+    # Profit Protection v2: 0.3 to match intended live sizing (paper = no
+    # real-money downside to testing the bigger probe).
+    "paper_probe_size": 0.3,
 
     # 4am (tg_signal) re-entry cooldown — separate from the global 24h close
     # cooldown because /4amreport data shows the channel sometimes re-calls
@@ -3270,6 +3272,15 @@ AGENT_PARAM_DEFAULTS = {
     "scanner_enabled":     1.0,   # 0 = no DexScreener / insider / volume / harvester trades
     "tg_scraper_enabled":  1.0,   # 0 = no 4am tg_signal auto-buys
 
+    # Entry momentum gate (Profit Protection v2). Blocks net-selling /
+    # dead-on-arrival tokens at the rule layer — the sl_hit + dead_token
+    # cohort that the 7d/233-trade audit showed leaked -5.5 SOL. Fails OPEN
+    # on missing txn data so it can't halt the pipeline. Disable live with
+    # /setparam entry_momentum_gate_enabled 0.
+    "entry_momentum_gate_enabled": 1.0,   # 0 = off
+    "entry_min_buy_sell_ratio":    1.0,   # require m5 buys >= sells (net buying)
+    "entry_min_m5_buys":           0.0,   # min m5 buy count (0 = ratio gate only)
+
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
     # before AI scoring. Non-learning: do not reference from learning_loop.
     # LP burn/lock gate was removed — rugcheck data proved too unreliable.
@@ -3293,9 +3304,12 @@ AGENT_PARAM_DEFAULTS = {
     "expired_exit_hours":      2.0,
     "expired_exit_threshold":  1.20,
 
-    # Profit protection (strategy, applied globally in paper monitor)
-    "breakeven_trigger":       2.0,   # once peak >=2.0x, SL moves to 1.0x (was 1.5x — too tight)
-    "profit_trail_trigger":    2.0,   # once peak >=2.0x, start trailing
+    # Profit protection (strategy, applied globally in paper monitor).
+    # Profit Protection v2 (7d/233-trade audit): the entire protection stack
+    # armed at 2.0x peak, but avg trade peaked 1.45x — so the median winner had
+    # NO protection active and round-tripped into sl_hit. Arm below avg peak.
+    "breakeven_trigger":       1.4,   # peak >=1.4x → SL to 1.0x (was 2.0x)
+    "profit_trail_trigger":    1.3,   # peak >=1.3x → start trailing (was 2.0x)
     "profit_trail_pct":        0.15,  # distance from peak while trailing
 
     # Absolute per-trade position size cap in SOL, prevents the
@@ -3594,6 +3608,57 @@ async def init_agent_params() -> int:
         import logging as _logging
         _logging.getLogger(__name__).info(
             "SL floor migration: raised %d ai_trade_params rows to 20%%", raised,
+        )
+        added += 1
+
+    # ── One-shot: Profit Protection v2 live-param flip ────────────────
+    # Code defaults only seed rows that don't exist; these params already
+    # have DB rows at their old values. This one-shot UPDATES the live rows
+    # to the v2 values on the next deploy so the operator doesn't have to
+    # /setparam each one. Runs once then sets the flag (won't clobber any
+    # later manual tuning). See the 7d/233-trade audit: protection stack
+    # armed at 2.0x but avg peak was 1.45x; plus turn the scanner back on,
+    # size probes to 0.3, and enable the entry momentum gate.
+    async with AsyncSessionLocal() as session:
+        pp_flag = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "profit_protection_v2_done")
+        )).scalar_one_or_none()
+        pp_done = pp_flag is not None and pp_flag.param_value >= 1.0
+
+    if not pp_done:
+        _v2_params = {
+            "profit_trail_trigger":        1.3,
+            "breakeven_trigger":           1.4,
+            "paper_probe_size":            0.3,
+            "scanner_enabled":             1.0,
+            "trade_mode":                  1.0,
+            "entry_momentum_gate_enabled": 1.0,
+            "entry_min_buy_sell_ratio":    1.0,
+            "entry_min_m5_buys":           0.0,
+        }
+        async with AsyncSessionLocal() as session:
+            for _pname, _pval in _v2_params.items():
+                _row = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == _pname)
+                )).scalar_one_or_none()
+                if _row is None:
+                    session.add(AgentParam(param_name=_pname, param_value=float(_pval)))
+                else:
+                    _row.param_value = float(_pval)
+                    _row.updated_at = datetime.utcnow()
+            _flag = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "profit_protection_v2_done")
+            )).scalar_one_or_none()
+            if _flag is None:
+                session.add(AgentParam(param_name="profit_protection_v2_done", param_value=1.0))
+            else:
+                _flag.param_value = 1.0
+                _flag.updated_at = datetime.utcnow()
+            await session.commit()
+
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "Profit Protection v2 migration applied: %s", _v2_params,
         )
         added += 1
 
