@@ -636,7 +636,7 @@ async def _check_open_trades(bot) -> None:
             # width that tightens as peak grows. Wide early to breathe,
             # tight late to lock. Same logic regardless of source.
             if is_tg_signal:
-                pt_trigger = float(cfg.get("tg_signal_trail_trigger", 2.0) or 2.0)
+                pt_trigger = float(cfg.get("tg_signal_trail_trigger", 1.5) or 1.5)
             else:
                 pt_trigger = float(cfg.get("profit_trail_trigger", 2.0) or 2.0)
             pt_pct = _dynamic_trail_pct(peak_mult)
@@ -788,7 +788,7 @@ async def _check_open_trades(bot) -> None:
             # Trailing stop — PHASE 2: ALL trades use dynamic trail width
             if resolved and resolved["trail_enabled"]:
                 if is_tg_signal:
-                    trigger_mult = float(cfg.get("tg_signal_trail_trigger", 2.0) or 2.0)
+                    trigger_mult = float(cfg.get("tg_signal_trail_trigger", 1.5) or 1.5)
                 else:
                     trigger_mult = 1.0 + float(resolved["trail_trigger"])
                 # Dynamic trail width applies universally

@@ -3246,6 +3246,13 @@ AGENT_PARAM_DEFAULTS = {
     # patterns survive the cooldown wave. /setparam tg_signal_trail_pct.
     "tg_signal_trail_pct": 0.35,
 
+    # 4am profit-trail ARM threshold (separate from scanner's
+    # profit_trail_trigger). Profit Protection v2 lowered it from 2.0 to 1.5:
+    # many 4am tokens peak below 2.0x and round-tripped with no trail armed,
+    # but 4am's dump-then-pump pattern means 1.3 (the scanner value) would
+    # chop the second leg — 1.5 is the balance. /setparam tg_signal_trail_trigger.
+    "tg_signal_trail_trigger": 1.5,
+
     # Dead-token close threshold (USD MC). Was hardcoded 5000; raised
     # to 10000 because /weeklyreport showed 82 dead_token closes/week at
     # avg -0.16 SOL each (-13 SOL total drag). Closing earlier at $10K
@@ -3287,6 +3294,17 @@ AGENT_PARAM_DEFAULTS = {
     # pump.fun/bonk launches at block 0, earlier than DexScreener indexing.
     # /setparam pf_stream_enabled 1 to turn on (no redeploy needed).
     "pf_stream_enabled":           0.0,   # 0 = off, 1 = on
+
+    # ── Live (real-money) execution safety rails (bot/live_guard.py) ──────────
+    # The manual Key Buy / Full Clip buttons spend REAL SOL regardless of
+    # trade_mode. These gate every live buy. live_trading_armed is the master
+    # lock — OFF by default so no real swap fires until deliberately armed.
+    "live_trading_armed":        0.0,    # MASTER LOCK: 1 to allow live buys
+    "live_max_trade_sol":        0.1,    # hard per-trade size cap
+    "live_daily_spend_cap_sol":  0.5,    # daily live spend circuit breaker
+    "live_max_buys_per_day":     10.0,   # daily live trade count cap
+    "slippage_tolerance_bps":    500.0,  # 500 = 5% max slippage on live swaps
+    "max_price_impact_pct":      10.0,   # reject live buy above this price impact
 
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
     # before AI scoring. Non-learning: do not reference from learning_loop.
@@ -3667,6 +3685,39 @@ async def init_agent_params() -> int:
         _logging.getLogger(__name__).info(
             "Profit Protection v2 migration applied: %s", _v2_params,
         )
+        added += 1
+
+    # ── One-shot: Profit Protection v2b — 4am trail-trigger fix ───────
+    # v2 lowered profit_trail_trigger (scanner) but missed the SEPARATE
+    # tg_signal_trail_trigger that the 4am path uses, so the trail kept
+    # arming at 2.0x on every 4am trade. Lower the live DB row to 1.5.
+    async with AsyncSessionLocal() as session:
+        v2b_flag = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "pp_v2b_done")
+        )).scalar_one_or_none()
+        v2b_done = v2b_flag is not None and v2b_flag.param_value >= 1.0
+
+    if not v2b_done:
+        async with AsyncSessionLocal() as session:
+            row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "tg_signal_trail_trigger")
+            )).scalar_one_or_none()
+            if row is None:
+                session.add(AgentParam(param_name="tg_signal_trail_trigger", param_value=1.5))
+            else:
+                row.param_value = 1.5
+                row.updated_at = datetime.utcnow()
+            flag_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "pp_v2b_done")
+            )).scalar_one_or_none()
+            if flag_row is None:
+                session.add(AgentParam(param_name="pp_v2b_done", param_value=1.0))
+            else:
+                flag_row.param_value = 1.0
+                flag_row.updated_at = datetime.utcnow()
+            await session.commit()
+        import logging as _logging
+        _logging.getLogger(__name__).info("PP v2b: tg_signal_trail_trigger -> 1.5")
         added += 1
 
     # ── One-shot v4: force wipe all paper trades + reset balance ──────
