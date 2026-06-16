@@ -206,6 +206,15 @@ async def _finalize_paper_close(
         # no streak. The winning close already handled all of it.
         return state.paper_balance
 
+    # Mirror the exit on-chain if this trade was bought live (no-op unless
+    # live_trading_armed AND a live buy exists for it). Single chokepoint for
+    # every close reason, so a live position can never miss its sell.
+    try:
+        from bot.live_mirror import mirror_close
+        await mirror_close(pt.id, pt.token_address)
+    except Exception as exc:
+        logger.error("live_mirror close hook failed: %s", exc)
+
     # Source tag — append to every close card so user can see at-a-glance
     # which source each trade came from. Also include trade age so user
     # can tell pre-toggle from post-toggle: a 🔍 Scanner trade opened

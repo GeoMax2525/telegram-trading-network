@@ -201,6 +201,12 @@ async def main() -> None:
     asyncio.create_task(pf_stream_loop())
     logger.info("pf_stream: queued for startup (gated by pf_stream_enabled)")
 
+    # Live mirror reconcile — retries any failed live sell so a real position
+    # is never left holding. No-op unless live_trading_armed.
+    from bot.live_mirror import live_mirror_reconcile_loop
+    asyncio.create_task(live_mirror_reconcile_loop())
+    logger.info("live_mirror: reconcile loop queued")
+
     # Regime tracker — Solana memecoin market state (HOT/NEUTRAL/COLD)
     # Polls every 5 min, drives downstream probe sizing decisions
     from bot.agents.regime_tracker import regime_tracker_loop

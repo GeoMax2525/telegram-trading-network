@@ -2533,6 +2533,24 @@ class PaperTradeBlocked(RuntimeError):
     that the gate fired."""
 
 
+class LiveMirror(Base):
+    """Real-money execution mirror of an HQ paper trade. When live_trading_armed
+    is on, every paper OPEN fires a capped real buy and every paper CLOSE fires
+    a real sell — same decisions/exits as paper, executed on-chain. See
+    bot/live_mirror.py. status: open | closed | failed (reconcile retries failed)."""
+    __tablename__ = "live_mirrors"
+    id              = Column(Integer, primary_key=True)
+    paper_trade_id  = Column(Integer, index=True)
+    mint            = Column(String)
+    sol_spent       = Column(Float, default=0.0)
+    tokens_bought   = Column(String, nullable=True)   # raw Jupiter outAmount
+    buy_sig         = Column(String, nullable=True)
+    sell_sig        = Column(String, nullable=True)
+    status          = Column(String, default="open")
+    opened_at       = Column(DateTime, default=datetime.utcnow)
+    closed_at       = Column(DateTime, nullable=True)
+
+
 async def open_paper_trade(
     token_address: str, token_name: str | None,
     entry_mc: float | None, entry_price: float | None,
@@ -2603,7 +2621,18 @@ async def open_paper_trade(
         session.add(pt)
         await session.commit()
         await session.refresh(pt)
-        return pt
+        # Snapshot the fields the live mirror needs before the session closes.
+        _pt_id, _pt_mint = pt.id, pt.token_address
+        _pt_sub, _pt_sol = pt.subscriber_id, pt.paper_sol_spent
+
+    # Live execution mirror (no-op unless live_trading_armed). Outside the
+    # session; wrapped so a live-exec hiccup can never break the paper open.
+    try:
+        from bot.live_mirror import mirror_open
+        await mirror_open(_pt_id, _pt_mint, _pt_sub, _pt_sol)
+    except Exception as _exc:
+        logger.error("live_mirror open hook failed: %s", _exc)
+    return pt
 
 
 async def get_open_paper_trades(include_subscribers: bool = False) -> list["PaperTrade"]:
@@ -3288,6 +3317,11 @@ AGENT_PARAM_DEFAULTS = {
     "entry_min_buy_sell_ratio":    1.0,   # require m5 buys >= sells (net buying)
     "entry_min_m5_buys":           0.0,   # min m5 buy count (0 = ratio gate only)
 
+    # Run the Claude strategist entry decision on SCANNER trades too (it
+    # already runs on 4am). Only fires at the open point for candidates that
+    # passed all gates, so call volume is bounded. /setparam to 0 to disable.
+    "claude_scanner_entry_enabled": 1.0,
+
     # PumpPortal early-launch discovery source (bot/agents/pf_stream.py).
     # OFF by default — experiment flag so it can't contaminate the Profit
     # Protection v2 measurement until we deliberately A/B it. Streams new
@@ -3300,6 +3334,7 @@ AGENT_PARAM_DEFAULTS = {
     # trade_mode. These gate every live buy. live_trading_armed is the master
     # lock — OFF by default so no real swap fires until deliberately armed.
     "live_trading_armed":        0.0,    # MASTER LOCK: 1 to allow live buys
+    "live_mirror_size_sol":      0.05,   # SOL per autonomous live trade (capped by live_max_trade_sol)
     "live_max_trade_sol":        0.1,    # hard per-trade size cap
     "live_daily_spend_cap_sol":  0.5,    # daily live spend circuit breaker
     "live_max_buys_per_day":     10.0,   # daily live trade count cap

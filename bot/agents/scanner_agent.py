@@ -1431,11 +1431,13 @@ async def run_once() -> tuple[int, int]:
             eval_mc = float(scored.get("mcap") or 0)
             fresh_mc = eval_mc
             fresh_buys_m5 = fresh_sells_m5 = None
+            fresh_metrics_full = None
             if mint_addr:
                 try:
                     fresh_pair = await fetch_token_data(mint_addr)
                     if fresh_pair is not None:
                         fresh_metrics = parse_token_metrics(fresh_pair)
+                        fresh_metrics_full = fresh_metrics
                         fresh_buys_m5 = fresh_metrics.get("buys_m5")
                         fresh_sells_m5 = fresh_metrics.get("sells_m5")
                         new_mc = float(fresh_metrics.get("market_cap") or 0)
@@ -1607,6 +1609,46 @@ async def run_once() -> tuple[int, int]:
                             scored.get("name", "?")[:20],
                         )
                         continue
+
+                # Claude strategist entry decision — SAME brain as the 4am path.
+                # Only candidates that already passed confidence + momentum gate
+                # + slot checks reach here, so Claude call volume is bounded.
+                # Gated by claude_scanner_entry_enabled (default on).
+                try:
+                    from bot.agents.claude_reasoning import claude_available
+                    _ce_cfg = await get_params("claude_scanner_entry_enabled")
+                    _ce_on = float(_ce_cfg.get("claude_scanner_entry_enabled", 1.0) or 0) >= 0.5
+                    if _ce_on and claude_available():
+                        from bot.agents.claude_strategist import decide_entry
+                        _cdec = await decide_entry(
+                            token_name=scored.get("name") or "?",
+                            mint=scored.get("mint", ""),
+                            entry_mc=fresh_mc,
+                            metrics=fresh_metrics_full or {},
+                            channel_name="scanner",
+                            defaults={
+                                "size_sol":      paper_sol,
+                                "tp_x":          tp_for_open,
+                                "sl_pct":        sl_for_open,
+                                "trail_trigger": 1.3,
+                                "trail_pct":     30.0,
+                            },
+                        )
+                        if _cdec is not None and not _cdec.get("go", True):
+                            logger.info(
+                                "Scanner: Claude NO on %s — %s",
+                                scored.get("name", "?")[:20], _cdec.get("reason", ""),
+                            )
+                            continue
+                        if _cdec is not None:
+                            paper_sol   = float(_cdec.get("size_sol") or paper_sol)
+                            tp_for_open = float(_cdec.get("tp_x") or tp_for_open)
+                            sl_for_open = float(_cdec.get("sl_pct") or sl_for_open)
+                except Exception as _ce_exc:
+                    logger.warning(
+                        "Scanner: Claude entry error for %s: %s — using rule defaults",
+                        scored.get("name", "?")[:20], _ce_exc,
+                    )
 
                 pt = await open_paper_trade(
                     token_address=scored.get("mint", ""),
