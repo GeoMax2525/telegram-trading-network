@@ -32,6 +32,7 @@ from bot.agents.paper_monitor import paper_monitor_loop
 from bot.agents.gmgn_agent import gmgn_agent_loop
 from bot.agents.tg_scraper import tg_scraper_loop
 from bot.agents.laserstream import laserstream_loop
+from bot.agents.pf_stream import pf_stream_loop
 from database.models import init_db, init_agent_params, get_param, compute_paper_balance, get_open_scans, update_scan_pnl, close_old_scans, reset_all_daily_losses, seed_ai_trade_params
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -194,6 +195,11 @@ async def main() -> None:
     # LaserStream — real-time token detection via Helius WebSocket
     asyncio.create_task(laserstream_loop())
     logger.info("LaserStream: queued for startup")
+
+    # PumpPortal stream — early Pump.fun/Bonk launch discovery.
+    # Gated off by default (pf_stream_enabled=0); idles until /setparam'd on.
+    asyncio.create_task(pf_stream_loop())
+    logger.info("pf_stream: queued for startup (gated by pf_stream_enabled)")
 
     # Regime tracker — Solana memecoin market state (HOT/NEUTRAL/COLD)
     # Polls every 5 min, drives downstream probe sizing decisions

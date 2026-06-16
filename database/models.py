@@ -3281,6 +3281,13 @@ AGENT_PARAM_DEFAULTS = {
     "entry_min_buy_sell_ratio":    1.0,   # require m5 buys >= sells (net buying)
     "entry_min_m5_buys":           0.0,   # min m5 buy count (0 = ratio gate only)
 
+    # PumpPortal early-launch discovery source (bot/agents/pf_stream.py).
+    # OFF by default — experiment flag so it can't contaminate the Profit
+    # Protection v2 measurement until we deliberately A/B it. Streams new
+    # pump.fun/bonk launches at block 0, earlier than DexScreener indexing.
+    # /setparam pf_stream_enabled 1 to turn on (no redeploy needed).
+    "pf_stream_enabled":           0.0,   # 0 = off, 1 = on
+
     # Hard safety gates — scanner_agent._evaluate_candidate enforces these
     # before AI scoring. Non-learning: do not reference from learning_loop.
     # LP burn/lock gate was removed — rugcheck data proved too unreliable.
