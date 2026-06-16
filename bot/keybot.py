@@ -909,6 +909,14 @@ async def cb_keybot_buy(callback: CallbackQuery):
         )
         return
 
+    # Live safety rails — REAL SOL leaves the wallet below. Gate on the
+    # arm switch + per-trade cap + daily spend/count circuit breaker.
+    from bot.live_guard import live_preflight
+    _live_ok, _live_why = await live_preflight(float(s.buy_amount_sol or 0))
+    if not _live_ok:
+        await callback.answer("⛔ " + _live_why[:190], show_alert=True)
+        return
+
     # Parse token name + ticker from Trade Card line: 🪙 *NAME* ($SYMBOL)
     token_name = address[:8] + "…"
     if callback.message and callback.message.text:
@@ -930,13 +938,18 @@ async def cb_keybot_buy(callback: CallbackQuery):
         amount_lamports = int(s.buy_amount_sol * 1_000_000_000)
         wallet_address  = str(keypair.pubkey())
 
-        # Get Ultra order with 5% max slippage protection
-        order            = await get_ultra_order(address, amount_lamports, wallet_address, slippage_bps=500)
+        # Tunable slippage + price-impact caps (live safety rails).
+        from database.models import get_params as _gp
+        _scfg = await _gp("slippage_tolerance_bps", "max_price_impact_pct")
+        _slippage_bps = int(float(_scfg.get("slippage_tolerance_bps") or 500))
+
+        # Get Ultra order with slippage protection
+        order            = await get_ultra_order(address, amount_lamports, wallet_address, slippage_bps=_slippage_bps)
         price_impact     = float(order.get("priceImpactPct", 0))
         tokens_received  = str(order.get("outAmount", ""))
 
         # Reject if price impact is too high — protect from thin pool slippage
-        MAX_PRICE_IMPACT = 10.0  # percent
+        MAX_PRICE_IMPACT = float(_scfg.get("max_price_impact_pct") or 10.0)  # percent
         if abs(price_impact) > MAX_PRICE_IMPACT:
             await status_msg.edit_text(
                 f"*Swap Rejected — Price Impact Too High*\n\n"
@@ -951,6 +964,10 @@ async def cb_keybot_buy(callback: CallbackQuery):
         # Sign & submit
         await status_msg.edit_text("⏳ Signing and sending transaction…")
         signature = await execute_ultra_order(order, keypair)
+
+        # Record the live spend against today's circuit-breaker totals.
+        from bot.live_guard import record_live_buy
+        record_live_buy(float(s.buy_amount_sol or 0))
 
         mc_str = ""
         await status_msg.edit_text(
