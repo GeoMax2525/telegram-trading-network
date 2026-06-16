@@ -386,6 +386,7 @@ async def _check_open_trades(bot) -> None:
         "breakeven_trigger", "profit_trail_trigger", "profit_trail_pct",
         "tg_signal_trail_pct", "dead_token_threshold_usd",
         "paper_stop_slippage_pct",
+        "time_stop_minutes", "entry_eject_after_sec", "entry_eject_peak_mult",
     )
 
     for pt in trades:
@@ -595,11 +596,37 @@ async def _check_open_trades(bot) -> None:
                 )
                 continue
 
-            # ── PHASE 2: TIME STOP (no movement after 10 min) ──────────
-            # If trade hasn't moved meaningfully after 10 minutes, exit.
-            # Memecoins die fast; stale capital is dead capital. Keeps
-            # the bot recycling into fresher opportunities.
-            time_stop_min = float(cfg.get("time_stop_minutes", 10.0) or 10.0)
+            # ── Post-entry momentum eject (report rec: kill DOA fast) ──
+            # A dead-on-arrival entry that never showed life (peak < eject_peak)
+            # and is below entry after the eject window (~90s) gets cut now
+            # instead of riding the full time stop. Directly targets the
+            # sl_hit/dead_token DOA leak (-5.7 SOL in the report).
+            eject_after_h = float(cfg.get("entry_eject_after_sec", 90.0) or 90.0) / 3600.0
+            eject_peak = float(cfg.get("entry_eject_peak_mult", 1.10) or 1.10)
+            _ts_min = float(cfg.get("time_stop_minutes", 5.0) or 5.0)
+            if (eject_after_h <= age_hours < (_ts_min / 60.0)
+                    and peak_mult < eject_peak
+                    and current_mult < 1.0):
+                remaining_sol = sol * (remaining / 100.0)
+                pnl = round(realized + remaining_sol * (current_mult - 1), 4)
+                logger.info(
+                    "Paper: NO-MOMENTUM EJECT %s — age=%.1fm peak=%.2fx now=%.2fx pnl=%+.4f",
+                    name, age_hours * 60, peak_mult, current_mult, pnl,
+                )
+                await _finalize_paper_close(
+                    bot, pt, "no_momentum", pnl, peak_mc, peak_mult, [
+                        f"⏬ PAPER TRADE — NO MOMENTUM (ejected)",
+                        f"🪙 {name} | {current_mult:.2f}x | {pnl:+.4f} SOL",
+                        f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
+                        "Balance: {bal:.2f} SOL",
+                    ],
+                )
+                continue
+
+            # ── PHASE 2: TIME STOP (no movement after the time-stop window) ──
+            # If trade hasn't moved meaningfully in time, exit. Memecoins die
+            # fast; stale capital is dead capital. Cut from 8→5 min per report.
+            time_stop_min = float(cfg.get("time_stop_minutes", 5.0) or 5.0)
             time_stop_thr = float(cfg.get("time_stop_threshold", 1.50) or 1.50)
             if (age_hours >= (time_stop_min / 60.0)
                     and peak_mult < time_stop_thr

@@ -61,6 +61,7 @@ META_CLOSE_REASONS = frozenset({
     "expired",     # open >4h and <1.20x  (also used by scans 7-day close)
     "dead_api",    # 5 consecutive fetch_live_data failures — pair delisted or API down
     "dead_token",  # MC collapsed below $5K — backup SL when grace/gap missed primary SL
+    "no_momentum", # post-entry eject: DOA token never moved, cut at ~90s
 })
 
 
@@ -3317,6 +3318,14 @@ AGENT_PARAM_DEFAULTS = {
     "entry_min_buy_sell_ratio":    1.0,   # require m5 buys >= sells (net buying)
     "entry_min_m5_buys":           0.0,   # min m5 buy count (0 = ratio gate only)
 
+    # Post-entry momentum eject (report rec). Cut a dead-on-arrival entry
+    # at ~90s if it never moved (peak < eject_peak) and is below entry,
+    # instead of riding the full time stop. /setparam to tune.
+    "entry_eject_after_sec":   90.0,
+    "entry_eject_peak_mult":   1.10,
+    # Time stop cut from 8 -> 5 min (report: dead positions should die faster).
+    "time_stop_minutes":       5.0,
+
     # Run the Claude strategist entry decision on SCANNER trades too (it
     # already runs on 4am). Only fires at the open point for candidates that
     # passed all gates, so call volume is bounded. /setparam to 0 to disable.
@@ -3753,6 +3762,39 @@ async def init_agent_params() -> int:
             await session.commit()
         import logging as _logging
         _logging.getLogger(__name__).info("PP v2b: tg_signal_trail_trigger -> 1.5")
+        added += 1
+
+    # ── One-shot: PP v2c — cut time_stop to 5 min (report rec) ────────
+    # DB row exists at 8; the monitor now reads it from DB (added to the
+    # per-tick fetch), so update the live row. Pairs with the new 90s
+    # post-entry eject. One-shot then flagged.
+    async with AsyncSessionLocal() as session:
+        v2c_flag = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "pp_v2c_done")
+        )).scalar_one_or_none()
+        v2c_done = v2c_flag is not None and v2c_flag.param_value >= 1.0
+
+    if not v2c_done:
+        async with AsyncSessionLocal() as session:
+            row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "time_stop_minutes")
+            )).scalar_one_or_none()
+            if row is None:
+                session.add(AgentParam(param_name="time_stop_minutes", param_value=5.0))
+            else:
+                row.param_value = 5.0
+                row.updated_at = datetime.utcnow()
+            flag_row = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "pp_v2c_done")
+            )).scalar_one_or_none()
+            if flag_row is None:
+                session.add(AgentParam(param_name="pp_v2c_done", param_value=1.0))
+            else:
+                flag_row.param_value = 1.0
+                flag_row.updated_at = datetime.utcnow()
+            await session.commit()
+        import logging as _logging
+        _logging.getLogger(__name__).info("PP v2c: time_stop_minutes -> 5")
         added += 1
 
     # ── One-shot v4: force wipe all paper trades + reset balance ──────
