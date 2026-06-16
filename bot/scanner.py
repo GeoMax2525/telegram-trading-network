@@ -214,6 +214,47 @@ def parse_token_metrics(pair: dict) -> dict:
     }
 
 
+# ── Entry momentum gate ───────────────────────────────────────────────────────
+
+async def passes_momentum_gate(buys_m5, sells_m5, label: str = "") -> tuple[bool, str]:
+    """Hard momentum gate at entry, shared by scanner + 4am paths.
+
+    The 7d/233-trade audit showed the money leak is dead-on-arrival entries:
+    sl_hit (26 trades, 0 wins, -3.48 SOL) + dead_token (14, -2.07 SOL). Those
+    are tokens entered while net-SELLING or with no buyers. This gate blocks
+    them deterministically at the rule layer instead of relying on the Claude
+    strategist's discretion.
+
+    Returns (passed, reason). Fails OPEN when txn data is missing (a fresh
+    launch or a DexScreener gap must never halt the pipeline). Fully tunable /
+    disable-able live: /setparam entry_momentum_gate_enabled 0.
+    """
+    from database.models import get_params
+    cfg = await get_params(
+        "entry_momentum_gate_enabled",
+        "entry_min_buy_sell_ratio",
+        "entry_min_m5_buys",
+    )
+    if float(cfg.get("entry_momentum_gate_enabled") or 0) < 1.0:
+        return True, "gate_off"
+
+    b = float(buys_m5 or 0)
+    s = float(sells_m5 or 0)
+    if b == 0 and s == 0:
+        return True, "no_txn_data"  # fail open — fresh launch / data gap
+
+    min_buys = float(cfg.get("entry_min_m5_buys") or 0)
+    if b < min_buys:
+        return False, f"doa_low_buys({b:.0f}<{min_buys:.0f})"
+
+    min_ratio = float(cfg.get("entry_min_buy_sell_ratio") or 1.0)
+    ratio = (b / s) if s > 0 else 999.0
+    if ratio < min_ratio:
+        return False, f"distribution(b/s={ratio:.2f}<{min_ratio:.2f})"
+
+    return True, f"ok(b/s={ratio:.2f})"
+
+
 # ── AI Scoring ────────────────────────────────────────────────────────────────
 
 def _score_liquidity(metrics: dict) -> float:

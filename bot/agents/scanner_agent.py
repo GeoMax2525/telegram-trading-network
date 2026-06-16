@@ -1430,11 +1430,14 @@ async def run_once() -> tuple[int, int]:
             # at current price, not some cached price from 2 seconds ago.
             eval_mc = float(scored.get("mcap") or 0)
             fresh_mc = eval_mc
+            fresh_buys_m5 = fresh_sells_m5 = None
             if mint_addr:
                 try:
                     fresh_pair = await fetch_token_data(mint_addr)
                     if fresh_pair is not None:
                         fresh_metrics = parse_token_metrics(fresh_pair)
+                        fresh_buys_m5 = fresh_metrics.get("buys_m5")
+                        fresh_sells_m5 = fresh_metrics.get("sells_m5")
                         new_mc = float(fresh_metrics.get("market_cap") or 0)
                         if new_mc > 0:
                             fresh_mc = new_mc
@@ -1459,6 +1462,20 @@ async def run_once() -> tuple[int, int]:
                 logger.info(
                     "Scanner: SKIP paper trade %s — entry_mc is 0/None after "
                     "both eval and fresh fetch failed", (token_name or "?")[:20],
+                )
+                continue
+
+            # Entry momentum gate (Profit Protection v2): block net-selling /
+            # dead-on-arrival tokens — the sl_hit + dead_token cohort that the
+            # audit showed leaked -5.5 SOL. Fails open on missing txn data.
+            from bot.scanner import passes_momentum_gate
+            mom_ok, mom_reason = await passes_momentum_gate(
+                fresh_buys_m5, fresh_sells_m5, label=(token_name or "?")[:20],
+            )
+            if not mom_ok:
+                logger.info(
+                    "Scanner: SKIP paper trade %s — momentum gate: %s",
+                    (token_name or "?")[:20], mom_reason,
                 )
                 continue
 

@@ -379,6 +379,22 @@ async def _handle_message(event, channel_name: str) -> None:
                     )
                     return
 
+                # Entry momentum gate (Profit Protection v2): don't buy a 4am
+                # signal that's already net-dumping at the moment it fires.
+                # Fails open on missing txn data; tunable via /setparam.
+                from bot.scanner import passes_momentum_gate
+                mom_ok, mom_reason = await passes_momentum_gate(
+                    metrics.get("buys_m5"), metrics.get("sells_m5"),
+                    label=token_name,
+                )
+                if not mom_ok:
+                    skip_reason = f"momentum_gate:{mom_reason}"
+                    logger.info(
+                        "TG scraper SKIPPED %s — momentum gate: %s",
+                        mint[:12], mom_reason,
+                    )
+                    return
+
                 bal = await compute_paper_balance(_state.PAPER_STARTING_BALANCE)
                 if bal < tg_paper_sol + 0.05:
                     skip_reason = f"insufficient_balance({bal:.3f}<{tg_paper_sol + 0.05:.3f})"
