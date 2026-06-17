@@ -168,10 +168,12 @@ async def main() -> None:
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(keybot_router)
-    dp.include_router(router)
     # Echo intelligence + controls, HQ-only (reads the shared Data Hub).
+    # MUST be registered before the main `router` — handlers.py has a catch-all
+    # @router.message() that would otherwise swallow /ecco + /echo_* commands.
     from bot.echo.hq import router as echo_hq_router
     dp.include_router(echo_hq_router)
+    dp.include_router(router)
 
     # Start background tasks
     asyncio.create_task(peak_tracker_loop())
