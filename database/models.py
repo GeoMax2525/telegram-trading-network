@@ -2552,6 +2552,77 @@ class LiveMirror(Base):
     closed_at       = Column(DateTime, nullable=True)
 
 
+# ── Echo (Trojan Horse signal/intelligence bot) Data Hub ────────────────────
+# Separate bot identity, shared database. Echo monitors many external alpha
+# groups, silently records every CA sighting, scores groups + callers, and
+# fires a clean cross-group consensus alert. See bot/echo/.
+
+class EchoSighting(Base):
+    __tablename__ = "echo_sightings"
+    id           = Column(Integer, primary_key=True)
+    ca           = Column(String, index=True)
+    chat_id      = Column(BigInteger, index=True)
+    chat_title   = Column(String, nullable=True)
+    user_id      = Column(BigInteger, nullable=True, index=True)
+    username     = Column(String, nullable=True)
+    message_id   = Column(BigInteger, nullable=True)
+    message_link = Column(String, nullable=True)
+    token_name   = Column(String, nullable=True)
+    token_symbol = Column(String, nullable=True)
+    entry_mc     = Column(Float, nullable=True)   # MC snapshot at first sighting
+    seen_at      = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class EchoToken(Base):
+    __tablename__ = "echo_tokens"
+    ca              = Column(String, primary_key=True)
+    token_name      = Column(String, nullable=True)
+    symbol          = Column(String, nullable=True)
+    first_seen_at   = Column(DateTime, default=datetime.utcnow)
+    first_mc        = Column(Float, nullable=True)
+    ath_mc          = Column(Float, nullable=True)
+    ath_mult        = Column(Float, default=1.0)
+    last_checked_at = Column(DateTime, nullable=True)
+    status          = Column(String, default="tracking")  # tracking | win | loss
+    signaled        = Column(Boolean, default=False)
+    resolved        = Column(Boolean, default=False)
+    milestones      = Column(String, default="")          # csv of posted X, e.g. "5,10"
+
+
+class EchoGroup(Base):
+    __tablename__ = "echo_groups"
+    chat_id        = Column(BigInteger, primary_key=True)
+    chat_title     = Column(String, nullable=True)
+    points         = Column(Float, default=0.0)
+    calls          = Column(Integer, default=0)
+    wins           = Column(Integer, default=0)
+    losses         = Column(Integer, default=0)
+    blacklisted    = Column(Boolean, default=False)
+    last_active_at = Column(DateTime, nullable=True)
+
+
+class EchoUser(Base):
+    __tablename__ = "echo_users"
+    user_id     = Column(BigInteger, primary_key=True)
+    username    = Column(String, nullable=True)
+    points      = Column(Float, default=0.0)
+    calls       = Column(Integer, default=0)
+    wins        = Column(Integer, default=0)
+    losses      = Column(Integer, default=0)
+    blacklisted = Column(Boolean, default=False)
+
+
+class EchoSignal(Base):
+    __tablename__ = "echo_signals"
+    id           = Column(Integer, primary_key=True)
+    ca           = Column(String, index=True)
+    triggered_at = Column(DateTime, default=datetime.utcnow)
+    num_groups   = Column(Integer, default=0)
+    pct_chats    = Column(Float, default=0.0)
+    quality      = Column(String, nullable=True)
+    entry_mc     = Column(Float, nullable=True)
+
+
 async def open_paper_trade(
     token_address: str, token_name: str | None,
     entry_mc: float | None, entry_price: float | None,
@@ -3341,6 +3412,13 @@ AGENT_PARAM_DEFAULTS = {
     # pump.fun/bonk launches at block 0, earlier than DexScreener indexing.
     # /setparam pf_stream_enabled 1 to turn on (no redeploy needed).
     "pf_stream_enabled":           0.0,   # 0 = off, 1 = on
+
+    # ── Echo (Trojan Horse signal bot) tuning ───────────────────────────────
+    "echo_consensus_threshold":  4.0,    # same CA in N+ distinct groups -> alert
+    "echo_active_window_min":    60.0,   # sightings within this window count toward consensus
+    "echo_resolution_hours":     24.0,   # token marked loss (<2x) after this long
+    "echo_rug_filter_enabled":   1.0,    # run on-chain rug checks before any alert
+    "echo_win_mult":             2.0,    # multiple that counts as a win (else rug penalty)
 
     # ── Live (real-money) execution safety rails (bot/live_guard.py) ──────────
     # The manual Key Buy / Full Clip buttons spend REAL SOL regardless of

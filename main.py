@@ -238,6 +238,13 @@ async def main() -> None:
     # Set bot reference for signal relay
     set_relay_bot(bot)
 
+    # Echo — Trojan Horse signal bot (separate token, shared Data Hub). Runs
+    # its own Bot/Dispatcher polling in parallel; no-op unless ECHO_BOT_TOKEN
+    # is set, so the trading bot is unaffected.
+    from bot.echo.app import start_echo
+    asyncio.create_task(start_echo())
+    logger.info("Echo: queued for startup (gated by ECHO_BOT_TOKEN)")
+
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
