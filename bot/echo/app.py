@@ -71,15 +71,17 @@ async def on_group_message(message: Message) -> None:
 # ── Startup ─────────────────────────────────────────────────────────────────
 async def _set_commands(echo_bot) -> None:
     """Register Echo's themed command menu (the BotFather command list)."""
-    from aiogram.types import BotCommand
+    from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats
     try:
+        # Scope to PRIVATE chats only — the command menu never appears in the
+        # external groups ECCO sits in (and the handlers are operator-gated too).
         await echo_bot.set_my_commands([
             BotCommand(command="dive", description="Dive in — main menu"),
             BotCommand(command="pod", description="See how the pod is performing"),
             BotCommand(command="echoers", description="View top echoers and their points"),
             BotCommand(command="sonar", description="Run sonar — check current signals"),
             BotCommand(command="waves", description="See all commands and how to use them"),
-        ])
+        ], scope=BotCommandScopeAllPrivateChats())
     except Exception as exc:
         logger.debug("echo: set_my_commands failed: %s", exc)
 
