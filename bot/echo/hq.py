@@ -23,9 +23,10 @@ def _ok(message: Message) -> bool:
     return bool(message.from_user and message.from_user.id in ADMIN_IDS)
 
 
+@router.message(Command("ecco"))
 @router.message(Command("echo"))
 async def cmd_echo_dashboard(message: Message) -> None:
-    """Echo intelligence dashboard — the private cross-group picture."""
+    """ECCO intelligence dashboard — the private cross-group picture."""
     if not _ok(message):
         return
     from database.models import (
@@ -55,7 +56,7 @@ async def cmd_echo_dashboard(message: Message) -> None:
 
     D = "━" * 26
     lines = [
-        D, "🛰️  ECHO INTELLIGENCE", D, "",
+        D, "🛰️  ECCO INTELLIGENCE", "Edge Consensus Crypto Oracle", D, "",
         f"Groups: {n_groups}  ·  Callers: {n_users}",
         f"CA sightings: {n_sightings}  ·  Signals fired: {n_signals}",
         f"Resolved: {n_wins}W / {n_losses}L",
@@ -78,8 +79,8 @@ async def cmd_help(message: Message) -> None:
     if not _ok(message):
         return
     await message.reply(
-        "🛰️ Echo (HQ-only)\n"
-        "/echo — intelligence dashboard\n"
+        "🛰️ ECCO — Edge Consensus Crypto Oracle (HQ-only)\n"
+        "/ecco — intelligence dashboard\n"
         "/echo_stats — top groups + callers\n"
         "/echo_signals — recent signals + outcomes\n"
         "/echo_groups — groups Echo is in\n"

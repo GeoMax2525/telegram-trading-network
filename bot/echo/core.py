@@ -10,7 +10,9 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 # ── Config ──────────────────────────────────────────────────────────────────
-ECHO_BOT_TOKEN = os.getenv("ECHO_BOT_TOKEN", "").strip()
+# ECCO = Edge Consensus Crypto Oracle. Accept the new ECCO_BOT_TOKEN, falling
+# back to the legacy ECHO_BOT_TOKEN so either Railway var works.
+ECHO_BOT_TOKEN = (os.getenv("ECCO_BOT_TOKEN") or os.getenv("ECHO_BOT_TOKEN") or "").strip()
 
 
 def echo_enabled() -> bool:
@@ -18,7 +20,7 @@ def echo_enabled() -> bool:
 
 
 def _admin_ids() -> set[int]:
-    raw = os.getenv("ECHO_ADMIN_IDS", "").strip()
+    raw = (os.getenv("ECCO_ADMIN_IDS") or os.getenv("ECHO_ADMIN_IDS") or "").strip()
     ids: set[int] = set()
     if raw:
         for part in raw.replace(";", ",").split(","):

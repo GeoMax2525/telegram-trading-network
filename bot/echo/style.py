@@ -12,7 +12,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 def box(title: str, lines: list[str]) -> str:
     """Wrap content in the retro game-screen box (monospace code block)."""
-    body = "\n".join([f"🐬 ECHO — {title} 🐬", "", *lines])
+    body = "\n".join([f"🐬 ECCO — {title} 🐬", "", *lines])
     return f"```\n{body}\n```"
 
 
@@ -109,6 +109,8 @@ def sonar_sweep(active: list) -> str:
 
 def dive_menu(n_signals: int) -> str:
     return box("DIVE", [
+        "Edge Consensus Crypto Oracle",
+        "",
         "The pod listens. The pod remembers.",
         "",
         f"Signals on sonar: {n_signals}",
@@ -119,6 +121,8 @@ def dive_menu(n_signals: int) -> str:
 
 def waves_help() -> str:
     return box("WAVES", [
+        "Edge Consensus Crypto Oracle",
+        "",
         "/dive    — surface the main menu",
         "/pod     — pod rankings & points",
         "/echoers — top echoers & points",
