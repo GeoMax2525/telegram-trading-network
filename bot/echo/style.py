@@ -11,8 +11,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def box(title: str, lines: list[str]) -> str:
-    """Wrap content in the retro game-screen box (monospace code block)."""
-    body = "\n".join([f"🐬 ECCO — {title} 🐬", "", *lines])
+    """Wrap content in the retro game-screen box: header, separator, content."""
+    body = "\n".join([f"🐬 ECCO — {title} 🐬", SEP, "", *lines])
     return f"```\n{body}\n```"
 
 
@@ -84,16 +84,17 @@ def pod_status(n_signals: int, avg_x: float) -> str:
 def pod_rankings(groups: list) -> str:
     lines = []
     for i, g in enumerate(groups, 1):
-        name = (g.chat_title or str(g.chat_id))[:22]
-        lines.append(f"{i}. {name} — {g.points:.0f} pts ({g.wins}W/{g.losses}L)")
+        lines.append(f"{i}. {(g.chat_title or str(g.chat_id))[:24]}")
+        lines.append(f"   {g.wins}W / {g.losses}L ({_wr(g.wins, g.losses)})   {g.points:+.0f} pts")
+        lines.append("")
     return box("POD RANKINGS", lines or ["The waters are still."])
 
 
 def echoers(users: list) -> str:
     lines = []
     for i, u in enumerate(users, 1):
-        name = f"@{u.username}" if u.username else str(u.user_id)
-        lines.append(f"{i}. {name[:22]} — {u.points:.0f} pts ({u.wins}W/{u.losses}L)")
+        tag = f"{i}. {_handle(u.username or str(u.user_id))[:16]}"
+        lines.append(f"{tag:<20}{u.wins}W / {u.losses}L ({_wr(u.wins, u.losses)})   {u.points:+.0f} pts")
     return box("ECHOERS", lines or ["No echoers yet."])
 
 
@@ -107,33 +108,67 @@ def sonar_sweep(active: list) -> str:
     return box("SONAR SWEEP", lines)
 
 
-def hub_dashboard(st: dict) -> str:
-    """The full ECCO intelligence hub — same data as HQ /ecco, Ecco-styled."""
-    lines = [
-        "Edge Consensus Crypto Oracle",
+SEP = "━" * 30
+
+
+def _wr(w: int, l: int) -> str:
+    t = w + l
+    return f"{round(100 * w / t)}%" if t else "—"
+
+
+def _num(n: int) -> str:
+    return f"{int(n):,}"
+
+
+def _handle(name: str) -> str:
+    return name if str(name).lstrip("-").isdigit() else f"@{name}"
+
+
+def hub_dashboard(st: dict, footer: str = "") -> str:
+    """The intelligence dashboard — premium retro sonar-console layout. The
+    whole report is one monospace box (so columns + separators align); the
+    footer sits outside so its commands stay tappable."""
+    L = [
+        "🐬 ECCO — INTELLIGENCE DASHBOARD 🐬",
         "",
-        f"Groups: {st['n_groups']}  ·  Echoers: {st['n_users']}",
-        f"Sightings: {st['n_sightings']}  ·  Signals: {st['n_signals']}",
-        f"Resolved: {st['n_wins']}W / {st['n_losses']}L",
+        SEP,
+        "     EDGE CONSENSUS CRYPTO ORACLE",
+        SEP,
         "",
-        "🏆 Top Pods",
+        "📡 POD STATUS",
+        f"Groups: {st['n_groups']:<11}Echoers: {st['n_users']}",
+        f"Sightings: {_num(st['n_sightings']):<8}Signals: {st['n_signals']}",
+        f"Record: {st['n_wins']}W / {st['n_losses']}L     Win Rate: {_wr(st['n_wins'], st['n_losses'])}",
+        "",
+        "🏆 TOP GROUPS",
     ]
-    for g in st["top_groups"]:
-        lines.append(f"  {(g.chat_title or str(g.chat_id))[:20]} — {g.points:.0f} pts")
-    if not st["top_groups"]:
-        lines.append("  (waiting for the pod)")
-    lines += ["", "🎯 Top Echoers"]
-    for u in st["top_users"]:
-        nm = f"@{u.username}" if u.username else str(u.user_id)
-        lines.append(f"  {nm[:20]} — {u.points:.0f} pts")
-    if not st["top_users"]:
-        lines.append("  (no echoers yet)")
-    lines += ["", "📡 Recent Sonar"]
-    for sig in st["recent"]:
-        lines.append(f"  {sig.ca[:8]}… — {sig.num_groups} grp · {int(sig.pct_chats)}%")
-    if not st["recent"]:
-        lines.append("  (sonar quiet)")
-    return box("DIVE", lines)
+    if st["top_groups"]:
+        for i, g in enumerate(st["top_groups"], 1):
+            L.append(f"{i}. {g['title'][:24]}")
+            L.append(f"   Record: {g['wins']}W / {g['losses']}L ({_wr(g['wins'], g['losses'])})   {g['points']:+.0f} pts")
+            if g["top_echoer"]:
+                nm, w = g["top_echoer"]
+                L.append(f"   Top Echoer: {_handle(nm)} ({w}W)")
+            L.append("")
+    else:
+        L += ["Clicking through the waves…", "(no pods yet)", ""]
+    L.append("🎯 TOP ECHOERS")
+    if st["top_users"]:
+        for i, u in enumerate(st["top_users"], 1):
+            tag = f"{i}. {_handle(u['name'])[:16]}"
+            L.append(f"{tag:<20}{u['wins']}W / {u['losses']}L ({_wr(u['wins'], u['losses'])})   {u['points']:+.0f} pts")
+    else:
+        L.append("(no echoers yet)")
+    L += ["", "📡 RECENT SIGNALS"]
+    if st["recent"]:
+        for r in st["recent"]:
+            L.append(f"• {r['name'][:18]} — {r['quality']} — {r['mult']:.1f}x")
+    else:
+        L.append("• Sonar quiet")
+    out = "```\n" + "\n".join(L) + "\n```"
+    if footer:
+        out += f"\n{footer}"
+    return out
 
 
 def dive_menu(n_signals: int) -> str:

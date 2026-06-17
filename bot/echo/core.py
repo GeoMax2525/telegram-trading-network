@@ -241,8 +241,26 @@ async def top_users(n: int = 10) -> list:
         )).scalars().all())
 
 
+async def _top_echoer_for_group(s, chat_id) -> tuple | None:
+    """(username, wins) of the most active echoer in a group, or None."""
+    from database.models import select, func, EchoSighting, EchoUser
+    row = (await s.execute(
+        select(EchoSighting.user_id, func.count(EchoSighting.id).label("c"))
+        .where(EchoSighting.chat_id == chat_id, EchoSighting.user_id.isnot(None))
+        .group_by(EchoSighting.user_id)
+        .order_by(func.count(EchoSighting.id).desc()).limit(1)
+    )).first()
+    if not row or row[0] is None:
+        return None
+    u = await s.get(EchoUser, row[0])
+    if u is None:
+        return None
+    return (u.username or str(u.user_id), u.wins or 0)
+
+
 async def hub_stats() -> dict:
-    """Everything for the full hub dashboard: totals + top groups/callers/signals."""
+    """Enriched data for the intelligence dashboard: totals + win rates + top
+    groups (with per-group top echoer) + top echoers + recent signals."""
     from database.models import (
         AsyncSessionLocal, select, func,
         EchoGroup, EchoUser, EchoSighting, EchoSignal, EchoToken,
@@ -256,16 +274,38 @@ async def hub_stats() -> dict:
             select(func.count(EchoToken.ca)).where(EchoToken.status == "win"))).scalar() or 0
         n_losses = (await s.execute(
             select(func.count(EchoToken.ca)).where(EchoToken.status == "loss"))).scalar() or 0
-        top_groups = list((await s.execute(
+
+        groups_raw = list((await s.execute(
             select(EchoGroup).order_by(EchoGroup.points.desc()).limit(5))).scalars().all())
-        top_users_ = list((await s.execute(
+        top_groups = []
+        for g in groups_raw:
+            top_groups.append({
+                "title": g.chat_title or str(g.chat_id),
+                "wins": g.wins or 0, "losses": g.losses or 0, "points": g.points or 0,
+                "top_echoer": await _top_echoer_for_group(s, g.chat_id),
+            })
+
+        users_raw = list((await s.execute(
             select(EchoUser).order_by(EchoUser.points.desc()).limit(5))).scalars().all())
-        recent = list((await s.execute(
+        top_users = [{
+            "name": (u.username or str(u.user_id)),
+            "wins": u.wins or 0, "losses": u.losses or 0, "points": u.points or 0,
+        } for u in users_raw]
+
+        sigs = list((await s.execute(
             select(EchoSignal).order_by(EchoSignal.id.desc()).limit(5))).scalars().all())
+        recent = []
+        for sig in sigs:
+            tok = await s.get(EchoToken, sig.ca)
+            recent.append({
+                "name": (tok.token_name if tok and tok.token_name else sig.ca[:8]),
+                "quality": (sig.quality or "Medium Quality Signal").replace(" Signal", ""),
+                "mult": (tok.ath_mult if tok else 1.0) or 1.0,
+            })
     return {
         "n_groups": n_groups, "n_users": n_users, "n_sightings": n_sightings,
         "n_signals": n_signals, "n_wins": n_wins, "n_losses": n_losses,
-        "top_groups": top_groups, "top_users": top_users_, "recent": recent,
+        "top_groups": top_groups, "top_users": top_users, "recent": recent,
     }
 
 

@@ -29,49 +29,12 @@ async def cmd_echo_dashboard(message: Message) -> None:
     """ECCO intelligence dashboard — the private cross-group picture."""
     if not _ok(message):
         return
-    from database.models import (
-        AsyncSessionLocal, select, func,
-        EchoGroup, EchoUser, EchoSignal, EchoToken, EchoSighting,
+    from bot.echo import core, style
+    text = style.hub_dashboard(
+        await core.hub_stats(),
+        footer="More:  /echo_stats   /echo_groups   /echo_signals   /echo_help",
     )
-    async with AsyncSessionLocal() as s:
-        n_groups = (await s.execute(select(func.count(EchoGroup.chat_id)))).scalar() or 0
-        n_users = (await s.execute(select(func.count(EchoUser.user_id)))).scalar() or 0
-        n_sightings = (await s.execute(select(func.count(EchoSighting.id)))).scalar() or 0
-        n_signals = (await s.execute(select(func.count(EchoSignal.id)))).scalar() or 0
-        n_wins = (await s.execute(
-            select(func.count(EchoToken.ca)).where(EchoToken.status == "win")
-        )).scalar() or 0
-        n_losses = (await s.execute(
-            select(func.count(EchoToken.ca)).where(EchoToken.status == "loss")
-        )).scalar() or 0
-        top_groups = list((await s.execute(
-            select(EchoGroup).order_by(EchoGroup.points.desc()).limit(5)
-        )).scalars().all())
-        top_users = list((await s.execute(
-            select(EchoUser).order_by(EchoUser.points.desc()).limit(5)
-        )).scalars().all())
-        recent = list((await s.execute(
-            select(EchoSignal).order_by(EchoSignal.id.desc()).limit(5)
-        )).scalars().all())
-
-    D = "━" * 26
-    lines = [
-        D, "🛰️  ECCO INTELLIGENCE", "Edge Consensus Crypto Oracle", D, "",
-        f"Groups: {n_groups}  ·  Callers: {n_users}",
-        f"CA sightings: {n_sightings}  ·  Signals fired: {n_signals}",
-        f"Resolved: {n_wins}W / {n_losses}L",
-        "", "🏆 Top groups",
-    ]
-    for g in top_groups:
-        lines.append(f"  {(g.chat_title or g.chat_id)} — {g.points:.0f} pts ({g.wins}W/{g.losses}L)")
-    lines.append("\n🎯 Top callers")
-    for u in top_users:
-        lines.append(f"  @{u.username or u.user_id} — {u.points:.0f} pts ({u.wins}W/{u.losses}L)")
-    lines.append("\n📡 Recent signals")
-    for sig in recent:
-        lines.append(f"  {sig.ca[:8]}… — {sig.num_groups} grp · {int(sig.pct_chats)}% · {sig.quality or '?'}")
-    lines += ["", "More: /echo_stats /echo_groups /echo_signals /echo_help"]
-    await message.reply("\n".join(lines), parse_mode="")
+    await message.reply(text, parse_mode="Markdown")
 
 
 @router.message(Command("echo_help"))
