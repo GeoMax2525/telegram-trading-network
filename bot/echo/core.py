@@ -179,6 +179,59 @@ async def calling_group_ids(ca: str, window_min: float) -> list[int]:
     return [int(r) for r in rows]
 
 
+# ── Read helpers for the themed menus ───────────────────────────────────────
+async def pod_overview() -> tuple[int, float]:
+    """(active signal count, avg performance x of winning signals)."""
+    from database.models import AsyncSessionLocal, select, func, EchoToken
+    async with AsyncSessionLocal() as s:
+        active = (await s.execute(
+            select(func.count(EchoToken.ca)).where(
+                EchoToken.signaled.is_(True), EchoToken.resolved.is_(False),
+            )
+        )).scalar() or 0
+        avg = (await s.execute(
+            select(func.avg(EchoToken.ath_mult)).where(
+                EchoToken.signaled.is_(True), EchoToken.ath_mult >= 2.0,
+            )
+        )).scalar()
+    return int(active), float(avg or 0.0)
+
+
+async def active_signals(limit: int = 12) -> list[tuple]:
+    """[(label, ath_mult, quality)] for signaled tokens, best first."""
+    from database.models import AsyncSessionLocal, select, EchoToken, EchoSignal
+    out = []
+    async with AsyncSessionLocal() as s:
+        toks = list((await s.execute(
+            select(EchoToken).where(EchoToken.signaled.is_(True))
+            .order_by(EchoToken.ath_mult.desc()).limit(limit)
+        )).scalars().all())
+        for t in toks:
+            sig = (await s.execute(
+                select(EchoSignal).where(EchoSignal.ca == t.ca)
+                .order_by(EchoSignal.id.desc()).limit(1)
+            )).scalar_one_or_none()
+            out.append((t.token_name or t.ca[:6], t.ath_mult or 1.0,
+                        sig.quality if sig else "Medium Quality Signal"))
+    return out
+
+
+async def top_groups(n: int = 10) -> list:
+    from database.models import AsyncSessionLocal, select, EchoGroup
+    async with AsyncSessionLocal() as s:
+        return list((await s.execute(
+            select(EchoGroup).order_by(EchoGroup.points.desc()).limit(n)
+        )).scalars().all())
+
+
+async def top_users(n: int = 10) -> list:
+    from database.models import AsyncSessionLocal, select, EchoUser
+    async with AsyncSessionLocal() as s:
+        return list((await s.execute(
+            select(EchoUser).order_by(EchoUser.points.desc()).limit(n)
+        )).scalars().all())
+
+
 # ── Points engine ───────────────────────────────────────────────────────────
 RUG_PENALTY = -200.0
 WIN_BASE = 100.0

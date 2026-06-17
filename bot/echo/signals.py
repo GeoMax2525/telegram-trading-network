@@ -7,7 +7,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from bot.echo import core
+from bot.echo import core, style
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +38,6 @@ async def _rug_ok(ca: str, pair) -> tuple[bool, str]:
     except Exception as exc:
         logger.warning("echo: rug filter error %s: %s — failing closed", ca[:8], exc)
         return False, f"rug_check_error:{exc}"
-
-
-def _copy_button(ca: str):
-    """Inline keyboard with a one-tap copy-CA button (falls back gracefully)."""
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-    try:
-        from aiogram.types import CopyTextButton
-        btn = InlineKeyboardButton(text="📋 Copy Contract", copy_text=CopyTextButton(text=ca))
-    except Exception:
-        # Older aiogram without CopyTextButton — link out to the chart instead.
-        btn = InlineKeyboardButton(text="📈 Chart", url=f"https://dexscreener.com/solana/{ca}")
-    return InlineKeyboardMarkup(inline_keyboard=[[btn]])
 
 
 async def maybe_fire_signal(echo_bot, ca: str) -> None:
@@ -105,12 +93,8 @@ async def maybe_fire_signal(echo_bot, ca: str) -> None:
         s.add(EchoSignal(ca=ca, num_groups=callers, pct_chats=pct, quality=quality, entry_mc=mc))
         await s.commit()
 
-    text = (
-        f"🟢 *Entry on {label}* — {_fmt_mc(mc)}\n"
-        f"{int(pct)}% of chats • {quality}\n\n"
-        f"`{ca}`"
-    )
-    await _broadcast(echo_bot, ca, window, text, reply_markup=_copy_button(ca))
+    text = style.sonar_report(label, mc, pct, quality)
+    await _broadcast(echo_bot, ca, window, text, reply_markup=style.kb_copy(ca))
     logger.info("echo: SIGNAL %s (%s) — %d/%d groups, %s", label, ca[:8], callers, total, quality)
 
 
@@ -122,14 +106,6 @@ async def _broadcast(echo_bot, ca: str, window: float, text: str, reply_markup=N
             await echo_bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=reply_markup)
         except Exception as exc:
             logger.debug("echo: broadcast to %s failed: %s", chat_id, exc)
-
-
-def _fmt_mc(mc: float) -> str:
-    if mc >= 1_000_000:
-        return f"${mc/1_000_000:.1f}M"
-    if mc >= 1_000:
-        return f"${mc/1_000:.0f}K"
-    return f"${mc:.0f}"
 
 
 # ── Performance tracker ─────────────────────────────────────────────────────
@@ -205,5 +181,5 @@ async def _tracker_tick(echo_bot) -> None:
         for ms in new_ms:
             await _broadcast(
                 echo_bot, tok.ca, window,
-                f"🚀 *{ms}x from initial call* — {tok.token_name or tok.ca[:6]}",
+                style.sonar_pulse(tok.token_name or tok.ca[:6], ms),
             )

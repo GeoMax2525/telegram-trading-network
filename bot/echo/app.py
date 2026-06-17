@@ -69,6 +69,21 @@ async def on_group_message(message: Message) -> None:
 
 
 # ── Startup ─────────────────────────────────────────────────────────────────
+async def _set_commands(echo_bot) -> None:
+    """Register Echo's themed command menu (the BotFather command list)."""
+    from aiogram.types import BotCommand
+    try:
+        await echo_bot.set_my_commands([
+            BotCommand(command="dive", description="Dive in — main menu"),
+            BotCommand(command="pod", description="See how the pod is performing"),
+            BotCommand(command="echoers", description="View top echoers and their points"),
+            BotCommand(command="sonar", description="Run sonar — check current signals"),
+            BotCommand(command="waves", description="See all commands and how to use them"),
+        ])
+    except Exception as exc:
+        logger.debug("echo: set_my_commands failed: %s", exc)
+
+
 async def start_echo() -> None:
     """Boot the Echo bot (own token, own polling) + its tracker loop. No-op if
     ECHO_BOT_TOKEN is unset, so the trading bot is unaffected."""
@@ -77,11 +92,15 @@ async def start_echo() -> None:
         return
     echo_bot = Bot(core.ECHO_BOT_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
     dp = Dispatcher()
+    # Themed commands FIRST so /dive etc. match before the ingest catch-all.
+    from bot.echo.themed import router as themed_router
+    dp.include_router(themed_router)
     dp.include_router(router)
     asyncio.create_task(echo_tracker_loop(echo_bot))
     logger.info("Echo: starting (admins=%s)", core.ECHO_ADMIN_IDS)
     try:
         await echo_bot.delete_webhook(drop_pending_updates=True)
+        await _set_commands(echo_bot)
         await dp.start_polling(echo_bot)
     finally:
         await echo_bot.session.close()
