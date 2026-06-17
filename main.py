@@ -169,6 +169,9 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(keybot_router)
     dp.include_router(router)
+    # Echo intelligence + controls, HQ-only (reads the shared Data Hub).
+    from bot.echo.hq import router as echo_hq_router
+    dp.include_router(echo_hq_router)
 
     # Start background tasks
     asyncio.create_task(peak_tracker_loop())

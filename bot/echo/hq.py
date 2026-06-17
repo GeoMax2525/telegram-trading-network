@@ -1,0 +1,223 @@
+"""
+hq.py — Echo intelligence + controls, exposed on the MAIN (HQ) bot only.
+
+The Echo bot itself just ingests + alerts; all private rankings and admin
+controls live here, on the trading bot, restricted to HQ admins. This reads
+the shared Data Hub directly (same PostgreSQL), so no admin surface is ever
+exposed inside the external groups Echo sits in.
+"""
+
+import logging
+
+from aiogram import Router
+from aiogram.filters import Command
+from aiogram.types import Message
+
+from bot.config import ADMIN_IDS
+
+logger = logging.getLogger(__name__)
+router = Router()
+
+
+def _ok(message: Message) -> bool:
+    return bool(message.from_user and message.from_user.id in ADMIN_IDS)
+
+
+@router.message(Command("echo"))
+async def cmd_echo_dashboard(message: Message) -> None:
+    """Echo intelligence dashboard — the private cross-group picture."""
+    if not _ok(message):
+        return
+    from database.models import (
+        AsyncSessionLocal, select, func,
+        EchoGroup, EchoUser, EchoSignal, EchoToken, EchoSighting,
+    )
+    async with AsyncSessionLocal() as s:
+        n_groups = (await s.execute(select(func.count(EchoGroup.chat_id)))).scalar() or 0
+        n_users = (await s.execute(select(func.count(EchoUser.user_id)))).scalar() or 0
+        n_sightings = (await s.execute(select(func.count(EchoSighting.id)))).scalar() or 0
+        n_signals = (await s.execute(select(func.count(EchoSignal.id)))).scalar() or 0
+        n_wins = (await s.execute(
+            select(func.count(EchoToken.ca)).where(EchoToken.status == "win")
+        )).scalar() or 0
+        n_losses = (await s.execute(
+            select(func.count(EchoToken.ca)).where(EchoToken.status == "loss")
+        )).scalar() or 0
+        top_groups = list((await s.execute(
+            select(EchoGroup).order_by(EchoGroup.points.desc()).limit(5)
+        )).scalars().all())
+        top_users = list((await s.execute(
+            select(EchoUser).order_by(EchoUser.points.desc()).limit(5)
+        )).scalars().all())
+        recent = list((await s.execute(
+            select(EchoSignal).order_by(EchoSignal.id.desc()).limit(5)
+        )).scalars().all())
+
+    D = "━" * 26
+    lines = [
+        D, "🛰️  ECHO INTELLIGENCE", D, "",
+        f"Groups: {n_groups}  ·  Callers: {n_users}",
+        f"CA sightings: {n_sightings}  ·  Signals fired: {n_signals}",
+        f"Resolved: {n_wins}W / {n_losses}L",
+        "", "🏆 Top groups",
+    ]
+    for g in top_groups:
+        lines.append(f"  {(g.chat_title or g.chat_id)} — {g.points:.0f} pts ({g.wins}W/{g.losses}L)")
+    lines.append("\n🎯 Top callers")
+    for u in top_users:
+        lines.append(f"  @{u.username or u.user_id} — {u.points:.0f} pts ({u.wins}W/{u.losses}L)")
+    lines.append("\n📡 Recent signals")
+    for sig in recent:
+        lines.append(f"  {sig.ca[:8]}… — {sig.num_groups} grp · {int(sig.pct_chats)}% · {sig.quality or '?'}")
+    lines += ["", "More: /echo_stats /echo_groups /echo_signals /echo_help"]
+    await message.reply("\n".join(lines), parse_mode="")
+
+
+@router.message(Command("echo_help"))
+async def cmd_help(message: Message) -> None:
+    if not _ok(message):
+        return
+    await message.reply(
+        "🛰️ Echo (HQ-only)\n"
+        "/echo — intelligence dashboard\n"
+        "/echo_stats — top groups + callers\n"
+        "/echo_signals — recent signals + outcomes\n"
+        "/echo_groups — groups Echo is in\n"
+        "/echo_threshold <n> — consensus threshold\n"
+        "/echo_blacklist_group <chat_id> | /echo_unblacklist_group <chat_id>\n"
+        "/echo_blacklist_user <user_id> | /echo_unblacklist_user <user_id>\n"
+        "/echo_points <user_id> <delta> — manual point adjust",
+        parse_mode="",
+    )
+
+
+@router.message(Command("echo_stats"))
+async def cmd_stats(message: Message) -> None:
+    if not _ok(message):
+        return
+    from database.models import AsyncSessionLocal, select, EchoGroup, EchoUser
+    async with AsyncSessionLocal() as s:
+        groups = list((await s.execute(
+            select(EchoGroup).order_by(EchoGroup.points.desc()).limit(10)
+        )).scalars().all())
+        users = list((await s.execute(
+            select(EchoUser).order_by(EchoUser.points.desc()).limit(10)
+        )).scalars().all())
+    lines = ["🏆 TOP GROUPS"]
+    for g in groups:
+        lines.append(f"  {(g.chat_title or g.chat_id)} — {g.points:.0f} pts ({g.wins}W/{g.losses}L)")
+    lines.append("\n🎯 TOP CALLERS")
+    for u in users:
+        lines.append(f"  @{u.username or u.user_id} — {u.points:.0f} pts ({u.wins}W/{u.losses}L)")
+    await message.reply("\n".join(lines) if (groups or users) else "No Echo data yet.", parse_mode="")
+
+
+@router.message(Command("echo_signals"))
+async def cmd_signals(message: Message) -> None:
+    if not _ok(message):
+        return
+    from database.models import AsyncSessionLocal, select, EchoSignal, EchoToken
+    async with AsyncSessionLocal() as s:
+        sigs = list((await s.execute(
+            select(EchoSignal).order_by(EchoSignal.id.desc()).limit(15)
+        )).scalars().all())
+        lines = ["📡 RECENT ECHO SIGNALS"]
+        for sig in sigs:
+            tok = await s.get(EchoToken, sig.ca)
+            outcome = "tracking"
+            if tok:
+                outcome = f"{tok.status} ({tok.ath_mult:.1f}x)" if tok.resolved else f"{tok.ath_mult:.1f}x peak"
+            lines.append(f"  {(tok.token_name if tok else None) or sig.ca[:8]} — {sig.num_groups} grp · {sig.quality or '?'} · {outcome}")
+    await message.reply("\n".join(lines) if sigs else "No signals fired yet.", parse_mode="")
+
+
+@router.message(Command("echo_groups"))
+async def cmd_groups(message: Message) -> None:
+    if not _ok(message):
+        return
+    from database.models import AsyncSessionLocal, select, EchoGroup
+    async with AsyncSessionLocal() as s:
+        groups = list((await s.execute(
+            select(EchoGroup).order_by(EchoGroup.last_active_at.desc()).limit(30)
+        )).scalars().all())
+    lines = [f"📡 GROUPS ({len(groups)})"]
+    for g in groups:
+        bl = " 🚫" if g.blacklisted else ""
+        lines.append(f"  {(g.chat_title or g.chat_id)} — {g.calls} calls · {g.points:.0f} pts{bl}")
+    await message.reply("\n".join(lines) if groups else "No groups yet.", parse_mode="")
+
+
+@router.message(Command("echo_threshold"))
+async def cmd_threshold(message: Message) -> None:
+    if not _ok(message):
+        return
+    from database.models import set_param
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.reply("Usage: /echo_threshold <n>", parse_mode="")
+        return
+    await set_param("echo_consensus_threshold", float(parts[1]), "Echo HQ admin")
+    await message.reply(f"✅ Echo consensus threshold → {parts[1]} groups.", parse_mode="")
+
+
+async def _set_blacklist(message: Message, *, is_group: bool, value: bool) -> None:
+    if not _ok(message):
+        return
+    from database.models import AsyncSessionLocal, EchoGroup, EchoUser
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await message.reply("Usage: <command> <id>", parse_mode="")
+        return
+    target_id = int(parts[1])
+    async with AsyncSessionLocal() as s:
+        if is_group:
+            row = await s.get(EchoGroup, target_id) or EchoGroup(chat_id=target_id)
+        else:
+            row = await s.get(EchoUser, target_id) or EchoUser(user_id=target_id)
+        row.blacklisted = value
+        s.add(row)
+        await s.commit()
+    await message.reply(f"{'🚫 Blacklisted' if value else '✅ Un-blacklisted'} {target_id}.", parse_mode="")
+
+
+@router.message(Command("echo_blacklist_group"))
+async def cmd_bl_group(message: Message) -> None:
+    await _set_blacklist(message, is_group=True, value=True)
+
+
+@router.message(Command("echo_unblacklist_group"))
+async def cmd_unbl_group(message: Message) -> None:
+    await _set_blacklist(message, is_group=True, value=False)
+
+
+@router.message(Command("echo_blacklist_user"))
+async def cmd_bl_user(message: Message) -> None:
+    await _set_blacklist(message, is_group=False, value=True)
+
+
+@router.message(Command("echo_unblacklist_user"))
+async def cmd_unbl_user(message: Message) -> None:
+    await _set_blacklist(message, is_group=False, value=False)
+
+
+@router.message(Command("echo_points"))
+async def cmd_points(message: Message) -> None:
+    if not _ok(message):
+        return
+    from database.models import AsyncSessionLocal, EchoUser
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.reply("Usage: /echo_points <user_id> <delta>", parse_mode="")
+        return
+    try:
+        uid, delta = int(parts[1]), float(parts[2])
+    except ValueError:
+        await message.reply("Usage: /echo_points <user_id> <delta>", parse_mode="")
+        return
+    async with AsyncSessionLocal() as s:
+        u = await s.get(EchoUser, uid) or EchoUser(user_id=uid)
+        u.points = (u.points or 0) + delta
+        s.add(u)
+        await s.commit()
+        new_pts = u.points
+    await message.reply(f"✅ {uid} adjusted {delta:+.0f} → {new_pts:.0f} pts.", parse_mode="")

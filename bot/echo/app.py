@@ -1,7 +1,9 @@
 """
-app.py — the Echo Telegram bot: a separate Bot/Dispatcher (ECHO_BOT_TOKEN),
-the ingest handler that silently records every CA sighting across all groups,
-admin controls, and startup wiring. Zero trading code.
+app.py — the Echo Telegram bot: a separate Bot/Dispatcher (ECHO_BOT_TOKEN) that
+silently records every CA sighting across all groups and fires consensus alerts.
+Zero trading code, and NO admin command surface — all controls + intelligence
+live on the HQ bot (bot/echo/hq.py), so nothing is exposed inside the external
+groups Echo sits in.
 """
 
 import asyncio
@@ -10,7 +12,6 @@ from collections import deque
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.client.default import DefaultBotProperties
 
@@ -36,143 +37,7 @@ def _rate_ok(chat_id: int) -> bool:
     return True
 
 
-# ── Admin controls ──────────────────────────────────────────────────────────
-def _is_admin(message: Message) -> bool:
-    return bool(message.from_user and message.from_user.id in core.ECHO_ADMIN_IDS)
-
-
-@router.message(Command("echo_help"))
-async def cmd_help(message: Message) -> None:
-    if not _is_admin(message):
-        return
-    await message.reply(
-        "🛰️ *Echo admin*\n"
-        "/echo_stats — top groups + callers\n"
-        "/echo_threshold <n> — consensus threshold\n"
-        "/echo_groups — groups Echo is in\n"
-        "/echo_blacklist_group <chat_id> | /echo_unblacklist_group <chat_id>\n"
-        "/echo_blacklist_user <user_id> | /echo_unblacklist_user <user_id>\n"
-        "/echo_points <user_id> <delta> — manual point adjust",
-        parse_mode="Markdown",
-    )
-
-
-@router.message(Command("echo_stats"))
-async def cmd_stats(message: Message) -> None:
-    if not _is_admin(message):
-        return
-    from database.models import AsyncSessionLocal, select, EchoGroup, EchoUser
-    async with AsyncSessionLocal() as s:
-        groups = list((await s.execute(
-            select(EchoGroup).order_by(EchoGroup.points.desc()).limit(10)
-        )).scalars().all())
-        users = list((await s.execute(
-            select(EchoUser).order_by(EchoUser.points.desc()).limit(10)
-        )).scalars().all())
-    lines = ["🏆 *Top Groups*"]
-    for g in groups:
-        lines.append(f"  {(g.chat_title or g.chat_id)} — {g.points:.0f} pts ({g.wins}W/{g.losses}L)")
-    lines.append("\n🎯 *Top Callers*")
-    for u in users:
-        lines.append(f"  @{u.username or u.user_id} — {u.points:.0f} pts ({u.wins}W/{u.losses}L)")
-    await message.reply("\n".join(lines) or "No data yet.", parse_mode="Markdown")
-
-
-@router.message(Command("echo_threshold"))
-async def cmd_threshold(message: Message) -> None:
-    if not _is_admin(message):
-        return
-    from database.models import set_param
-    parts = (message.text or "").split()
-    if len(parts) < 2 or not parts[1].isdigit():
-        await message.reply("Usage: /echo_threshold <n>")
-        return
-    await set_param("echo_consensus_threshold", float(parts[1]), "Echo admin")
-    await message.reply(f"✅ Consensus threshold set to {parts[1]} groups.")
-
-
-@router.message(Command("echo_groups"))
-async def cmd_groups(message: Message) -> None:
-    if not _is_admin(message):
-        return
-    from database.models import AsyncSessionLocal, select, EchoGroup
-    async with AsyncSessionLocal() as s:
-        groups = list((await s.execute(
-            select(EchoGroup).order_by(EchoGroup.last_active_at.desc()).limit(30)
-        )).scalars().all())
-    lines = [f"📡 *Groups ({len(groups)})*"]
-    for g in groups:
-        bl = " 🚫" if g.blacklisted else ""
-        lines.append(f"  {(g.chat_title or g.chat_id)} — {g.calls} calls{bl}")
-    await message.reply("\n".join(lines) or "No groups yet.", parse_mode="Markdown")
-
-
-async def _set_blacklist(message: Message, *, is_group: bool, value: bool) -> None:
-    if not _is_admin(message):
-        return
-    from database.models import AsyncSessionLocal, EchoGroup, EchoUser
-    parts = (message.text or "").split()
-    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
-        await message.reply("Usage: <command> <id>")
-        return
-    target_id = int(parts[1])
-    async with AsyncSessionLocal() as s:
-        if is_group:
-            row = await s.get(EchoGroup, target_id) or EchoGroup(chat_id=target_id)
-        else:
-            row = await s.get(EchoUser, target_id) or EchoUser(user_id=target_id)
-        row.blacklisted = value
-        s.add(row)
-        await s.commit()
-    await message.reply(f"{'🚫 Blacklisted' if value else '✅ Un-blacklisted'} {target_id}.")
-
-
-@router.message(Command("echo_blacklist_group"))
-async def cmd_bl_group(message: Message) -> None:
-    await _set_blacklist(message, is_group=True, value=True)
-
-
-@router.message(Command("echo_unblacklist_group"))
-async def cmd_unbl_group(message: Message) -> None:
-    await _set_blacklist(message, is_group=True, value=False)
-
-
-@router.message(Command("echo_blacklist_user"))
-async def cmd_bl_user(message: Message) -> None:
-    await _set_blacklist(message, is_group=False, value=True)
-
-
-@router.message(Command("echo_unblacklist_user"))
-async def cmd_unbl_user(message: Message) -> None:
-    await _set_blacklist(message, is_group=False, value=False)
-
-
-@router.message(Command("echo_points"))
-async def cmd_points(message: Message) -> None:
-    if not _is_admin(message):
-        return
-    from database.models import AsyncSessionLocal, EchoUser
-    parts = (message.text or "").split()
-    if len(parts) < 3:
-        await message.reply("Usage: /echo_points <user_id> <delta>")
-        return
-    try:
-        uid, delta = int(parts[1]), float(parts[2])
-    except ValueError:
-        await message.reply("Usage: /echo_points <user_id> <delta>")
-        return
-    async with AsyncSessionLocal() as s:
-        u = await s.get(EchoUser, uid) or EchoUser(user_id=uid)
-        u.points = (u.points or 0) + delta
-        s.add(u)
-        await s.commit()
-        new_pts = u.points
-    await message.reply(f"✅ {uid} adjusted by {delta:+.0f} → {new_pts:.0f} pts.")
-
-
 # ── Ingest: the Trojan Horse data collection layer ──────────────────────────
-# Registered LAST so the /echo_* command handlers above match first; this
-# catch-all then handles every other group message.
 @router.message(F.chat.type.in_({"group", "supergroup"}))
 async def on_group_message(message: Message) -> None:
     text = message.text or message.caption or ""
