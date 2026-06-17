@@ -93,8 +93,16 @@ async def maybe_fire_signal(echo_bot, ca: str) -> None:
         s.add(EchoSignal(ca=ca, num_groups=callers, pct_chats=pct, quality=quality, entry_mc=mc))
         await s.commit()
 
-    text = style.sonar_report(label, mc, pct, quality)
-    await _broadcast(echo_bot, ca, window, text, reply_markup=style.kb_copy(ca))
+    # Personalized broadcast — each pod sees its OWN leaderboard rank (no
+    # cross-group leak); pod_strength = how many pods detected it.
+    kb = style.kb_copy(ca)
+    for chat_id in await core.calling_group_ids(ca, window):
+        try:
+            rank = await core.group_rank(chat_id)
+            text = style.sonar_report(label, mc, pct, quality, callers, rank=rank)
+            await echo_bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=kb)
+        except Exception as exc:
+            logger.debug("echo: alert to %s failed: %s", chat_id, exc)
     logger.info("echo: SIGNAL %s (%s) — %d/%d groups, %s", label, ca[:8], callers, total, quality)
 
 

@@ -55,15 +55,22 @@ def kb_pod_links() -> InlineKeyboardMarkup:
 
 
 # ── Message builders ────────────────────────────────────────────────────────
-def sonar_report(label: str, mc: float, pct: float, quality: str) -> str:
-    """The cross-group consensus Entry alert."""
-    return box("SONAR REPORT", [
+def sonar_report(label: str, mc: float, pct: float, quality: str,
+                 pod_strength: int, rank: tuple | None = None) -> str:
+    """The cross-group consensus Entry alert. `rank` is the receiving group's
+    own (position, total) on the pod leaderboard — personalized per group."""
+    lines = [
         f"Entry on {label}",
         f"Market Cap: {fmt_mc(mc)}",
         "",
         f"Signal Strength: {int(pct)}% of chats",
+        f"Pod Strength: {pod_strength} pods",
         f"Quality: {quality}",
-    ])
+    ]
+    if rank:
+        r, total = rank
+        lines += ["", f"Your Pod Rank: #{r} of {total}"]
+    return box("SONAR REPORT", lines)
 
 
 def sonar_pulse(label: str, x: int) -> str:

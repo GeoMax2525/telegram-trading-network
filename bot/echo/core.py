@@ -225,6 +225,20 @@ async def active_signals(limit: int = 12) -> list[tuple]:
     return out
 
 
+async def group_rank(chat_id: int) -> tuple[int, int]:
+    """(rank, total) of this group on the pod leaderboard by points. 1 = best."""
+    from database.models import AsyncSessionLocal, select, func, EchoGroup
+    async with AsyncSessionLocal() as s:
+        total = (await s.execute(select(func.count(EchoGroup.chat_id)))).scalar() or 0
+        g = await s.get(EchoGroup, chat_id)
+        if g is None:
+            return (total + 1, total + 1)
+        higher = (await s.execute(
+            select(func.count(EchoGroup.chat_id)).where(EchoGroup.points > (g.points or 0))
+        )).scalar() or 0
+    return (higher + 1, total)
+
+
 async def top_groups(n: int = 10) -> list:
     from database.models import AsyncSessionLocal, select, EchoGroup
     async with AsyncSessionLocal() as s:
