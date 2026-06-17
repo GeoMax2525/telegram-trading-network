@@ -241,6 +241,34 @@ async def top_users(n: int = 10) -> list:
         )).scalars().all())
 
 
+async def hub_stats() -> dict:
+    """Everything for the full hub dashboard: totals + top groups/callers/signals."""
+    from database.models import (
+        AsyncSessionLocal, select, func,
+        EchoGroup, EchoUser, EchoSighting, EchoSignal, EchoToken,
+    )
+    async with AsyncSessionLocal() as s:
+        n_groups = (await s.execute(select(func.count(EchoGroup.chat_id)))).scalar() or 0
+        n_users = (await s.execute(select(func.count(EchoUser.user_id)))).scalar() or 0
+        n_sightings = (await s.execute(select(func.count(EchoSighting.id)))).scalar() or 0
+        n_signals = (await s.execute(select(func.count(EchoSignal.id)))).scalar() or 0
+        n_wins = (await s.execute(
+            select(func.count(EchoToken.ca)).where(EchoToken.status == "win"))).scalar() or 0
+        n_losses = (await s.execute(
+            select(func.count(EchoToken.ca)).where(EchoToken.status == "loss"))).scalar() or 0
+        top_groups = list((await s.execute(
+            select(EchoGroup).order_by(EchoGroup.points.desc()).limit(5))).scalars().all())
+        top_users_ = list((await s.execute(
+            select(EchoUser).order_by(EchoUser.points.desc()).limit(5))).scalars().all())
+        recent = list((await s.execute(
+            select(EchoSignal).order_by(EchoSignal.id.desc()).limit(5))).scalars().all())
+    return {
+        "n_groups": n_groups, "n_users": n_users, "n_sightings": n_sightings,
+        "n_signals": n_signals, "n_wins": n_wins, "n_losses": n_losses,
+        "top_groups": top_groups, "top_users": top_users_, "recent": recent,
+    }
+
+
 # ── Points engine ───────────────────────────────────────────────────────────
 RUG_PENALTY = -200.0
 WIN_BASE = 100.0

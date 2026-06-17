@@ -26,8 +26,8 @@ def _op(user) -> bool:
 
 
 async def _dive_text() -> str:
-    n, _ = await core.pod_overview()
-    return style.dive_menu(n)
+    """The /dive screen IS the full hub — totals, top pods, echoers, sonar."""
+    return style.hub_dashboard(await core.hub_stats())
 
 
 @router.message(Command("start"))

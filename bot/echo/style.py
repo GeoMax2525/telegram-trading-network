@@ -107,6 +107,35 @@ def sonar_sweep(active: list) -> str:
     return box("SONAR SWEEP", lines)
 
 
+def hub_dashboard(st: dict) -> str:
+    """The full ECCO intelligence hub — same data as HQ /ecco, Ecco-styled."""
+    lines = [
+        "Edge Consensus Crypto Oracle",
+        "",
+        f"Groups: {st['n_groups']}  ·  Echoers: {st['n_users']}",
+        f"Sightings: {st['n_sightings']}  ·  Signals: {st['n_signals']}",
+        f"Resolved: {st['n_wins']}W / {st['n_losses']}L",
+        "",
+        "🏆 Top Pods",
+    ]
+    for g in st["top_groups"]:
+        lines.append(f"  {(g.chat_title or str(g.chat_id))[:20]} — {g.points:.0f} pts")
+    if not st["top_groups"]:
+        lines.append("  (waiting for the pod)")
+    lines += ["", "🎯 Top Echoers"]
+    for u in st["top_users"]:
+        nm = f"@{u.username}" if u.username else str(u.user_id)
+        lines.append(f"  {nm[:20]} — {u.points:.0f} pts")
+    if not st["top_users"]:
+        lines.append("  (no echoers yet)")
+    lines += ["", "📡 Recent Sonar"]
+    for sig in st["recent"]:
+        lines.append(f"  {sig.ca[:8]}… — {sig.num_groups} grp · {int(sig.pct_chats)}%")
+    if not st["recent"]:
+        lines.append("  (sonar quiet)")
+    return box("DIVE", lines)
+
+
 def dive_menu(n_signals: int) -> str:
     return box("DIVE", [
         "Edge Consensus Crypto Oracle",
