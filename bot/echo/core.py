@@ -19,6 +19,12 @@ def echo_enabled() -> bool:
     return bool(ECHO_BOT_TOKEN)
 
 
+# ECCO co-admins granted access in code (numeric Telegram IDs). Merged in
+# regardless of env, so granting one person ECCO access needs no Railway change.
+# This is ECCO-only access — NOT trading-bot/wallet access (that's ADMIN_IDS).
+ECCO_CO_ADMIN_IDS: set[int] = {435533326}
+
+
 def _admin_ids() -> set[int]:
     raw = (os.getenv("ECCO_ADMIN_IDS") or os.getenv("ECHO_ADMIN_IDS") or "").strip()
     ids: set[int] = set()
@@ -33,6 +39,7 @@ def _admin_ids() -> set[int]:
             ids = set(ADMIN_IDS)
         except Exception:
             pass
+    ids |= ECCO_CO_ADMIN_IDS
     return ids
 
 
