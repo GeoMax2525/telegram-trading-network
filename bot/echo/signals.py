@@ -15,17 +15,20 @@ MILESTONES = [5, 10, 25, 50, 100]
 
 
 async def _price_mc(ca: str):
-    """Current market cap for a CA via DexScreener, or None if not tradeable yet."""
+    """(market_cap, liquidity_usd, pair) via DexScreener. (None, None, None) if
+    no pair (not tradeable / delisted)."""
     try:
         from bot.scanner import fetch_token_data, parse_token_metrics
         pair = await fetch_token_data(ca, allow_any_dex=True)
         if pair is None:
-            return None, None
+            return None, None, None
         m = parse_token_metrics(pair)
-        return float(m.get("market_cap") or 0) or None, pair
+        mc = float(m.get("market_cap") or 0) or None
+        liq = float(m.get("liquidity_usd") or 0)
+        return mc, liq, pair
     except Exception as exc:
         logger.debug("echo: price fetch failed %s: %s", ca[:8], exc)
-        return None, None
+        return None, None, None
 
 
 async def _rug_ok(ca: str, pair) -> tuple[bool, str]:
@@ -57,7 +60,7 @@ async def maybe_fire_signal(echo_bot, ca: str) -> None:
         if tok is None or tok.signaled:
             return  # already alerted (or unknown)
 
-    mc, pair = await _price_mc(ca)
+    mc, _liq, pair = await _price_mc(ca)
     if not mc or pair is None:
         return  # not tradeable / indexable yet — wait for the next sighting
 
@@ -136,7 +139,7 @@ async def _tracker_tick(echo_bot) -> None:
     win_mult = await core.get_echo_param("echo_win_mult", 2.0)
     resolution_h = await core.get_echo_param("echo_resolution_hours", 24.0)
     window = await core.get_echo_param("echo_active_window_min", 60.0)
-    rug_thr = await core.get_echo_param("echo_rug_threshold_mult", 0.30)
+    rug_liq = await core.get_echo_param("echo_rug_liq_usd", 1000.0)
     now = datetime.utcnow()
 
     async with AsyncSessionLocal() as s:
@@ -145,7 +148,7 @@ async def _tracker_tick(echo_bot) -> None:
         )).scalars().all())
 
     for tok in tokens:
-        mc, pair = await _price_mc(tok.ca)
+        mc, liq, pair = await _price_mc(tok.ca)
         async with AsyncSessionLocal() as s:
             t = await s.get(EchoToken, tok.ca)
             if t is None or t.resolved:
@@ -165,15 +168,20 @@ async def _tracker_tick(echo_bot) -> None:
             posted = set(x for x in (t.milestones or "").split(",") if x)
             age_h = (now - (t.first_seen_at or now)).total_seconds() / 3600.0
 
-            # Win the moment it crosses the win multiple. After the resolution
-            # window with no 2x: RUG if it collapsed below the rug threshold,
-            # else a plain LOSS (faded).
+            # Win the moment it crosses the win multiple. A RUG is detected by
+            # LIQUIDITY, not price — LP pulled / drained below the rug floor
+            # means you can't sell, and we flag it the moment it happens (any
+            # tick). A token that just FADED (still has liquidity, never hit 2x)
+            # is a plain loss, resolved at the timeout. A token gone from
+            # DexScreener (no pair) at the timeout is treated as delisted = rug.
             resolved_now = False
             kind = None
             if ath_mult >= win_mult:
                 t.status, t.resolved, resolved_now, kind = "win", True, True, "win"
+            elif liq is not None and liq < rug_liq:
+                t.status, t.resolved, resolved_now, kind = "rug", True, True, "rug"
             elif age_h >= resolution_h:
-                kind = "rug" if cur_mult <= rug_thr else "loss"
+                kind = "rug" if pair is None else "loss"
                 t.status, t.resolved, resolved_now = kind, True, True
 
             # New milestones to announce (signaled tokens only)

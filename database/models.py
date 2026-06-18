@@ -3422,8 +3422,8 @@ AGENT_PARAM_DEFAULTS = {
     # Scoring (points). Win scales with the multiple; loss/rug are fixed.
     "echo_win_pts_per_x":        10.0,   # win points = ath_mult * this (2x->20, 10x->100)
     "echo_loss_pts":            -20.0,   # faded, never hit 2x
-    "echo_rug_pts":             -40.0,   # collapsed below the rug threshold
-    "echo_rug_threshold_mult":   0.30,   # current price <= this x entry = rug, not just loss
+    "echo_rug_pts":             -40.0,   # liquidity pulled / delisted
+    "echo_rug_liq_usd":         1000.0,  # liquidity below this = LP pulled = rug (not just a loss)
 
     # ── Live (real-money) execution safety rails (bot/live_guard.py) ──────────
     # The manual Key Buy / Full Clip buttons spend REAL SOL regardless of
