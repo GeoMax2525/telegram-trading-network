@@ -85,6 +85,18 @@ async def on_edited_group_message(message: Message) -> None:
     await _ingest(message)
 
 
+# Channel posts arrive as a different update type — catch those too (calls
+# posted in a channel where ECCO is admin would otherwise be missed).
+@router.channel_post()
+async def on_channel_post(message: Message) -> None:
+    await _ingest(message)
+
+
+@router.edited_channel_post()
+async def on_edited_channel_post(message: Message) -> None:
+    await _ingest(message)
+
+
 # ── Referral attribution: who added ECCO to each group ──────────────────────
 @router.my_chat_member()
 async def on_my_member(update: ChatMemberUpdated) -> None:
