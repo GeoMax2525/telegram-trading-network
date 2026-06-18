@@ -14,7 +14,7 @@ Registered before the ingest catch-all so commands match first.
 import logging
 
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.types import Message, CallbackQuery
 
 from bot.echo import core, style
@@ -45,17 +45,40 @@ async def cmd_pod(message: Message) -> None:
     )
 
 
-# ── PUBLIC but DM-only: /referral — anyone's own referral link + standing ───
+# ── PUBLIC, DM-only: /start (captures referrals) + /referral ────────────────
+@router.message(CommandStart())
+async def cmd_start(message: Message, command: CommandObject) -> None:
+    if message.chat.type != "private":
+        return
+    u = message.from_user
+    if u:
+        await core.upsert_referrer_username(u.id, u.username or u.full_name)
+    payload = (command.args or "").strip()
+    if payload.isdigit() and u:
+        await core.set_referred_by(u.id, int(payload))  # credited to the sharer
+    me = await message.bot.get_me()
+    ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
+    add_link = f"https://t.me/{me.username}?startgroup=true"
+    await message.answer(
+        style.welcome() + f"\n\n➕ Add ECCO to a group: {add_link}\n🔗 Your referral link: {ref_link}",
+        parse_mode="Markdown",
+    )
+
+
 @router.message(Command("referral"))
 async def cmd_referral(message: Message) -> None:
     if message.chat.type != "private":
         return  # keep groups clean — DM only (but open to anyone)
+    u = message.from_user
+    if u:
+        await core.upsert_referrer_username(u.id, u.username or u.full_name)
     me = await message.bot.get_me()
-    link = f"https://t.me/{me.username}?startgroup=true"
-    uid = message.from_user.id if message.from_user else 0
-    stats = await core.user_referral_stats(uid)
+    ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
+    add_link = f"https://t.me/{me.username}?startgroup=true"
+    stats = await core.user_referral_stats(u.id if u else 0)
     await message.answer(
-        style.referral_screen(stats) + f"\n\n🔗 Your link: {link}",
+        style.referral_screen(stats)
+        + f"\n\n🔗 Your referral link: {ref_link}\n➕ Add to a group: {add_link}",
         parse_mode="Markdown",
     )
 
@@ -68,7 +91,6 @@ async def _dive_text() -> str:
     )
 
 
-@router.message(Command("start"))
 @router.message(Command("dive"))
 async def cmd_dive(message: Message) -> None:
     if not _op_dm(message):

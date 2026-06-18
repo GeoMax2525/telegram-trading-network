@@ -189,65 +189,118 @@ async def calling_group_ids(ca: str, window_min: float) -> list[int]:
 
 
 # ── Referral / rewards attribution ──────────────────────────────────────────
-async def record_bot_membership(chat_id, referrer_id, username, title,
-                                *, is_admin: bool, active: bool) -> None:
-    """Record/refresh who added ECCO to a group + its admin/active state. Keeps
-    the ORIGINAL referrer (first adder) — promotions/removals don't reassign it."""
+async def set_referred_by(user_id, referrer_id) -> None:
+    """Record who referred a user (first referrer wins). Called when someone
+    opens ECCO via a t.me/<bot>?start=<referrerId> link."""
+    from database.models import AsyncSessionLocal, EchoReferredUser
+    if not user_id or not referrer_id or int(user_id) == int(referrer_id):
+        return
+    async with AsyncSessionLocal() as s:
+        if await s.get(EchoReferredUser, user_id) is None:
+            s.add(EchoReferredUser(user_id=user_id, referrer_id=int(referrer_id)))
+            await s.commit()
+
+
+async def get_referrer(user_id) -> int | None:
+    from database.models import AsyncSessionLocal, EchoReferredUser
+    async with AsyncSessionLocal() as s:
+        row = await s.get(EchoReferredUser, user_id)
+        return row.referrer_id if row else None
+
+
+async def upsert_referrer_username(user_id, username) -> None:
+    """Keep a username on file (in EchoUser) so the leaderboard can show @handles
+    even for referrers who never posted a CA themselves."""
+    from database.models import AsyncSessionLocal, EchoUser
+    if not user_id:
+        return
+    async with AsyncSessionLocal() as s:
+        u = await s.get(EchoUser, user_id)
+        if u is None:
+            s.add(EchoUser(user_id=user_id, username=username))
+        elif username:
+            u.username = username
+        await s.commit()
+
+
+async def record_bot_membership(chat_id, credit_id, credit_username, title,
+                                *, is_admin: bool, active: bool, member_count=None) -> None:
+    """Record/refresh a group's referral row. credit_id = who gets the credit
+    (the sharer who referred the adder, else the adder)."""
     from database.models import AsyncSessionLocal, EchoReferralGroup
     async with AsyncSessionLocal() as s:
         row = await s.get(EchoReferralGroup, chat_id)
         if row is None:
             s.add(EchoReferralGroup(
-                chat_id=chat_id, referrer_id=referrer_id, referrer_username=username,
+                chat_id=chat_id, referrer_id=credit_id, referrer_username=credit_username,
                 chat_title=title, is_admin=is_admin, active=active,
+                member_count=int(member_count or 0),
             ))
         else:
             row.is_admin = is_admin
             row.active = active
             if title:
                 row.chat_title = title
-            if not row.referrer_id and referrer_id:  # backfill if first add was missed
-                row.referrer_id, row.referrer_username = referrer_id, username
+            if member_count is not None:
+                row.member_count = int(member_count)
+            if not row.referrer_id and credit_id:  # backfill if first add was missed
+                row.referrer_id, row.referrer_username = credit_id, credit_username
         await s.commit()
 
 
-async def referral_leaderboard(n: int = 20) -> list[dict]:
-    """[{user_id, username, groups}] ranked by # of groups where the user added
-    ECCO and it's currently an active admin."""
-    from database.models import AsyncSessionLocal, select, func, EchoReferralGroup
+async def _qualified_referral_groups() -> list:
+    """Referral rows that COUNT toward rewards: active admin groups with enough
+    members AND enough distinct CA posters — the anti-fake-group gate."""
+    from database.models import AsyncSessionLocal, select, func, EchoReferralGroup, EchoSighting
+    min_members = await get_echo_param("echo_ref_min_members", 20.0)
+    min_posters = await get_echo_param("echo_ref_min_posters", 3.0)
+    out = []
     async with AsyncSessionLocal() as s:
-        rows = (await s.execute(
-            select(
-                EchoReferralGroup.referrer_id,
-                func.max(EchoReferralGroup.referrer_username),
-                func.count(EchoReferralGroup.chat_id),
-            )
-            .where(EchoReferralGroup.active.is_(True),
-                   EchoReferralGroup.is_admin.is_(True),
-                   EchoReferralGroup.referrer_id.isnot(None))
-            .group_by(EchoReferralGroup.referrer_id)
-            .order_by(func.count(EchoReferralGroup.chat_id).desc()).limit(n)
-        )).all()
-    return [{"user_id": r[0], "username": r[1], "groups": int(r[2])} for r in rows]
+        groups = (await s.execute(
+            select(EchoReferralGroup).where(
+                EchoReferralGroup.active.is_(True),
+                EchoReferralGroup.is_admin.is_(True),
+                EchoReferralGroup.referrer_id.isnot(None),
+                EchoReferralGroup.member_count >= min_members)
+        )).scalars().all()
+        for g in groups:
+            posters = (await s.execute(
+                select(func.count(func.distinct(EchoSighting.user_id))).where(
+                    EchoSighting.chat_id == g.chat_id, EchoSighting.user_id.isnot(None))
+            )).scalar() or 0
+            if posters >= min_posters:
+                out.append(g)
+    return out
+
+
+async def referral_leaderboard(n: int = 20) -> list[dict]:
+    """[{user_id, username, groups}] ranked by QUALIFIED-group count."""
+    from database.models import AsyncSessionLocal, EchoUser
+    tally: dict = {}
+    for g in await _qualified_referral_groups():
+        tally[g.referrer_id] = tally.get(g.referrer_id, 0) + 1
+    board = []
+    async with AsyncSessionLocal() as s:
+        for uid, cnt in tally.items():
+            u = await s.get(EchoUser, uid)
+            board.append({"user_id": uid, "username": (u.username if u else None), "groups": cnt})
+    board.sort(key=lambda e: e["groups"], reverse=True)
+    return board[:n]
 
 
 async def user_referral_stats(user_id: int) -> dict:
-    """A user's own referral numbers: admin groups, total groups, leaderboard rank."""
+    """A user's own numbers: qualified groups, total added, leaderboard rank."""
     from database.models import AsyncSessionLocal, select, func, EchoReferralGroup
+    board = await referral_leaderboard(10000)
+    qualified = next((e["groups"] for e in board if e["user_id"] == user_id), 0)
+    rank = next((i for i, e in enumerate(board, 1) if e["user_id"] == user_id), None)
     async with AsyncSessionLocal() as s:
-        admin_ct = (await s.execute(
-            select(func.count(EchoReferralGroup.chat_id)).where(
-                EchoReferralGroup.referrer_id == user_id,
-                EchoReferralGroup.active.is_(True), EchoReferralGroup.is_admin.is_(True))
-        )).scalar() or 0
-        total_ct = (await s.execute(
+        total = (await s.execute(
             select(func.count(EchoReferralGroup.chat_id)).where(
                 EchoReferralGroup.referrer_id == user_id,
                 EchoReferralGroup.active.is_(True))
         )).scalar() or 0
-    board = await referral_leaderboard(1000)
-    rank = next((i for i, e in enumerate(board, 1) if e["user_id"] == user_id), None)
-    return {"admin_groups": admin_ct, "total_groups": total_ct,
+    return {"qualified_groups": qualified, "total_groups": total,
             "rank": rank, "total_referrers": len(board)}
 
 

@@ -691,6 +691,19 @@ async def init_db() -> None:
                 except Exception:
                     pass  # column already exists
 
+        # Echo referral groups — member_count added after the table shipped.
+        if is_postgres:
+            await conn.execute(text(
+                "ALTER TABLE echo_referral_groups ADD COLUMN IF NOT EXISTS member_count INTEGER DEFAULT 0"
+            ))
+        else:
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE echo_referral_groups ADD COLUMN member_count INTEGER DEFAULT 0"
+                ))
+            except Exception:
+                pass
+
         for col_name, col_def in _NEW_CANDIDATE_COLS:
             if is_postgres:
                 await conn.execute(
@@ -2614,8 +2627,8 @@ class EchoUser(Base):
 
 class EchoReferralGroup(Base):
     """Attribution for who added ECCO to each group (referral / rewards). One
-    row per group: the first person who added the bot, whether it's still there
-    and whether it's admin. Telegram's my_chat_member event tells us who did it."""
+    row per group. referrer_id is who gets CREDIT — the sharer who referred the
+    adder if there is one, else the adder. member_count gates fake-group farming."""
     __tablename__ = "echo_referral_groups"
     chat_id           = Column(BigInteger, primary_key=True)
     referrer_id       = Column(BigInteger, nullable=True, index=True)
@@ -2623,7 +2636,17 @@ class EchoReferralGroup(Base):
     chat_title        = Column(String, nullable=True)
     is_admin          = Column(Boolean, default=False)  # bot is admin in this group
     active            = Column(Boolean, default=True)    # bot still in this group
+    member_count      = Column(Integer, default=0)       # real members (anti-farm gate)
     added_at          = Column(DateTime, default=datetime.utcnow)
+
+
+class EchoReferredUser(Base):
+    """Referral chain: who referred each user (set when they open ECCO via a
+    t.me/<bot>?start=<referrerId> link). First referrer wins."""
+    __tablename__ = "echo_referred_users"
+    user_id     = Column(BigInteger, primary_key=True)
+    referrer_id = Column(BigInteger, nullable=True, index=True)
+    created_at  = Column(DateTime, default=datetime.utcnow)
 
 
 class EchoSignal(Base):
@@ -3438,6 +3461,10 @@ AGENT_PARAM_DEFAULTS = {
     "echo_loss_pts":            -20.0,   # faded, never hit 2x
     "echo_rug_pts":             -40.0,   # liquidity pulled / delisted
     "echo_rug_liq_usd":         1000.0,  # liquidity below this = LP pulled = rug (not just a loss)
+    # Referral / rewards anti-farm: a group only counts toward referral credit
+    # if it has at least this many members AND has produced real activity.
+    "echo_ref_min_members":      20.0,   # min member count for a group to count
+    "echo_ref_min_posters":      3.0,    # min distinct users who posted CAs in it
 
     # ── Live (real-money) execution safety rails (bot/live_guard.py) ──────────
     # The manual Key Buy / Full Clip buttons spend REAL SOL regardless of

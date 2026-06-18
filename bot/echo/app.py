@@ -78,15 +78,29 @@ async def on_my_member(update: ChatMemberUpdated) -> None:
     is_admin = status == "administrator"
     active = status in ("member", "administrator", "creator", "restricted")
     actor = update.from_user
+    actor_id = actor.id if actor else None
+    actor_name = (actor.username or actor.full_name) if actor else None
+
+    # Credit the SHARER who referred the adder, else the adder themselves.
+    credit_id, credit_name = actor_id, actor_name
+    if actor_id:
+        ref = await core.get_referrer(actor_id)
+        if ref:
+            credit_id, credit_name = ref, None  # name resolved from EchoUser later
+
+    member_count = None
+    try:
+        member_count = await update.bot.get_chat_member_count(chat.id)
+    except Exception:
+        pass
+
     try:
         await core.record_bot_membership(
-            chat.id,
-            actor.id if actor else None,
-            (actor.username or actor.full_name) if actor else None,
-            chat.title, is_admin=is_admin, active=active,
+            chat.id, credit_id, credit_name, chat.title,
+            is_admin=is_admin, active=active, member_count=member_count,
         )
-        logger.info("ecco: membership %s in %s by %s (admin=%s)",
-                    status, chat.id, (actor.id if actor else "?"), is_admin)
+        logger.info("ecco: membership %s in %s by %s -> credit %s (admin=%s, members=%s)",
+                    status, chat.id, actor_id, credit_id, is_admin, member_count)
     except Exception as exc:
         logger.debug("ecco: membership record failed: %s", exc)
 

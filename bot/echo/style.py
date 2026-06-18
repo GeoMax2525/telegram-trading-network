@@ -214,16 +214,27 @@ def dive_menu(n_signals: int) -> str:
     ])
 
 
+def welcome() -> str:
+    return box("WELCOME", [
+        "Edge Consensus Crypto Oracle",
+        "",
+        "The pod hears every call across the depths.",
+        "Add ECCO to your groups to earn rewards —",
+        "and share your link so others do too.",
+    ])
+
+
 def referral_screen(stats: dict) -> str:
     lines = [
         "Spread the pod. Earn rewards.",
         "",
-        f"Groups added (admin): {stats['admin_groups']}",
-        f"Groups added (total): {stats['total_groups']}",
+        f"Qualified groups: {stats['qualified_groups']}",
+        f"Total groups added: {stats['total_groups']}",
     ]
     if stats["rank"]:
         lines.append(f"Referral Rank: #{stats['rank']} of {stats['total_referrers']}")
-    lines += ["", "Add ECCO as ADMIN to a group to earn credit."]
+    lines += ["", "A group counts only with real members + activity.",
+              "Credit goes to whoever referred the adder."]
     return box("REFERRAL", lines)
 
 
