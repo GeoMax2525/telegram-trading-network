@@ -248,9 +248,10 @@ def shill(ref_link: str, contact: str = "") -> str:
         "become for everyone.*\n\n"
         "🤝 Share ECCO and reach out to communities you're in — adding it as admin "
         "costs nothing and instantly benefits the chat.\n\n"
-        "💎 *Spread ECCO, earn rewards.*"
-        + (f"\n\n📩 *Questions:* {contact}" if contact else "")
-        + f"\n\n➕ *Add ECCO / get your referral link:* {ref_link}"
+        "💎 *Spread ECCO, earn rewards.*\n\n"
+        f"➕ *Add ECCO / get your referral link:* {ref_link}\n\n"
+        "ECCO is brought to you by the *$REVOLT ecosystem*."
+        + (f" DM {contact} for any inquiries or questions." if contact else "")
     )
 
 

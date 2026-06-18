@@ -19,9 +19,9 @@ def echo_enabled() -> bool:
     return bool(ECHO_BOT_TOKEN)
 
 
-# Operator contact shown in the welcome + shill (questions / ad space).
-# Set ECCO_CONTACT on Railway, e.g. "@YourHandle".
-ECCO_CONTACT = os.getenv("ECCO_CONTACT", "").strip()
+# Operator contact shown in the welcome + shill (questions). Override on
+# Railway with ECCO_CONTACT if the handle ever changes.
+ECCO_CONTACT = os.getenv("ECCO_CONTACT", "@miracleXwhip").strip()
 
 
 async def historical_ath_mult(ca: str, since_dt) -> float | None:
