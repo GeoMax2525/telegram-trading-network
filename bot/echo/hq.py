@@ -95,6 +95,44 @@ async def cmd_signals(message: Message) -> None:
     await message.reply("\n".join(lines) if sigs else "No signals fired yet.", parse_mode="")
 
 
+@router.message(Command("echo_check"))
+async def cmd_echo_check(message: Message) -> None:
+    """Did ECCO see a given CA? Shows sightings (which chats, when) + its score.
+    Usage: /echo_check <CA>"""
+    if not _ok(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply("Usage: /echo_check <CA>", parse_mode="")
+        return
+    ca = parts[1].strip()
+    from database.models import AsyncSessionLocal, select, EchoSighting, EchoToken
+    async with AsyncSessionLocal() as s:
+        rows = (await s.execute(
+            select(EchoSighting.chat_title, EchoSighting.seen_at)
+            .where(EchoSighting.ca == ca).order_by(EchoSighting.seen_at.asc())
+        )).all()
+        tok = await s.get(EchoToken, ca)
+    if not rows:
+        await message.reply(
+            f"❌ NOT SEEN — {ca[:14]}…\n"
+            "ECCO never received a message with this CA.\n"
+            "Most likely it was posted by a BOT (ECCO can't see other bots), "
+            "or ECCO isn't in/admin of that chat.",
+            parse_mode="")
+        return
+    groups: dict = {}
+    for title, seen in rows:
+        groups.setdefault(title or "?", seen)
+    lines = [f"✅ SEEN — {len(rows)} sightings · {len(groups)} group(s)", ""]
+    for g, seen in list(groups.items())[:10]:
+        lines.append(f"• {g[:24]} — {seen:%m-%d %H:%M}")
+    if tok:
+        state = ("resolved" if tok.resolved else "tracking")
+        lines += ["", f"Score: {tok.status} · {tok.ath_mult:.1f}x peak · {state}"]
+    await message.reply("\n".join(lines), parse_mode="")
+
+
 @router.message(Command("echo_reset_scores"))
 async def cmd_reset_scores(message: Message) -> None:
     """Wipe Echo win/loss/points (keeps groups, users, sightings, referrals).
