@@ -304,10 +304,17 @@ def referral_screen(stats: dict, board: list) -> str:
               f"Total added: {stats['total_groups']}"]
     if stats["rank"]:
         lines.append(f"Rank: #{stats['rank']} of {stats['total_referrers']}")
-    lines += ["", "A group counts with real members + activity.",
-              "Credit goes to whoever referred the adder.",
-              "", "💎 FUTURE rewards for TOP referrers.",
-              "Hold $REVOLT to be eligible for payout."]
+    lines += [
+        "", "💎 REWARDS — HOW IT WORKS",
+        "Share your link below. When someone opens",
+        "ECCO through it and adds it to a group as",
+        "admin, that group is credited to YOU.",
+        "Groups count once they have real members +",
+        "activity — no fake groups.",
+        "",
+        "Top referrers earn FUTURE $REVOLT rewards.",
+        "Hold $REVOLT to be eligible for payout.",
+    ]
     return box("REFERRAL LEADERBOARD", lines)
 
 
