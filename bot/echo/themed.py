@@ -72,7 +72,7 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
     ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
     add_link = f"https://t.me/{me.username}?startgroup=true"
     await message.answer(
-        style.welcome() + f"\n\n➕ Add ECCO to a group: {add_link}\n🔗 Your referral link: {ref_link}",
+        style.welcome(core.ECCO_CONTACT) + f"\n\n➕ Add ECCO to a group: {add_link}\n🔗 Your referral link: {ref_link}",
         parse_mode="Markdown",
     )
 
@@ -89,7 +89,7 @@ async def cmd_shill(message: Message) -> None:
     me = await message.bot.get_me()
     ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
     await message.answer("📡 Forward the message below to any group to recruit it — you get the credit:")
-    await message.answer(style.shill(ref_link), parse_mode="Markdown")
+    await message.answer(style.shill(ref_link, core.ECCO_CONTACT), parse_mode="Markdown")
 
 
 @router.message(Command("referral"))

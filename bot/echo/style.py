@@ -214,7 +214,7 @@ def dive_menu(n_signals: int) -> str:
     ])
 
 
-def shill(ref_link: str) -> str:
+def shill(ref_link: str, contact: str = "") -> str:
     """A forwardable recruit-a-group promo with the sharer's referral link baked
     in. Plain message (not a code block) so it reads as a clean post + the link
     stays tappable when pasted/forwarded into other groups."""
@@ -248,8 +248,9 @@ def shill(ref_link: str) -> str:
         "become for everyone.*\n\n"
         "🤝 Share ECCO and reach out to communities you're in — adding it as admin "
         "costs nothing and instantly benefits the chat.\n\n"
-        "💎 *Spread ECCO, earn rewards.*\n\n"
-        f"➕ *Add ECCO / get your referral link:* {ref_link}"
+        "💎 *Spread ECCO, earn rewards.*"
+        + (f"\n\n📩 *Questions:* {contact}" if contact else "")
+        + f"\n\n➕ *Add ECCO / get your referral link:* {ref_link}"
     )
 
 
@@ -276,14 +277,17 @@ def rank_screen(echoer: dict, referral: dict) -> str:
     return box("YOUR RANK", lines)
 
 
-def welcome() -> str:
-    return box("WELCOME", [
+def welcome(contact: str = "") -> str:
+    lines = [
         "Edge Consensus Crypto Oracle",
         "",
         "The pod hears every call across the depths.",
         "Add ECCO to your groups to earn rewards —",
         "and share your link so others do too.",
-    ])
+    ]
+    if contact:
+        lines += ["", f"📩 Questions: {contact}"]
+    return box("WELCOME", lines)
 
 
 def referral_screen(stats: dict, board: list) -> str:

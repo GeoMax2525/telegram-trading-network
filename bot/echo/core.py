@@ -19,6 +19,50 @@ def echo_enabled() -> bool:
     return bool(ECHO_BOT_TOKEN)
 
 
+# Operator contact shown in the welcome + shill (questions / ad space).
+# Set ECCO_CONTACT on Railway, e.g. "@YourHandle".
+ECCO_CONTACT = os.getenv("ECCO_CONTACT", "").strip()
+
+
+async def historical_ath_mult(ca: str, since_dt) -> float | None:
+    """TRUE peak multiple since the call, from GeckoTerminal OHLCV — so a brief
+    spike between spot checks is never missed. Returns peak_high / call_open,
+    or None if unavailable. Used at resolution to confirm a win before a loss."""
+    import aiohttp
+    base = "https://api.geckoterminal.com/api/v2/networks/solana"
+    headers = {"accept": "application/json"}
+    try:
+        since_ts = int(since_dt.timestamp())
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(f"{base}/tokens/{ca}/pools?page=1", headers=headers,
+                                timeout=aiohttp.ClientTimeout(total=12)) as r:
+                if r.status != 200:
+                    return None
+                pools = (await r.json()).get("data") or []
+            if not pools:
+                return None
+            pool = (pools[0].get("attributes") or {}).get("address")
+            if not pool:
+                return None
+            async with sess.get(f"{base}/pools/{pool}/ohlcv/hour?aggregate=1&limit=500",
+                                headers=headers, timeout=aiohttp.ClientTimeout(total=12)) as r:
+                if r.status != 200:
+                    return None
+                ohlcv = ((await r.json()).get("data") or {}).get("attributes", {}).get("ohlcv_list") or []
+        # ohlcv rows: [timestamp, open, high, low, close, volume]
+        rel = sorted([c for c in ohlcv if c and c[0] >= since_ts], key=lambda c: c[0])
+        if not rel:
+            return None
+        call_open = float(rel[0][1] or 0)
+        peak = max(float(c[2] or 0) for c in rel)
+        if call_open <= 0 or peak <= 0:
+            return None
+        return peak / call_open
+    except Exception as exc:
+        logger.debug("echo: historical_ath fetch failed %s: %s", ca[:8], exc)
+        return None
+
+
 # ECCO co-admins granted access in code (numeric Telegram IDs). Merged in
 # regardless of env, so granting one person ECCO access needs no Railway change.
 # This is ECCO-only access — NOT trading-bot/wallet access (that's ADMIN_IDS).

@@ -160,6 +160,24 @@ async def _tracker_tick(echo_bot) -> None:
 
     for tok in tokens:
         mc, liq, pair = await _price_mc(tok.ca)
+
+        # When a token is aging out (or a resolved loss) without a spot-confirmed
+        # 2x, pull its TRUE peak from price history so a spike missed between
+        # 60s spot checks still counts as a win. One history call per token, only
+        # when it matters — not every tick.
+        hist_ath = None
+        try:
+            tok_age_h = (now - (tok.first_seen_at or now)).total_seconds() / 3600.0
+        except Exception:
+            tok_age_h = 0.0
+        needs_hist = (
+            tok.first_mc is not None and (tok.ath_mult or 1.0) < win_mult
+            and tok.first_seen_at is not None
+            and ((not tok.resolved and tok_age_h >= resolution_h) or tok.status == "loss")
+        )
+        if needs_hist:
+            hist_ath = await core.historical_ath_mult(tok.ca, tok.first_seen_at)
+
         upgraded = False
         resolved_now = False
         kind = None
@@ -177,6 +195,8 @@ async def _tracker_tick(echo_bot) -> None:
                 if cur_mult > (t.ath_mult or 1.0):
                     t.ath_mult = cur_mult
                     t.ath_mc = mc
+            if hist_ath and hist_ath > (t.ath_mult or 1.0):
+                t.ath_mult = hist_ath  # true historical peak — never miss a top
             t.last_checked_at = now
             ath_mult = t.ath_mult or 1.0
             signaled = t.signaled
