@@ -65,6 +65,21 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
     )
 
 
+@router.message(Command("shill"))
+async def cmd_shill(message: Message) -> None:
+    """Hands the user a forwardable recruit-a-group promo with their referral
+    link baked in (so they get the credit)."""
+    if message.chat.type != "private":
+        return
+    u = message.from_user
+    if u:
+        await core.upsert_referrer_username(u.id, u.username or u.full_name)
+    me = await message.bot.get_me()
+    ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
+    await message.answer("📡 Forward the message below to any group to recruit it — you get the credit:")
+    await message.answer(style.shill(ref_link), parse_mode="Markdown")
+
+
 @router.message(Command("referral"))
 async def cmd_referral(message: Message) -> None:
     if message.chat.type != "private":

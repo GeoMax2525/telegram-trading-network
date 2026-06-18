@@ -214,6 +214,26 @@ def dive_menu(n_signals: int) -> str:
     ])
 
 
+def shill(ref_link: str) -> str:
+    """A forwardable recruit-a-group promo with the sharer's referral link baked
+    in. Plain message (not a code block) so it reads as a clean post + the link
+    stays tappable when pasted/forwarded into other groups."""
+    return (
+        "🐬 *ECCO* — Edge Consensus Crypto Oracle 🌊\n\n"
+        "The signal that listens across every pod.\n\n"
+        "ECCO silently tracks contract calls across alpha groups. When the same "
+        "coin lights up in *4+ groups*, it drops a clean *SONAR REPORT*:\n"
+        "🔵 Cross-group consensus % (how many chats are calling it)\n"
+        "🔵 A *Quality grade* from the private points engine\n"
+        "🔵 Live milestone pings — *5x, 10x, 25x from the call*\n"
+        "🔵 Rug-filtered before it ever posts. No spam — only confirmed conviction.\n\n"
+        "Your group also gets its own *Pod Ranking* and stats. It's *free* — just "
+        "add ECCO as admin.\n\n"
+        "💎 *Hold $REVOLT to be eligible for referral rewards.*\n\n"
+        f"➕ *Add ECCO to your group:* {ref_link}"
+    )
+
+
 def welcome() -> str:
     return box("WELCOME", [
         "Edge Consensus Crypto Oracle",
@@ -234,7 +254,8 @@ def referral_screen(stats: dict) -> str:
     if stats["rank"]:
         lines.append(f"Referral Rank: #{stats['rank']} of {stats['total_referrers']}")
     lines += ["", "A group counts only with real members + activity.",
-              "Credit goes to whoever referred the adder."]
+              "Credit goes to whoever referred the adder.",
+              "", "💎 Hold $REVOLT to be eligible for rewards."]
     return box("REFERRAL", lines)
 
 
