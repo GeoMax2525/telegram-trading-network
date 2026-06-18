@@ -140,6 +140,8 @@ async def _tracker_tick(echo_bot) -> None:
     resolution_h = await core.get_echo_param("echo_resolution_hours", 24.0)
     window = await core.get_echo_param("echo_active_window_min", 60.0)
     rug_liq = await core.get_echo_param("echo_rug_liq_usd", 200.0)
+    death_mult = await core.get_echo_param("echo_death_mult", 0.25)
+    death_min_age = await core.get_echo_param("echo_death_min_age_min", 30.0) / 60.0  # hours
     max_upg_days = await core.get_echo_param("echo_max_upgrade_days", 14.0)
     now = datetime.utcnow()
 
@@ -216,6 +218,14 @@ async def _tracker_tick(echo_bot) -> None:
                 # thin-but-alive memecoin is a loss, not a rug.
                 if ath_mult >= win_mult:
                     t.status, t.resolved, resolved_now, kind = "win", True, True, "win"
+                elif (t.first_mc is not None and cur_mult <= death_mult
+                      and age_h >= death_min_age):
+                    # Crashed — dumped to <= death_mult of the call = the call is
+                    # dead, resolve now (don't wait the full window). LP gone =
+                    # rug, otherwise a deep-dump loss. Still upgradeable to a win
+                    # if it somehow recovers past 2x within the upgrade window.
+                    k = "rug" if (pair is None or (liq is not None and liq < rug_liq)) else "loss"
+                    t.status, t.resolved, resolved_now, kind = k, True, True, k
                 elif age_h >= resolution_h:
                     if t.first_mc is None:
                         t.status, t.resolved, resolved_now, kind = "void", True, True, "void"

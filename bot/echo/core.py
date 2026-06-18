@@ -486,7 +486,7 @@ async def hub_stats() -> dict:
             select(func.count(EchoToken.ca)).where(EchoToken.status.in_(("loss", "rug"))))).scalar() or 0
 
         groups_raw = list((await s.execute(
-            select(EchoGroup).order_by(EchoGroup.points.desc()).limit(5))).scalars().all())
+            select(EchoGroup).order_by(EchoGroup.points.desc()).limit(10))).scalars().all())
         top_groups = []
         for g in groups_raw:
             top_groups.append({
@@ -496,7 +496,7 @@ async def hub_stats() -> dict:
             })
 
         users_raw = list((await s.execute(
-            select(EchoUser).order_by(EchoUser.points.desc()).limit(5))).scalars().all())
+            select(EchoUser).order_by(EchoUser.points.desc()).limit(10))).scalars().all())
         top_users = [{
             "name": (u.username or str(u.user_id)),
             "wins": u.wins or 0, "losses": u.losses or 0, "points": u.points or 0,

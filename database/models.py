@@ -3461,6 +3461,8 @@ AGENT_PARAM_DEFAULTS = {
     "echo_loss_pts":            -20.0,   # faded, never hit 2x
     "echo_rug_pts":             -40.0,   # liquidity pulled / delisted
     "echo_rug_liq_usd":         200.0,   # liquidity ~zero (drained) = rug; thin-but-alive = loss
+    "echo_death_mult":           0.25,   # dumped to <= this x the call = dead, resolve fast (down 75%+)
+    "echo_death_min_age_min":    30.0,   # min age before a crash counts (avoid launch-chop)
     "echo_rug_min_age_min":      15.0,   # (unused — kept for compat)
     "echo_max_upgrade_days":     14.0,   # keep watching losses this long — a loss can still become a win
     # Referral / rewards anti-farm: a group only counts toward referral credit
