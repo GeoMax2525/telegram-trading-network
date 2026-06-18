@@ -101,18 +101,20 @@ async def cmd_reset_scores(message: Message) -> None:
     Use after a scoring-logic fix so the leaderboard starts clean."""
     if not _ok(message):
         return
-    from database.models import AsyncSessionLocal, EchoGroup, EchoUser, EchoToken, select
+    from database.models import AsyncSessionLocal, EchoGroup, EchoUser, EchoToken, select, set_param
     async with AsyncSessionLocal() as s:
         for g in (await s.execute(select(EchoGroup))).scalars().all():
             g.points = 0.0; g.wins = 0; g.losses = 0; g.calls = 0
         for u in (await s.execute(select(EchoUser))).scalars().all():
             u.points = 0.0; u.wins = 0; u.losses = 0; u.calls = 0
-        # Re-track all tokens from scratch under the corrected logic.
+        # DELETE tokens (don't re-baseline — that caused instant-losses because
+        # old first_seen_at + fresh ath = immediately past the resolution window).
+        # New sightings will create fresh tokens that track from the call.
         for t in (await s.execute(select(EchoToken))).scalars().all():
-            t.status = "tracking"; t.resolved = False
-            t.ath_mult = 1.0; t.first_mc = None; t.ath_mc = None
+            await s.delete(t)
         await s.commit()
-    await message.reply("✅ Echo scores wiped. Tokens re-tracking from scratch under the new logic.", parse_mode="")
+    await set_param("echo_rug_liq_usd", 200.0, "Echo reset: lower rug floor")
+    await message.reply("✅ Echo scores wiped + tokens cleared. New calls track fresh from the call.", parse_mode="")
 
 
 @router.message(Command("echo_referrals"))

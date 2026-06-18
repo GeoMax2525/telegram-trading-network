@@ -3460,8 +3460,8 @@ AGENT_PARAM_DEFAULTS = {
     "echo_win_pts_per_x":        10.0,   # win points = ath_mult * this (2x->20, 10x->100)
     "echo_loss_pts":            -20.0,   # faded, never hit 2x
     "echo_rug_pts":             -40.0,   # liquidity pulled / delisted
-    "echo_rug_liq_usd":         1000.0,  # liquidity below this = LP pulled = rug (not just a loss)
-    "echo_rug_min_age_min":      15.0,   # don't call low-liquidity a rug until this old (anti false-rug)
+    "echo_rug_liq_usd":         200.0,   # liquidity ~zero (drained) = rug; thin-but-alive = loss
+    "echo_rug_min_age_min":      15.0,   # (unused — kept for compat)
     "echo_max_upgrade_days":     14.0,   # keep watching losses this long — a loss can still become a win
     # Referral / rewards anti-farm: a group only counts toward referral credit
     # if it has at least this many members AND has produced real activity.

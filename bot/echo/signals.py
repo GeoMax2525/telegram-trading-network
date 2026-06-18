@@ -139,8 +139,7 @@ async def _tracker_tick(echo_bot) -> None:
     win_mult = await core.get_echo_param("echo_win_mult", 2.0)
     resolution_h = await core.get_echo_param("echo_resolution_hours", 24.0)
     window = await core.get_echo_param("echo_active_window_min", 60.0)
-    rug_liq = await core.get_echo_param("echo_rug_liq_usd", 1000.0)
-    rug_min_age = await core.get_echo_param("echo_rug_min_age_min", 15.0) / 60.0  # hours
+    rug_liq = await core.get_echo_param("echo_rug_liq_usd", 200.0)
     max_upg_days = await core.get_echo_param("echo_max_upgrade_days", 14.0)
     now = datetime.utcnow()
 
@@ -190,16 +189,18 @@ async def _tracker_tick(echo_bot) -> None:
                 if t.status == "loss" and ath_mult >= win_mult:
                     t.status, upgraded = "win", True
             else:
-                # WIN the moment it tops 2x (forever, ATH-based). RUG = a real LP
-                # pull (low liquidity past min age). Junk that never priced =
-                # VOID (no points). Else a faded token = LOSS at the timeout.
+                # WIN the moment it tops 2x (forever, ATH-based). Otherwise wait
+                # the full window, THEN decide: never-priced junk = VOID (no
+                # points); delisted or liquidity drained to ~zero = RUG; a token
+                # that still trades but never hit 2x = LOSS. No eager rug — a
+                # thin-but-alive memecoin is a loss, not a rug.
                 if ath_mult >= win_mult:
                     t.status, t.resolved, resolved_now, kind = "win", True, True, "win"
-                elif liq is not None and liq < rug_liq and age_h >= rug_min_age:
-                    t.status, t.resolved, resolved_now, kind = "rug", True, True, "rug"
                 elif age_h >= resolution_h:
                     if t.first_mc is None:
                         t.status, t.resolved, resolved_now, kind = "void", True, True, "void"
+                    elif pair is None or (liq is not None and liq < rug_liq):
+                        t.status, t.resolved, resolved_now, kind = "rug", True, True, "rug"
                     else:
                         t.status, t.resolved, resolved_now, kind = "loss", True, True, "loss"
 
