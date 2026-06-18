@@ -516,6 +516,40 @@ async def _score_delta(kind: str, ath_mult: float) -> tuple[float, bool]:
     return float(cfg.get("echo_loss_pts") or -20.0), False
 
 
+async def upgrade_to_win(ca: str, ath_mult: float) -> None:
+    """Flip a recorded LOSS into a WIN (token topped 2x days later). Reverses the
+    loss penalty and applies the win for every group + caller that called it."""
+    from database.models import (
+        get_params, AsyncSessionLocal, select, EchoSighting, EchoGroup, EchoUser,
+    )
+    cfg = await get_params("echo_win_pts_per_x", "echo_loss_pts")
+    win_delta = round(float(ath_mult) * float(cfg.get("echo_win_pts_per_x") or 10.0), 1)
+    loss_pts = float(cfg.get("echo_loss_pts") or -20.0)
+    delta = win_delta - loss_pts  # remove the loss penalty, add the win
+    async with AsyncSessionLocal() as s:
+        sightings = (await s.execute(
+            select(EchoSighting).where(EchoSighting.ca == ca)
+        )).scalars().all()
+        seen_g: set[int] = set()
+        seen_u: set[int] = set()
+        for sg in sightings:
+            if sg.chat_id is not None and sg.chat_id not in seen_g:
+                seen_g.add(sg.chat_id)
+                g = await s.get(EchoGroup, sg.chat_id)
+                if g and not g.blacklisted:
+                    g.points = (g.points or 0) + delta
+                    g.wins = (g.wins or 0) + 1
+                    g.losses = max(0, (g.losses or 0) - 1)
+            if sg.user_id is not None and sg.user_id not in seen_u:
+                seen_u.add(sg.user_id)
+                u = await s.get(EchoUser, sg.user_id)
+                if u and not u.blacklisted:
+                    u.points = (u.points or 0) + delta
+                    u.wins = (u.wins or 0) + 1
+                    u.losses = max(0, (u.losses or 0) - 1)
+        await s.commit()
+
+
 async def award_resolution(ca: str, ath_mult: float, kind: str) -> None:
     """Credit/debit every group + caller that called this CA, once each.
     kind: win (scaled by multiple) | loss (faded) | rug (collapsed)."""

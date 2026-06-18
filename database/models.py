@@ -3462,6 +3462,7 @@ AGENT_PARAM_DEFAULTS = {
     "echo_rug_pts":             -40.0,   # liquidity pulled / delisted
     "echo_rug_liq_usd":         1000.0,  # liquidity below this = LP pulled = rug (not just a loss)
     "echo_rug_min_age_min":      15.0,   # don't call low-liquidity a rug until this old (anti false-rug)
+    "echo_max_upgrade_days":     14.0,   # keep watching losses this long — a loss can still become a win
     # Referral / rewards anti-farm: a group only counts toward referral credit
     # if it has at least this many members AND has produced real activity.
     "echo_ref_min_members":      20.0,   # min member count for a group to count

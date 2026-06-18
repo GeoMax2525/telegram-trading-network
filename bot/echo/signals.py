@@ -141,18 +141,33 @@ async def _tracker_tick(echo_bot) -> None:
     window = await core.get_echo_param("echo_active_window_min", 60.0)
     rug_liq = await core.get_echo_param("echo_rug_liq_usd", 1000.0)
     rug_min_age = await core.get_echo_param("echo_rug_min_age_min", 15.0) / 60.0  # hours
+    max_upg_days = await core.get_echo_param("echo_max_upgrade_days", 14.0)
     now = datetime.utcnow()
 
     async with AsyncSessionLocal() as s:
-        tokens = list((await s.execute(
+        pending = list((await s.execute(
             select(EchoToken).where(EchoToken.resolved.is_(False)).limit(40)
         )).scalars().all())
+        # Resolved LOSSES stay watched for a while — a loss can still become a
+        # WIN if the token tops 2x days later ("based off the top of the call").
+        upg_cutoff = now - timedelta(days=max_upg_days)
+        upgradable = list((await s.execute(
+            select(EchoToken).where(
+                EchoToken.status == "loss",
+                EchoToken.first_seen_at >= upg_cutoff,
+            ).limit(40)
+        )).scalars().all())
+    tokens = pending + upgradable
 
     for tok in tokens:
         mc, liq, pair = await _price_mc(tok.ca)
+        upgraded = False
+        resolved_now = False
+        kind = None
+        new_ms = []
         async with AsyncSessionLocal() as s:
             t = await s.get(EchoToken, tok.ca)
-            if t is None or t.resolved:
+            if t is None:
                 continue
             if t.first_mc is None and mc:
                 t.first_mc = mc
@@ -169,31 +184,26 @@ async def _tracker_tick(echo_bot) -> None:
             posted = set(x for x in (t.milestones or "").split(",") if x)
             age_h = (now - (t.first_seen_at or now)).total_seconds() / 3600.0
 
-            # Win the moment it crosses the win multiple. A RUG is detected by
-            # LIQUIDITY, not price — LP pulled / drained below the rug floor
-            # means you can't sell, and we flag it the moment it happens (any
-            # tick). A token that just FADED (still has liquidity, never hit 2x)
-            # is a plain loss, resolved at the timeout. A token gone from
-            # DexScreener (no pair) at the timeout is treated as delisted = rug.
-            resolved_now = False
-            kind = None
-            if ath_mult >= win_mult:
-                # Hit 2x from the call at ANY point = WIN, forever (ATH-based).
-                t.status, t.resolved, resolved_now, kind = "win", True, True, "win"
-            elif liq is not None and liq < rug_liq and age_h >= rug_min_age:
-                # Real LP pull: low liquidity AFTER it had time to establish —
-                # not a fresh/thin token still building or one about to run.
-                t.status, t.resolved, resolved_now, kind = "rug", True, True, "rug"
-            elif age_h >= resolution_h:
-                if t.first_mc is None:
-                    # Never got a real price (junk base58 / non-token) — VOID,
-                    # no points, so noise can't pollute the record.
-                    t.status, t.resolved, resolved_now, kind = "void", True, True, "void"
-                else:
-                    t.status, t.resolved, resolved_now, kind = "loss", True, True, "loss"
+            if t.resolved:
+                # Only resolved LOSSES are revisited — solely to UPGRADE to win
+                # if the token finally tops 2x. Wins/rugs stay locked.
+                if t.status == "loss" and ath_mult >= win_mult:
+                    t.status, upgraded = "win", True
+            else:
+                # WIN the moment it tops 2x (forever, ATH-based). RUG = a real LP
+                # pull (low liquidity past min age). Junk that never priced =
+                # VOID (no points). Else a faded token = LOSS at the timeout.
+                if ath_mult >= win_mult:
+                    t.status, t.resolved, resolved_now, kind = "win", True, True, "win"
+                elif liq is not None and liq < rug_liq and age_h >= rug_min_age:
+                    t.status, t.resolved, resolved_now, kind = "rug", True, True, "rug"
+                elif age_h >= resolution_h:
+                    if t.first_mc is None:
+                        t.status, t.resolved, resolved_now, kind = "void", True, True, "void"
+                    else:
+                        t.status, t.resolved, resolved_now, kind = "loss", True, True, "loss"
 
-            # New milestones to announce (signaled tokens only)
-            new_ms = []
+            # Milestone pings (signaled tokens only)
             if signaled:
                 for ms in MILESTONES:
                     if ath_mult >= ms and str(ms) not in posted:
@@ -203,10 +213,12 @@ async def _tracker_tick(echo_bot) -> None:
                     t.milestones = ",".join(sorted(posted, key=lambda x: int(x)))
             await s.commit()
 
+        if upgraded:
+            await core.upgrade_to_win(tok.ca, ath_mult)
+            logger.info("echo: UPGRADED %s loss->win at %.1fx", tok.ca[:8], ath_mult)
         if resolved_now and kind in ("win", "loss", "rug"):
             await core.award_resolution(tok.ca, ath_mult, kind)
             logger.info("echo: RESOLVED %s — %s at %.1fx", tok.ca[:8], kind.upper(), ath_mult)
-
         for ms in new_ms:
             await _broadcast(
                 echo_bot, tok.ca, window,
