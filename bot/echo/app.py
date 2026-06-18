@@ -121,6 +121,7 @@ async def _set_commands(echo_bot) -> None:
         await echo_bot.set_my_commands([
             BotCommand(command="dive", description="Dive in — main menu"),
             BotCommand(command="pod", description="See how the pod is performing"),
+            BotCommand(command="rank", description="See your own echoer + referral rank"),
             BotCommand(command="referral", description="Your add-to-group link + rewards standing"),
             BotCommand(command="shill", description="Get a recruit-a-group promo to forward"),
             BotCommand(command="echoers", description="View top echoers and their points"),

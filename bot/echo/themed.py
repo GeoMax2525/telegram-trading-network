@@ -39,10 +39,22 @@ async def cmd_pod(message: Message) -> None:
     own = None
     if message.chat.type in ("group", "supergroup"):
         own = await core.group_stats(message.chat.id)
+    total = await core.network_group_count()
     await message.answer(
-        style.pod_screen(await core.top_groups(10), own),
+        style.pod_screen(await core.top_groups(10), own, total),
         parse_mode="Markdown",
     )
+
+
+# ── PUBLIC, DM-only: /rank — your own standing ──────────────────────────────
+@router.message(Command("rank"))
+async def cmd_rank(message: Message) -> None:
+    if message.chat.type != "private":
+        return
+    uid = message.from_user.id if message.from_user else 0
+    echoer = await core.user_echoer_stats(uid)
+    referral = await core.user_referral_stats(uid)
+    await message.answer(style.rank_screen(echoer, referral), parse_mode="Markdown")
 
 
 # ── PUBLIC, DM-only: /start (captures referrals) + /referral ────────────────
@@ -146,7 +158,7 @@ async def on_nav(cb: CallbackQuery) -> None:
     action = (cb.data or "").split(":", 1)[-1]
     try:
         if action == "pod":
-            text, kb = style.pod_screen(await core.top_groups(10)), None
+            text, kb = style.pod_screen(await core.top_groups(10), total=await core.network_group_count()), None
         elif action == "echoers":
             text, kb = style.echoers(await core.top_users(10)), None
         elif action == "sonar":

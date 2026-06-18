@@ -355,6 +355,27 @@ async def group_rank(chat_id: int) -> tuple[int, int]:
     return (higher + 1, total)
 
 
+async def network_group_count() -> int:
+    from database.models import AsyncSessionLocal, select, func, EchoGroup
+    async with AsyncSessionLocal() as s:
+        return (await s.execute(select(func.count(EchoGroup.chat_id)))).scalar() or 0
+
+
+async def user_echoer_stats(user_id: int) -> dict:
+    """A user's own caller (echoer) standing: points, W/L, rank among echoers."""
+    from database.models import AsyncSessionLocal, select, func, EchoUser
+    async with AsyncSessionLocal() as s:
+        u = await s.get(EchoUser, user_id)
+        total = (await s.execute(select(func.count(EchoUser.user_id)))).scalar() or 0
+        if u is None:
+            return {"points": 0, "wins": 0, "losses": 0, "rank": None, "total": total}
+        higher = (await s.execute(
+            select(func.count(EchoUser.user_id)).where(EchoUser.points > (u.points or 0))
+        )).scalar() or 0
+        return {"points": u.points or 0, "wins": u.wins or 0, "losses": u.losses or 0,
+                "rank": higher + 1, "total": total}
+
+
 async def group_stats(chat_id: int) -> dict | None:
     """A single group's own stats block (for the /pod 'YOUR POD' section)."""
     from database.models import AsyncSessionLocal, EchoGroup

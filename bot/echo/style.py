@@ -88,10 +88,10 @@ def pod_status(n_signals: int, avg_x: float) -> str:
     ])
 
 
-def pod_screen(groups: list, own: dict | None = None) -> str:
-    """PUBLIC pod screen for groups: the leaderboard + (if run in a group) that
-    group's own stats. The ONLY cross-group data a chat is allowed to see."""
-    lines = []
+def pod_screen(groups: list, own: dict | None = None, total: int = 0) -> str:
+    """PUBLIC pod screen for groups: the network size + leaderboard + (if run in
+    a group) that group's own stats. The ONLY cross-group data a chat may see."""
+    lines = [f"🌊 ECCO Network: {total} groups", ""]
     if groups:
         for i, g in enumerate(groups, 1):
             lines.append(f"{i}. {(g.chat_title or str(g.chat_id))[:24]}")
@@ -220,23 +220,50 @@ def shill(ref_link: str) -> str:
     stays tappable when pasted/forwarded into other groups."""
     return (
         "🐬 *ECCO* — Edge Consensus Crypto Oracle 🌊\n\n"
-        "The signal that listens across every pod.\n\n"
-        "When the same coin lights up in *4+ groups*, ECCO drops a clean "
-        "*SONAR REPORT* — cross-group consensus %, a *Quality grade*, and live "
-        "*5x / 10x / 25x* milestone pings. Rug-filtered. No spam.\n\n"
-        "*Why add ECCO to your group:*\n"
-        "🔵 *Free, high-conviction alpha* — your members see when smart money "
-        "across many groups converges on the same coin. Far stronger than any "
-        "single caller.\n"
-        "🔵 *Near-zero spam* — only fires on 4+ group confirmation. Won't annoy "
-        "your members.\n"
-        "🔵 *Status + competition* — your group gets ranked on the *Pod "
-        "Leaderboard*, and your best callers climb.\n"
-        "🔵 *Rug protection* — every signal is on-chain rug-filtered first.\n"
-        "🔵 *Stickier group* — real value keeps members active.\n"
-        "🔵 *Costs nothing* — just add ECCO as admin.\n\n"
+        "A *free* multi-group signal bot that cuts through the noise. Instead of "
+        "posting every random call, ECCO only alerts when the *same CA is called "
+        "across multiple groups* — confirming real momentum before it posts.\n\n"
+        "*Every alert includes:*\n"
+        "📊 Current market cap\n"
+        "📈 % of monitored groups already on the call\n"
+        "⭐️ Quality rating (High / Medium) from the historical strength of the calling groups\n"
+        "📋 One-click CA copy\n"
+        "🚀 Follow-up runner updates as it gains momentum\n\n"
+        "*Why add ECCO:*\n"
+        "✅ Cleaner, more educated calls — not endless random shills\n"
+        "✅ Multi-group confirmation = higher-conviction plays\n"
+        "✅ No more jumping chat to chat to gauge sentiment — ECCO aggregates it live\n"
+        "✅ Less noise, more signal\n\n"
+        "ECCO is completely *FREE* and built to benefit every community it joins. "
+        "The larger the network grows, the *stronger and smarter the signals "
+        "become for everyone.*\n\n"
+        "🤝 Share ECCO and reach out to communities you're in — adding it as admin "
+        "costs nothing and instantly benefits the chat.\n\n"
         f"➕ *Add ECCO to your group:* {ref_link}"
     )
+
+
+def rank_screen(echoer: dict, referral: dict) -> str:
+    lines = ["🎯 ECHOER (your calls)"]
+    if echoer["rank"]:
+        lines += [
+            f"Rank: #{echoer['rank']} of {echoer['total']}",
+            f"Record: {echoer['wins']}W / {echoer['losses']}L ({_wr(echoer['wins'], echoer['losses'])})",
+            f"Points: {echoer['points']:+.0f}",
+        ]
+    else:
+        lines.append("No calls tracked yet.")
+    lines += ["", "🤝 REFERRALS (groups you brought)"]
+    if referral["rank"]:
+        lines += [
+            f"Rank: #{referral['rank']} of {referral['total_referrers']}",
+            f"Qualified groups: {referral['qualified_groups']}",
+            f"Total added: {referral['total_groups']}",
+        ]
+    else:
+        lines += ["Not ranked yet.",
+                  f"Groups added: {referral['total_groups']}"]
+    return box("YOUR RANK", lines)
 
 
 def welcome() -> str:
@@ -260,7 +287,7 @@ def referral_screen(stats: dict) -> str:
         lines.append(f"Referral Rank: #{stats['rank']} of {stats['total_referrers']}")
     lines += ["", "A group counts only with real members + activity.",
               "Credit goes to whoever referred the adder.",
-              "", "💎 Rewards are LIVE — for TOP referrers only.",
+              "", "💎 FUTURE rewards for TOP referrers.",
               "Hold $REVOLT to be eligible for payout."]
     return box("REFERRAL", lines)
 
