@@ -250,6 +250,34 @@ async def main() -> None:
     asyncio.create_task(start_echo())
     logger.info("Echo: queued for startup (gated by ECHO_BOT_TOKEN)")
 
+    # Register the "/" command menu so commands autocomplete in HQ + DM.
+    try:
+        from aiogram.types import BotCommand
+        await bot.set_my_commands([
+            BotCommand(command="hub", description="Control panel"),
+            BotCommand(command="status", description="Bot status snapshot"),
+            BotCommand(command="dashboard", description="Command center"),
+            BotCommand(command="params", description="All tunable params"),
+            BotCommand(command="setparam", description="Set a param"),
+            BotCommand(command="getparam", description="Read a param"),
+            BotCommand(command="audit", description="Pre-live GO/NO-GO audit"),
+            BotCommand(command="pnl", description="PnL for a contract"),
+            BotCommand(command="sl", description="Signal leaders"),
+            BotCommand(command="lb", description="Top calls"),
+            BotCommand(command="regime", description="Market regime"),
+            BotCommand(command="claude_report", description="Full Claude analyst report"),
+            BotCommand(command="weeklyreport", description="Weekly performance"),
+            BotCommand(command="ecco", description="ECCO intelligence dashboard"),
+            BotCommand(command="echo_stats", description="ECCO top groups + callers"),
+            BotCommand(command="echo_signals", description="ECCO recent signals"),
+            BotCommand(command="echo_referrals", description="ECCO referral leaderboard"),
+            BotCommand(command="echo_reset_scores", description="Wipe ECCO scores (clean slate)"),
+            BotCommand(command="echo_help", description="ECCO command help"),
+        ])
+        logger.info("Main bot: command menu registered")
+    except Exception as exc:
+        logger.warning("set_my_commands failed: %s", exc)
+
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
