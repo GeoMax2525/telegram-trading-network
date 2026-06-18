@@ -302,7 +302,7 @@ async def hub_stats() -> dict:
         n_wins = (await s.execute(
             select(func.count(EchoToken.ca)).where(EchoToken.status == "win"))).scalar() or 0
         n_losses = (await s.execute(
-            select(func.count(EchoToken.ca)).where(EchoToken.status == "loss"))).scalar() or 0
+            select(func.count(EchoToken.ca)).where(EchoToken.status.in_(("loss", "rug"))))).scalar() or 0
 
         groups_raw = list((await s.execute(
             select(EchoGroup).order_by(EchoGroup.points.desc()).limit(5))).scalars().all())
@@ -338,18 +338,10 @@ async def hub_stats() -> dict:
     }
 
 
-# ── Points engine ───────────────────────────────────────────────────────────
-RUG_PENALTY = -200.0
-WIN_BASE = 100.0
-EARLY_BONUS = 50.0
-
-
-def win_points(ath_mult: float, is_first_caller: bool) -> float:
-    """Positive points for a winning call, scaled by multiplier + early bonus."""
-    pts = WIN_BASE + min(float(ath_mult), 100.0) * 10.0
-    if is_first_caller:
-        pts += EARLY_BONUS
-    return round(pts, 1)
+# ── Points engine (all tunable via /setparam) ───────────────────────────────
+# win  = ath_mult * echo_win_pts_per_x   (2x -> +20, 5x -> +50, 10x -> +100)
+# loss = echo_loss_pts                    (faded, never hit 2x)        default -20
+# rug  = echo_rug_pts                     (collapsed < rug threshold)  default -40
 
 
 async def quality_grade(ca: str, window_min: float) -> str:
@@ -376,20 +368,28 @@ async def quality_grade(ca: str, window_min: float) -> str:
     return "Low Quality Signal"
 
 
-async def award_resolution(ca: str, ath_mult: float, win: bool) -> None:
-    """On win/loss, credit/debit every group + user that called this CA.
-    First caller (earliest sighting) gets the early bonus on a win."""
-    from database.models import (
-        AsyncSessionLocal, select, EchoSighting, EchoGroup, EchoUser,
-    )
+async def _score_delta(kind: str, ath_mult: float) -> tuple[float, bool]:
+    """(points delta, is_win) for an outcome. kind: win | loss | rug."""
+    from database.models import get_params
+    cfg = await get_params("echo_win_pts_per_x", "echo_loss_pts", "echo_rug_pts")
+    if kind == "win":
+        return round(float(ath_mult) * float(cfg.get("echo_win_pts_per_x") or 10.0), 1), True
+    if kind == "rug":
+        return float(cfg.get("echo_rug_pts") or -40.0), False
+    return float(cfg.get("echo_loss_pts") or -20.0), False
+
+
+async def award_resolution(ca: str, ath_mult: float, kind: str) -> None:
+    """Credit/debit every group + caller that called this CA, once each.
+    kind: win (scaled by multiple) | loss (faded) | rug (collapsed)."""
+    from database.models import AsyncSessionLocal, select, EchoSighting, EchoGroup, EchoUser
+    delta, is_win = await _score_delta(kind, ath_mult)
     async with AsyncSessionLocal() as s:
         sightings = (await s.execute(
-            select(EchoSighting).where(EchoSighting.ca == ca).order_by(EchoSighting.seen_at.asc())
+            select(EchoSighting).where(EchoSighting.ca == ca)
         )).scalars().all()
         if not sightings:
             return
-        first_chat = sightings[0].chat_id
-        first_user = sightings[0].user_id
         seen_groups: set[int] = set()
         seen_users: set[int] = set()
         for sg in sightings:
@@ -398,21 +398,15 @@ async def award_resolution(ca: str, ath_mult: float, win: bool) -> None:
                 grp = await s.get(EchoGroup, sg.chat_id)
                 if grp and not grp.blacklisted:
                     grp.calls = (grp.calls or 0) + 1
-                    if win:
-                        grp.wins = (grp.wins or 0) + 1
-                        grp.points = (grp.points or 0) + win_points(ath_mult, sg.chat_id == first_chat)
-                    else:
-                        grp.losses = (grp.losses or 0) + 1
-                        grp.points = (grp.points or 0) + RUG_PENALTY
+                    grp.wins = (grp.wins or 0) + (1 if is_win else 0)
+                    grp.losses = (grp.losses or 0) + (0 if is_win else 1)
+                    grp.points = (grp.points or 0) + delta
             if sg.user_id is not None and sg.user_id not in seen_users:
                 seen_users.add(sg.user_id)
                 usr = await s.get(EchoUser, sg.user_id)
                 if usr and not usr.blacklisted:
                     usr.calls = (usr.calls or 0) + 1
-                    if win:
-                        usr.wins = (usr.wins or 0) + 1
-                        usr.points = (usr.points or 0) + win_points(ath_mult, sg.user_id == first_user)
-                    else:
-                        usr.losses = (usr.losses or 0) + 1
-                        usr.points = (usr.points or 0) + RUG_PENALTY
+                    usr.wins = (usr.wins or 0) + (1 if is_win else 0)
+                    usr.losses = (usr.losses or 0) + (0 if is_win else 1)
+                    usr.points = (usr.points or 0) + delta
         await s.commit()

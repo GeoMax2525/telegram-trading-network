@@ -136,6 +136,7 @@ async def _tracker_tick(echo_bot) -> None:
     win_mult = await core.get_echo_param("echo_win_mult", 2.0)
     resolution_h = await core.get_echo_param("echo_resolution_hours", 24.0)
     window = await core.get_echo_param("echo_active_window_min", 60.0)
+    rug_thr = await core.get_echo_param("echo_rug_threshold_mult", 0.30)
     now = datetime.utcnow()
 
     async with AsyncSessionLocal() as s:
@@ -152,10 +153,11 @@ async def _tracker_tick(echo_bot) -> None:
             if t.first_mc is None and mc:
                 t.first_mc = mc
             base = t.first_mc or mc
+            cur_mult = 1.0
             if mc and base:
-                mult = mc / base
-                if mult > (t.ath_mult or 1.0):
-                    t.ath_mult = mult
+                cur_mult = mc / base
+                if cur_mult > (t.ath_mult or 1.0):
+                    t.ath_mult = cur_mult
                     t.ath_mc = mc
             t.last_checked_at = now
             ath_mult = t.ath_mult or 1.0
@@ -163,13 +165,16 @@ async def _tracker_tick(echo_bot) -> None:
             posted = set(x for x in (t.milestones or "").split(",") if x)
             age_h = (now - (t.first_seen_at or now)).total_seconds() / 3600.0
 
-            # Resolve win as soon as it crosses the win multiple; resolve loss
-            # only after the resolution window has elapsed with no 2x.
-            resolved_now = win = False
+            # Win the moment it crosses the win multiple. After the resolution
+            # window with no 2x: RUG if it collapsed below the rug threshold,
+            # else a plain LOSS (faded).
+            resolved_now = False
+            kind = None
             if ath_mult >= win_mult:
-                t.status, t.resolved, resolved_now, win = "win", True, True, True
+                t.status, t.resolved, resolved_now, kind = "win", True, True, "win"
             elif age_h >= resolution_h:
-                t.status, t.resolved, resolved_now, win = "loss", True, True, False
+                kind = "rug" if cur_mult <= rug_thr else "loss"
+                t.status, t.resolved, resolved_now = kind, True, True
 
             # New milestones to announce (signaled tokens only)
             new_ms = []
@@ -182,9 +187,9 @@ async def _tracker_tick(echo_bot) -> None:
                     t.milestones = ",".join(sorted(posted, key=lambda x: int(x)))
             await s.commit()
 
-        if resolved_now:
-            await core.award_resolution(tok.ca, ath_mult, win)
-            logger.info("echo: RESOLVED %s — %s at %.1fx", tok.ca[:8], "WIN" if win else "LOSS", ath_mult)
+        if resolved_now and kind:
+            await core.award_resolution(tok.ca, ath_mult, kind)
+            logger.info("echo: RESOLVED %s — %s at %.1fx", tok.ca[:8], kind.upper(), ath_mult)
 
         for ms in new_ms:
             await _broadcast(
