@@ -283,8 +283,17 @@ def welcome(contact: str = "") -> str:
         "Edge Consensus Crypto Oracle",
         "",
         "The pod hears every call across the depths.",
-        "Add ECCO to your groups to earn rewards —",
-        "and share your link so others do too.",
+        "",
+        "💎 REFERRAL REWARDS — HOW IT WORKS",
+        "1. Share your referral link (below).",
+        "2. When someone opens ECCO through it",
+        "   and adds it to a group as admin, that",
+        "   group is credited to YOU.",
+        "3. Groups count once they have real",
+        "   members + activity — no fake groups.",
+        "",
+        "Top referrers earn FUTURE $REVOLT rewards.",
+        "Hold $REVOLT to be eligible for payout.",
     ]
     if contact:
         lines += ["", f"📩 Questions: {contact}"]
@@ -304,17 +313,10 @@ def referral_screen(stats: dict, board: list) -> str:
               f"Total added: {stats['total_groups']}"]
     if stats["rank"]:
         lines.append(f"Rank: #{stats['rank']} of {stats['total_referrers']}")
-    lines += [
-        "", "💎 REWARDS — HOW IT WORKS",
-        "Share your link below. When someone opens",
-        "ECCO through it and adds it to a group as",
-        "admin, that group is credited to YOU.",
-        "Groups count once they have real members +",
-        "activity — no fake groups.",
-        "",
-        "Top referrers earn FUTURE $REVOLT rewards.",
-        "Hold $REVOLT to be eligible for payout.",
-    ]
+    lines += ["", "A group counts with real members + activity.",
+              "Credit goes to whoever referred the adder.",
+              "", "💎 FUTURE rewards for TOP referrers.",
+              "Hold $REVOLT to be eligible for payout."]
     return box("REFERRAL LEADERBOARD", lines)
 
 
