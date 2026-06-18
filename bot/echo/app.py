@@ -12,7 +12,7 @@ from collections import deque
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message
+from aiogram.types import Message, ChatMemberUpdated
 from aiogram.client.default import DefaultBotProperties
 
 from bot.echo import core
@@ -68,6 +68,29 @@ async def on_group_message(message: Message) -> None:
             logger.debug("echo: ingest error %s: %s", ca[:8], exc)
 
 
+# ── Referral attribution: who added ECCO to each group ──────────────────────
+@router.my_chat_member()
+async def on_my_member(update: ChatMemberUpdated) -> None:
+    chat = update.chat
+    if chat.type not in ("group", "supergroup"):
+        return
+    status = update.new_chat_member.status
+    is_admin = status == "administrator"
+    active = status in ("member", "administrator", "creator", "restricted")
+    actor = update.from_user
+    try:
+        await core.record_bot_membership(
+            chat.id,
+            actor.id if actor else None,
+            (actor.username or actor.full_name) if actor else None,
+            chat.title, is_admin=is_admin, active=active,
+        )
+        logger.info("ecco: membership %s in %s by %s (admin=%s)",
+                    status, chat.id, (actor.id if actor else "?"), is_admin)
+    except Exception as exc:
+        logger.debug("ecco: membership record failed: %s", exc)
+
+
 # ── Startup ─────────────────────────────────────────────────────────────────
 async def _set_commands(echo_bot) -> None:
     """Register Echo's themed command menu (the BotFather command list)."""
@@ -84,6 +107,7 @@ async def _set_commands(echo_bot) -> None:
         await echo_bot.set_my_commands([
             BotCommand(command="dive", description="Dive in — main menu"),
             BotCommand(command="pod", description="See how the pod is performing"),
+            BotCommand(command="referral", description="Your add-to-group link + rewards standing"),
             BotCommand(command="echoers", description="View top echoers and their points"),
             BotCommand(command="sonar", description="Run sonar — check current signals"),
             BotCommand(command="waves", description="See all commands and how to use them"),

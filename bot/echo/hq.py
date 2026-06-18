@@ -95,6 +95,20 @@ async def cmd_signals(message: Message) -> None:
     await message.reply("\n".join(lines) if sigs else "No signals fired yet.", parse_mode="")
 
 
+@router.message(Command("echo_referrals"))
+async def cmd_referrals(message: Message) -> None:
+    """Referral leaderboard — who put ECCO in the most groups as admin (rewards)."""
+    if not _ok(message):
+        return
+    from bot.echo import core
+    board = await core.referral_leaderboard(20)
+    lines = ["🤝 REFERRAL LEADERBOARD", "(groups where they added ECCO as admin)", ""]
+    for i, e in enumerate(board, 1):
+        who = f"@{e['username']}" if e["username"] and not str(e["username"]).isdigit() else str(e["user_id"])
+        lines.append(f"{i}. {who[:22]} — {e['groups']} groups  (id {e['user_id']})")
+    await message.reply("\n".join(lines) if board else "No referrals yet.", parse_mode="")
+
+
 @router.message(Command("echo_groups"))
 async def cmd_groups(message: Message) -> None:
     if not _ok(message):

@@ -214,6 +214,19 @@ def dive_menu(n_signals: int) -> str:
     ])
 
 
+def referral_screen(stats: dict) -> str:
+    lines = [
+        "Spread the pod. Earn rewards.",
+        "",
+        f"Groups added (admin): {stats['admin_groups']}",
+        f"Groups added (total): {stats['total_groups']}",
+    ]
+    if stats["rank"]:
+        lines.append(f"Referral Rank: #{stats['rank']} of {stats['total_referrers']}")
+    lines += ["", "Add ECCO as ADMIN to a group to earn credit."]
+    return box("REFERRAL", lines)
+
+
 def waves_help() -> str:
     return box("WAVES", [
         "Edge Consensus Crypto Oracle",

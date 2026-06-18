@@ -45,6 +45,21 @@ async def cmd_pod(message: Message) -> None:
     )
 
 
+# ── PUBLIC but DM-only: /referral — anyone's own referral link + standing ───
+@router.message(Command("referral"))
+async def cmd_referral(message: Message) -> None:
+    if message.chat.type != "private":
+        return  # keep groups clean — DM only (but open to anyone)
+    me = await message.bot.get_me()
+    link = f"https://t.me/{me.username}?startgroup=true"
+    uid = message.from_user.id if message.from_user else 0
+    stats = await core.user_referral_stats(uid)
+    await message.answer(
+        style.referral_screen(stats) + f"\n\n🔗 Your link: {link}",
+        parse_mode="Markdown",
+    )
+
+
 # ── OPERATOR + DM ONLY ──────────────────────────────────────────────────────
 async def _dive_text() -> str:
     return style.hub_dashboard(

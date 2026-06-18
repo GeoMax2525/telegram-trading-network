@@ -2612,6 +2612,20 @@ class EchoUser(Base):
     blacklisted = Column(Boolean, default=False)
 
 
+class EchoReferralGroup(Base):
+    """Attribution for who added ECCO to each group (referral / rewards). One
+    row per group: the first person who added the bot, whether it's still there
+    and whether it's admin. Telegram's my_chat_member event tells us who did it."""
+    __tablename__ = "echo_referral_groups"
+    chat_id           = Column(BigInteger, primary_key=True)
+    referrer_id       = Column(BigInteger, nullable=True, index=True)
+    referrer_username = Column(String, nullable=True)
+    chat_title        = Column(String, nullable=True)
+    is_admin          = Column(Boolean, default=False)  # bot is admin in this group
+    active            = Column(Boolean, default=True)    # bot still in this group
+    added_at          = Column(DateTime, default=datetime.utcnow)
+
+
 class EchoSignal(Base):
     __tablename__ = "echo_signals"
     id           = Column(Integer, primary_key=True)
