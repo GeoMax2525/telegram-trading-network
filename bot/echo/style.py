@@ -235,7 +235,6 @@ def shill(ref_link: str) -> str:
         "🔵 *Rug protection* — every signal is on-chain rug-filtered first.\n"
         "🔵 *Stickier group* — real value keeps members active.\n"
         "🔵 *Costs nothing* — just add ECCO as admin.\n\n"
-        "💎 *Hold $REVOLT to be eligible for referral rewards.*\n\n"
         f"➕ *Add ECCO to your group:* {ref_link}"
     )
 
@@ -261,7 +260,8 @@ def referral_screen(stats: dict) -> str:
         lines.append(f"Referral Rank: #{stats['rank']} of {stats['total_referrers']}")
     lines += ["", "A group counts only with real members + activity.",
               "Credit goes to whoever referred the adder.",
-              "", "💎 Hold $REVOLT to be eligible for rewards."]
+              "", "💎 Rewards are LIVE — for TOP referrers only.",
+              "Hold $REVOLT to be eligible for payout."]
     return box("REFERRAL", lines)
 
 
