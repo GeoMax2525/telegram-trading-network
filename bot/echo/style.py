@@ -248,7 +248,10 @@ def shill(ref_link: str) -> str:
         "become for everyone.*\n\n"
         "🤝 Share ECCO and reach out to communities you're in — adding it as admin "
         "costs nothing and instantly benefits the chat.\n\n"
-        f"➕ *Add ECCO to your group:* {ref_link}"
+        "💎 *Spread ECCO, earn rewards.* Top referrers earn *future $REVOLT "
+        "rewards* for the groups they bring in. Share your link, climb the "
+        "leaderboard, get paid.\n\n"
+        f"➕ *Add ECCO / get your referral link:* {ref_link}"
     )
 
 
