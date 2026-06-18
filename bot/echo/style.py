@@ -88,6 +88,30 @@ def pod_status(n_signals: int, avg_x: float) -> str:
     ])
 
 
+def pod_screen(groups: list, own: dict | None = None) -> str:
+    """PUBLIC pod screen for groups: the leaderboard + (if run in a group) that
+    group's own stats. The ONLY cross-group data a chat is allowed to see."""
+    lines = []
+    if groups:
+        for i, g in enumerate(groups, 1):
+            lines.append(f"{i}. {(g.chat_title or str(g.chat_id))[:24]}")
+            lines.append(f"   {g.wins}W / {g.losses}L ({_wr(g.wins, g.losses)})   {g.points:+.0f} pts")
+            lines.append("")
+    else:
+        lines = ["The waters are still.", ""]
+    if own:
+        lines += [
+            "🔵 YOUR POD",
+            own["title"][:24],
+            f"Rank: #{own['rank']} of {own['total']}",
+            f"Record: {own['wins']}W / {own['losses']}L ({_wr(own['wins'], own['losses'])})   {own['points']:+.0f} pts",
+        ]
+        if own["top_echoer"]:
+            nm, w = own["top_echoer"]
+            lines.append(f"Top Echoer: {_handle(nm)} ({w}W)")
+    return box("POD RANKINGS", lines)
+
+
 def pod_rankings(groups: list) -> str:
     lines = []
     for i, g in enumerate(groups, 1):

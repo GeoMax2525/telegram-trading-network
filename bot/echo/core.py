@@ -239,6 +239,21 @@ async def group_rank(chat_id: int) -> tuple[int, int]:
     return (higher + 1, total)
 
 
+async def group_stats(chat_id: int) -> dict | None:
+    """A single group's own stats block (for the /pod 'YOUR POD' section)."""
+    from database.models import AsyncSessionLocal, EchoGroup
+    async with AsyncSessionLocal() as s:
+        g = await s.get(EchoGroup, chat_id)
+        if g is None:
+            return None
+        te = await _top_echoer_for_group(s, chat_id)
+        title = g.chat_title or str(chat_id)
+        wins, losses, points = g.wins or 0, g.losses or 0, g.points or 0
+    rank, total = await group_rank(chat_id)
+    return {"title": title, "wins": wins, "losses": losses, "points": points,
+            "rank": rank, "total": total, "top_echoer": te}
+
+
 async def top_groups(n: int = 10) -> list:
     from database.models import AsyncSessionLocal, select, EchoGroup
     async with AsyncSessionLocal() as s:
