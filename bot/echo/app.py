@@ -142,11 +142,10 @@ async def _set_commands(echo_bot) -> None:
         BotCommandScopeDefault, BotCommandScopeChat,
     )
     try:
-        # Groups: only /pod (the one command that works in a group).
-        await echo_bot.set_my_commands(
-            [BotCommand(command="pod", description="See the Pod rankings")],
-            scope=BotCommandScopeAllGroupChats(),
-        )
+        # Groups: only /pod (rankings + that group's own stats — no cross-group data).
+        await echo_bot.set_my_commands([
+            BotCommand(command="pod", description="Pod rankings + your group's stats"),
+        ], scope=BotCommandScopeAllGroupChats())
         # Everyone else (non-allowed users): only the public commands that
         # actually work for them — so they never see a command that does nothing.
         public = [

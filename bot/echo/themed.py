@@ -128,6 +128,7 @@ async def cmd_dive(message: Message) -> None:
 
 @router.message(Command("echoers"))
 async def cmd_echoers(message: Message) -> None:
+    # HQ/operator only (global top callers = cross-group data, never public).
     if not _op_dm(message):
         return
     await message.answer(style.echoers(await core.top_users(10)), parse_mode="Markdown")
