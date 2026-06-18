@@ -103,8 +103,9 @@ async def cmd_referral(message: Message) -> None:
     ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
     add_link = f"https://t.me/{me.username}?startgroup=true"
     stats = await core.user_referral_stats(u.id if u else 0)
+    board = await core.referral_leaderboard(5)
     await message.answer(
-        style.referral_screen(stats)
+        style.referral_screen(stats, board)
         + f"\n\n🔗 Your referral link: {ref_link}\n➕ Add to a group: {add_link}",
         parse_mode="Markdown",
     )

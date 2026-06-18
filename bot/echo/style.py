@@ -248,9 +248,7 @@ def shill(ref_link: str) -> str:
         "become for everyone.*\n\n"
         "🤝 Share ECCO and reach out to communities you're in — adding it as admin "
         "costs nothing and instantly benefits the chat.\n\n"
-        "💎 *Spread ECCO, earn rewards.* Top referrers earn *future $REVOLT "
-        "rewards* for the groups they bring in. Share your link, climb the "
-        "leaderboard, get paid.\n\n"
+        "💎 *Spread ECCO, earn rewards.*\n\n"
         f"➕ *Add ECCO / get your referral link:* {ref_link}"
     )
 
@@ -288,20 +286,24 @@ def welcome() -> str:
     ])
 
 
-def referral_screen(stats: dict) -> str:
-    lines = [
-        "Spread the pod. Earn rewards.",
-        "",
-        f"Qualified groups: {stats['qualified_groups']}",
-        f"Total groups added: {stats['total_groups']}",
-    ]
+def referral_screen(stats: dict, board: list) -> str:
+    lines = ["🏆 TOP REFERRERS"]
+    if board:
+        for i, e in enumerate(board[:5], 1):
+            who = _handle(e["username"] or str(e["user_id"]))
+            lines.append(f"{i}. {who[:18]} — {e['groups']} groups")
+    else:
+        lines.append("(be the first)")
+    lines += ["", "🔵 YOUR STANDING",
+              f"Qualified groups: {stats['qualified_groups']}",
+              f"Total added: {stats['total_groups']}"]
     if stats["rank"]:
-        lines.append(f"Referral Rank: #{stats['rank']} of {stats['total_referrers']}")
-    lines += ["", "A group counts only with real members + activity.",
+        lines.append(f"Rank: #{stats['rank']} of {stats['total_referrers']}")
+    lines += ["", "A group counts with real members + activity.",
               "Credit goes to whoever referred the adder.",
               "", "💎 FUTURE rewards for TOP referrers.",
               "Hold $REVOLT to be eligible for payout."]
-    return box("REFERRAL", lines)
+    return box("REFERRAL LEADERBOARD", lines)
 
 
 def waves_help() -> str:

@@ -110,24 +110,40 @@ async def _set_commands(echo_bot) -> None:
     """Register Echo's themed command menu (the BotFather command list)."""
     from aiogram.types import (
         BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats,
+        BotCommandScopeDefault, BotCommandScopeChat,
     )
     try:
-        # Groups see ONLY /pod (the one public command). The full operator menu
-        # is scoped to private chats.
+        # Groups: only /pod (the one command that works in a group).
         await echo_bot.set_my_commands(
             [BotCommand(command="pod", description="See the Pod rankings")],
             scope=BotCommandScopeAllGroupChats(),
         )
-        await echo_bot.set_my_commands([
-            BotCommand(command="dive", description="Dive in — main menu"),
-            BotCommand(command="pod", description="See how the pod is performing"),
-            BotCommand(command="rank", description="See your own echoer + referral rank"),
-            BotCommand(command="referral", description="Your add-to-group link + rewards standing"),
-            BotCommand(command="shill", description="Get a recruit-a-group promo to forward"),
-            BotCommand(command="echoers", description="View top echoers and their points"),
-            BotCommand(command="sonar", description="Run sonar — check current signals"),
-            BotCommand(command="waves", description="See all commands and how to use them"),
-        ], scope=BotCommandScopeAllPrivateChats())
+        # Everyone else (non-allowed users): only the public commands that
+        # actually work for them — so they never see a command that does nothing.
+        public = [
+            BotCommand(command="pod", description="Pod rankings"),
+            BotCommand(command="referral", description="Referral leaderboard + your link"),
+            BotCommand(command="shill", description="Get a promo to recruit a group"),
+        ]
+        await echo_bot.set_my_commands(public, scope=BotCommandScopeAllPrivateChats())
+        await echo_bot.set_my_commands(public, scope=BotCommandScopeDefault())
+        # Allowed users (operator + co-admins): the FULL menu, scoped to their
+        # own DM with the bot.
+        full = [
+            BotCommand(command="dive", description="Intelligence dashboard"),
+            BotCommand(command="pod", description="Pod rankings"),
+            BotCommand(command="rank", description="Your echoer + referral rank"),
+            BotCommand(command="referral", description="Referral leaderboard + your link"),
+            BotCommand(command="shill", description="Recruit-a-group promo"),
+            BotCommand(command="echoers", description="Top echoers"),
+            BotCommand(command="sonar", description="Current signals"),
+            BotCommand(command="waves", description="Help"),
+        ]
+        for uid in core.ECHO_ADMIN_IDS:
+            try:
+                await echo_bot.set_my_commands(full, scope=BotCommandScopeChat(chat_id=uid))
+            except Exception:
+                pass
     except Exception as exc:
         logger.debug("echo: set_my_commands failed: %s", exc)
 
