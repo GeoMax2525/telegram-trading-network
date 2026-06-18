@@ -38,20 +38,26 @@ def _rate_ok(chat_id: int) -> bool:
 
 
 # ── Ingest: the Trojan Horse data collection layer ──────────────────────────
-@router.message(F.chat.type.in_({"group", "supergroup"}))
-async def on_group_message(message: Message) -> None:
-    text = message.text or message.caption or ""
-    cas = core.extract_cas(text)
+def _message_cas(message: Message) -> list[str]:
+    """All CAs in a message — visible text/caption AND hidden link URLs (a
+    'Chart' hyperlink pointing at dexscreener.com/solana/<CA> etc.)."""
+    parts = [message.text or "", message.caption or ""]
+    for ent in (message.entities or []) + (message.caption_entities or []):
+        if getattr(ent, "url", None):   # text_link entities carry the hidden URL
+            parts.append(ent.url)
+    return core.extract_cas(" ".join(parts))
+
+
+async def _ingest(message: Message) -> None:
+    cas = _message_cas(message)
     if not cas:
         return
-
     chat = message.chat
     user = message.from_user
     if await core.is_blacklisted(chat.id, user.id if user else None):
         return
     if not _rate_ok(chat.id):
         return
-
     link = core.message_link(chat.id, chat.username, message.message_id)
     for ca in cas:
         try:
@@ -66,6 +72,16 @@ async def on_group_message(message: Message) -> None:
                 await maybe_fire_signal(message.bot, ca)
         except Exception as exc:
             logger.debug("echo: ingest error %s: %s", ca[:8], exc)
+
+
+@router.message(F.chat.type.in_({"group", "supergroup"}))
+async def on_group_message(message: Message) -> None:
+    await _ingest(message)
+
+
+@router.edited_message(F.chat.type.in_({"group", "supergroup"}))
+async def on_edited_group_message(message: Message) -> None:
+    await _ingest(message)
 
 
 # ── Referral attribution: who added ECCO to each group ──────────────────────
