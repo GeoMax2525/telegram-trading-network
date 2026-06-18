@@ -420,6 +420,30 @@ async def user_echoer_stats(user_id: int) -> dict:
                 "rank": higher + 1, "total": total}
 
 
+async def group_avg_x(chat_id: int) -> float:
+    """Average peak multiple across the resolved tokens this group called."""
+    from database.models import AsyncSessionLocal, select, func, EchoSighting, EchoToken
+    async with AsyncSessionLocal() as s:
+        cas = select(EchoSighting.ca).where(EchoSighting.chat_id == chat_id)
+        avg = (await s.execute(
+            select(func.avg(EchoToken.ath_mult)).where(
+                EchoToken.ca.in_(cas), EchoToken.resolved.is_(True))
+        )).scalar()
+    return float(avg or 0.0)
+
+
+async def user_avg_x(user_id: int) -> float:
+    """Average peak multiple across the resolved tokens this caller called."""
+    from database.models import AsyncSessionLocal, select, func, EchoSighting, EchoToken
+    async with AsyncSessionLocal() as s:
+        cas = select(EchoSighting.ca).where(EchoSighting.user_id == user_id)
+        avg = (await s.execute(
+            select(func.avg(EchoToken.ath_mult)).where(
+                EchoToken.ca.in_(cas), EchoToken.resolved.is_(True))
+        )).scalar()
+    return float(avg or 0.0)
+
+
 async def group_stats(chat_id: int) -> dict | None:
     """A single group's own stats block (for the /pod 'YOUR POD' section)."""
     from database.models import AsyncSessionLocal, EchoGroup
@@ -492,15 +516,19 @@ async def hub_stats() -> dict:
             top_groups.append({
                 "title": g.chat_title or str(g.chat_id),
                 "wins": g.wins or 0, "losses": g.losses or 0, "points": g.points or 0,
+                "avg_x": await group_avg_x(g.chat_id),
                 "top_echoer": await _top_echoer_for_group(s, g.chat_id),
             })
 
         users_raw = list((await s.execute(
             select(EchoUser).order_by(EchoUser.points.desc()).limit(10))).scalars().all())
-        top_users = [{
-            "name": (u.username or str(u.user_id)),
-            "wins": u.wins or 0, "losses": u.losses or 0, "points": u.points or 0,
-        } for u in users_raw]
+        top_users = []
+        for u in users_raw:
+            top_users.append({
+                "name": (u.username or str(u.user_id)),
+                "wins": u.wins or 0, "losses": u.losses or 0, "points": u.points or 0,
+                "avg_x": await user_avg_x(u.user_id),
+            })
 
         sigs = list((await s.execute(
             select(EchoSignal).order_by(EchoSignal.id.desc()).limit(5))).scalars().all())

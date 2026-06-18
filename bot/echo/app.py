@@ -23,7 +23,8 @@ router = Router()
 
 # ── Anti-abuse: per-chat rate limit (messages with CAs processed per minute) ──
 _chat_hits: dict[int, deque] = {}
-_MAX_PER_MIN = 30
+_MAX_PER_MIN = 200  # generous — busy alpha chats post fast; never throttle real calls
+                    # (consensus needs 4+ distinct groups, so one chat can't fake a signal)
 
 
 def _rate_ok(chat_id: int) -> bool:
