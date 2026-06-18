@@ -95,6 +95,26 @@ async def cmd_signals(message: Message) -> None:
     await message.reply("\n".join(lines) if sigs else "No signals fired yet.", parse_mode="")
 
 
+@router.message(Command("echo_reset_scores"))
+async def cmd_reset_scores(message: Message) -> None:
+    """Wipe Echo win/loss/points (keeps groups, users, sightings, referrals).
+    Use after a scoring-logic fix so the leaderboard starts clean."""
+    if not _ok(message):
+        return
+    from database.models import AsyncSessionLocal, EchoGroup, EchoUser, EchoToken, select
+    async with AsyncSessionLocal() as s:
+        for g in (await s.execute(select(EchoGroup))).scalars().all():
+            g.points = 0.0; g.wins = 0; g.losses = 0; g.calls = 0
+        for u in (await s.execute(select(EchoUser))).scalars().all():
+            u.points = 0.0; u.wins = 0; u.losses = 0; u.calls = 0
+        # Re-track all tokens from scratch under the corrected logic.
+        for t in (await s.execute(select(EchoToken))).scalars().all():
+            t.status = "tracking"; t.resolved = False
+            t.ath_mult = 1.0; t.first_mc = None; t.ath_mc = None
+        await s.commit()
+    await message.reply("✅ Echo scores wiped. Tokens re-tracking from scratch under the new logic.", parse_mode="")
+
+
 @router.message(Command("echo_referrals"))
 async def cmd_referrals(message: Message) -> None:
     """Referral leaderboard — who put ECCO in the most groups as admin (rewards)."""

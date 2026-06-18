@@ -140,6 +140,7 @@ async def _tracker_tick(echo_bot) -> None:
     resolution_h = await core.get_echo_param("echo_resolution_hours", 24.0)
     window = await core.get_echo_param("echo_active_window_min", 60.0)
     rug_liq = await core.get_echo_param("echo_rug_liq_usd", 1000.0)
+    rug_min_age = await core.get_echo_param("echo_rug_min_age_min", 15.0) / 60.0  # hours
     now = datetime.utcnow()
 
     async with AsyncSessionLocal() as s:
@@ -177,12 +178,19 @@ async def _tracker_tick(echo_bot) -> None:
             resolved_now = False
             kind = None
             if ath_mult >= win_mult:
+                # Hit 2x from the call at ANY point = WIN, forever (ATH-based).
                 t.status, t.resolved, resolved_now, kind = "win", True, True, "win"
-            elif liq is not None and liq < rug_liq:
+            elif liq is not None and liq < rug_liq and age_h >= rug_min_age:
+                # Real LP pull: low liquidity AFTER it had time to establish —
+                # not a fresh/thin token still building or one about to run.
                 t.status, t.resolved, resolved_now, kind = "rug", True, True, "rug"
             elif age_h >= resolution_h:
-                kind = "rug" if pair is None else "loss"
-                t.status, t.resolved, resolved_now = kind, True, True
+                if t.first_mc is None:
+                    # Never got a real price (junk base58 / non-token) — VOID,
+                    # no points, so noise can't pollute the record.
+                    t.status, t.resolved, resolved_now, kind = "void", True, True, "void"
+                else:
+                    t.status, t.resolved, resolved_now, kind = "loss", True, True, "loss"
 
             # New milestones to announce (signaled tokens only)
             new_ms = []
@@ -195,7 +203,7 @@ async def _tracker_tick(echo_bot) -> None:
                     t.milestones = ",".join(sorted(posted, key=lambda x: int(x)))
             await s.commit()
 
-        if resolved_now and kind:
+        if resolved_now and kind in ("win", "loss", "rug"):
             await core.award_resolution(tok.ca, ath_mult, kind)
             logger.info("echo: RESOLVED %s — %s at %.1fx", tok.ca[:8], kind.upper(), ath_mult)
 
