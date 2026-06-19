@@ -75,8 +75,21 @@ async def _ingest(message: Message) -> None:
             logger.debug("echo: ingest error %s: %s", ca[:8], exc)
 
 
+_known_groups: set = set()
+
+
 @router.message(F.chat.type.in_({"group", "supergroup"}))
 async def on_group_message(message: Message) -> None:
+    # Register the group the first time we see ANY message from it — so a group
+    # ECCO is already in shows on the board without re-adding (a bot can't list
+    # its own chats, but it does receive their messages). Once per chat/session.
+    cid = message.chat.id
+    if cid not in _known_groups:
+        _known_groups.add(cid)
+        try:
+            await core.ensure_group(cid, message.chat.title)
+        except Exception:
+            pass
     await _ingest(message)
 
 
