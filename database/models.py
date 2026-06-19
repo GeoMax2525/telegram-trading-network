@@ -3461,14 +3461,14 @@ AGENT_PARAM_DEFAULTS = {
     "echo_loss_pts":            -20.0,   # faded, never hit 2x
     "echo_rug_pts":             -40.0,   # liquidity pulled / delisted
     "echo_rug_liq_usd":         200.0,   # liquidity ~zero (drained) = rug; thin-but-alive = loss
-    "echo_death_mult":           0.25,   # dumped to <= this x the call = dead, resolve fast (down 75%+)
-    "echo_death_min_age_min":    30.0,   # min age before a crash counts (avoid launch-chop)
+    "echo_death_mult":           0.40,   # dumped to <= this x the call = failed, resolve fast (down 60%+)
+    "echo_death_min_age_min":    20.0,   # min age before a crash counts (avoid launch-chop)
     "echo_rug_min_age_min":      15.0,   # (unused — kept for compat)
     "echo_max_upgrade_days":     14.0,   # keep watching losses this long — a loss can still become a win
     # Referral / rewards anti-farm: a group only counts toward referral credit
     # if it has at least this many members AND has produced real activity.
     "echo_ref_min_members":      20.0,   # min member count for a group to count
-    "echo_ref_min_posters":      3.0,    # min distinct users who posted CAs in it
+    "echo_ref_min_posters":      1.0,    # min distinct users who posted CAs in it
 
     # ── Live (real-money) execution safety rails (bot/live_guard.py) ──────────
     # The manual Key Buy / Full Clip buttons spend REAL SOL regardless of
@@ -3927,6 +3927,41 @@ async def init_agent_params() -> int:
             await session.commit()
         import logging as _logging
         _logging.getLogger(__name__).info("PP v2c: time_stop_minutes -> 5")
+        added += 1
+
+    # ── One-shot: Echo scoring v3 (faster fail-loss + easier qualify) ──
+    async with AsyncSessionLocal() as session:
+        e3 = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "echo_scoring_v3_done")
+        )).scalar_one_or_none()
+        e3_done = e3 is not None and e3.param_value >= 1.0
+    if not e3_done:
+        _e3 = {
+            "echo_death_mult": 0.40,        # down 60%+ = failed (was 0.25 / 75%)
+            "echo_death_min_age_min": 20.0,
+            "echo_ref_min_posters": 1.0,    # 1 real poster qualifies a group
+        }
+        async with AsyncSessionLocal() as session:
+            for _pn, _pv in _e3.items():
+                _r = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == _pn)
+                )).scalar_one_or_none()
+                if _r is None:
+                    session.add(AgentParam(param_name=_pn, param_value=float(_pv)))
+                else:
+                    _r.param_value = float(_pv)
+                    _r.updated_at = datetime.utcnow()
+            _f = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "echo_scoring_v3_done")
+            )).scalar_one_or_none()
+            if _f is None:
+                session.add(AgentParam(param_name="echo_scoring_v3_done", param_value=1.0))
+            else:
+                _f.param_value = 1.0
+                _f.updated_at = datetime.utcnow()
+            await session.commit()
+        import logging as _logging
+        _logging.getLogger(__name__).info("Echo scoring v3 applied: %s", _e3)
         added += 1
 
     # ── One-shot v4: force wipe all paper trades + reset balance ──────

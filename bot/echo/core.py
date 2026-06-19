@@ -318,34 +318,44 @@ async def _qualified_referral_groups() -> list:
 
 
 async def referral_leaderboard(n: int = 20) -> list[dict]:
-    """[{user_id, username, groups}] ranked by QUALIFIED-group count."""
-    from database.models import AsyncSessionLocal, EchoUser
+    """[{user_id, username, groups, qualified}] — EVERY referrer who brought an
+    active admin group shows up (so new referrers appear immediately). Ranked by
+    qualified then total. 'qualified' = groups meeting the reward bar (real
+    members + activity)."""
+    from database.models import AsyncSessionLocal, select, EchoReferralGroup, EchoUser
+    qualified_ids = {g.chat_id for g in await _qualified_referral_groups()}
+    async with AsyncSessionLocal() as s:
+        groups = (await s.execute(
+            select(EchoReferralGroup).where(
+                EchoReferralGroup.active.is_(True),
+                EchoReferralGroup.is_admin.is_(True),
+                EchoReferralGroup.referrer_id.isnot(None))
+        )).scalars().all()
     tally: dict = {}
-    for g in await _qualified_referral_groups():
-        tally[g.referrer_id] = tally.get(g.referrer_id, 0) + 1
+    for g in groups:
+        e = tally.setdefault(g.referrer_id, [0, 0])  # [total, qualified]
+        e[0] += 1
+        if g.chat_id in qualified_ids:
+            e[1] += 1
     board = []
     async with AsyncSessionLocal() as s:
-        for uid, cnt in tally.items():
+        for uid, (total, qual) in tally.items():
             u = await s.get(EchoUser, uid)
-            board.append({"user_id": uid, "username": (u.username if u else None), "groups": cnt})
-    board.sort(key=lambda e: e["groups"], reverse=True)
+            board.append({"user_id": uid, "username": (u.username if u else None),
+                          "groups": total, "qualified": qual})
+    board.sort(key=lambda e: (e["qualified"], e["groups"]), reverse=True)
     return board[:n]
 
 
 async def user_referral_stats(user_id: int) -> dict:
-    """A user's own numbers: qualified groups, total added, leaderboard rank."""
-    from database.models import AsyncSessionLocal, select, func, EchoReferralGroup
     board = await referral_leaderboard(10000)
-    qualified = next((e["groups"] for e in board if e["user_id"] == user_id), 0)
+    entry = next((e for e in board if e["user_id"] == user_id), None)
     rank = next((i for i, e in enumerate(board, 1) if e["user_id"] == user_id), None)
-    async with AsyncSessionLocal() as s:
-        total = (await s.execute(
-            select(func.count(EchoReferralGroup.chat_id)).where(
-                EchoReferralGroup.referrer_id == user_id,
-                EchoReferralGroup.active.is_(True))
-        )).scalar() or 0
-    return {"qualified_groups": qualified, "total_groups": total,
-            "rank": rank, "total_referrers": len(board)}
+    return {
+        "qualified_groups": (entry["qualified"] if entry else 0),
+        "total_groups": (entry["groups"] if entry else 0),
+        "rank": rank, "total_referrers": len(board),
+    }
 
 
 # ── Read helpers for the themed menus ───────────────────────────────────────
@@ -397,6 +407,21 @@ async def group_rank(chat_id: int) -> tuple[int, int]:
             select(func.count(EchoGroup.chat_id)).where(EchoGroup.points > (g.points or 0))
         )).scalar() or 0
     return (higher + 1, total)
+
+
+async def ensure_group(chat_id: int, title) -> None:
+    """Create/refresh an EchoGroup row so a group shows on the board the moment
+    ECCO is added — before any CA is posted there."""
+    from database.models import AsyncSessionLocal, EchoGroup
+    async with AsyncSessionLocal() as s:
+        g = await s.get(EchoGroup, chat_id)
+        if g is None:
+            s.add(EchoGroup(chat_id=chat_id, chat_title=title, last_active_at=datetime.utcnow()))
+        else:
+            g.last_active_at = datetime.utcnow()
+            if title:
+                g.chat_title = title
+        await s.commit()
 
 
 async def network_group_count() -> int:

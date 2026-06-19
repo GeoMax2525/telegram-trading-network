@@ -308,7 +308,7 @@ def referral_screen(stats: dict, board: list) -> str:
     if board:
         for i, e in enumerate(board[:5], 1):
             who = _handle(e["username"] or str(e["user_id"]))
-            lines.append(f"{i}. {who[:18]} — {e['groups']} groups")
+            lines.append(f"{i}. {who[:18]} — {e['groups']} grp ({e.get('qualified', 0)} qual)")
     else:
         lines.append("(be the first)")
     lines += ["", "🔵 YOUR STANDING",

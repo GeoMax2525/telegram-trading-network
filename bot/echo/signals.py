@@ -140,8 +140,8 @@ async def _tracker_tick(echo_bot) -> None:
     resolution_h = await core.get_echo_param("echo_resolution_hours", 24.0)
     window = await core.get_echo_param("echo_active_window_min", 60.0)
     rug_liq = await core.get_echo_param("echo_rug_liq_usd", 200.0)
-    death_mult = await core.get_echo_param("echo_death_mult", 0.25)
-    death_min_age = await core.get_echo_param("echo_death_min_age_min", 30.0) / 60.0  # hours
+    death_mult = await core.get_echo_param("echo_death_mult", 0.40)
+    death_min_age = await core.get_echo_param("echo_death_min_age_min", 20.0) / 60.0  # hours
     max_upg_days = await core.get_echo_param("echo_max_upgrade_days", 14.0)
     now = datetime.utcnow()
 

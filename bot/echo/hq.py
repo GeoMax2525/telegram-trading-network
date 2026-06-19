@@ -165,7 +165,7 @@ async def cmd_referrals(message: Message) -> None:
     lines = ["🤝 REFERRAL LEADERBOARD", "(groups where they added ECCO as admin)", ""]
     for i, e in enumerate(board, 1):
         who = f"@{e['username']}" if e["username"] and not str(e["username"]).isdigit() else str(e["user_id"])
-        lines.append(f"{i}. {who[:22]} — {e['groups']} groups  (id {e['user_id']})")
+        lines.append(f"{i}. {who[:22]} — {e['groups']} grp ({e.get('qualified', 0)} qual)  (id {e['user_id']})")
     await message.reply("\n".join(lines) if board else "No referrals yet.", parse_mode="")
 
 

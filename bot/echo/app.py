@@ -128,6 +128,10 @@ async def on_my_member(update: ChatMemberUpdated) -> None:
             chat.id, credit_id, credit_name, chat.title,
             is_admin=is_admin, active=active, member_count=member_count,
         )
+        # Also register the group itself so it shows on the board immediately —
+        # before any CA is even posted there.
+        if active:
+            await core.ensure_group(chat.id, chat.title)
         logger.info("ecco: membership %s in %s by %s -> credit %s (admin=%s, members=%s)",
                     status, chat.id, actor_id, credit_id, is_admin, member_count)
     except Exception as exc:
@@ -193,6 +197,9 @@ async def start_echo() -> None:
     try:
         await echo_bot.delete_webhook(drop_pending_updates=True)
         await _set_commands(echo_bot)
-        await dp.start_polling(echo_bot)
+        await dp.start_polling(echo_bot, allowed_updates=[
+            "message", "edited_message", "channel_post", "edited_channel_post",
+            "my_chat_member", "callback_query",
+        ])
     finally:
         await echo_bot.session.close()
