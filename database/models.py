@@ -3457,9 +3457,9 @@ AGENT_PARAM_DEFAULTS = {
     "echo_rug_filter_enabled":   1.0,    # run on-chain rug checks before any alert
     "echo_win_mult":             2.0,    # multiple that counts as a win (else loss/rug)
     # Scoring (points). Win scales with the multiple; loss/rug are fixed.
-    "echo_win_pts_per_x":        10.0,   # win points = ath_mult * this (2x->20, 10x->100)
-    "echo_loss_pts":            -20.0,   # faded, never hit 2x
-    "echo_rug_pts":             -40.0,   # liquidity pulled / delisted
+    "echo_win_pts_per_x":        10.0,   # win = (peak-1) * this (2x->+10, 5x->+40, 10x->+90)
+    "echo_loss_pts":             -5.0,   # faded, never hit 2x (small — wins dominate)
+    "echo_rug_pts":             -15.0,   # liquidity pulled / delisted (trust penalty)
     "echo_rug_liq_usd":         200.0,   # liquidity ~zero (drained) = rug; thin-but-alive = loss
     "echo_death_mult":           0.40,   # dumped to <= this x the call = failed, resolve fast (down 60%+)
     "echo_death_min_age_min":    20.0,   # min age before a crash counts (avoid launch-chop)
@@ -3962,6 +3962,37 @@ async def init_agent_params() -> int:
             await session.commit()
         import logging as _logging
         _logging.getLogger(__name__).info("Echo scoring v3 applied: %s", _e3)
+        added += 1
+
+    # ── One-shot: Echo points v4 (profit-scaled wins, small penalties) ──
+    async with AsyncSessionLocal() as session:
+        e4 = (await session.execute(
+            select(AgentParam).where(AgentParam.param_name == "echo_points_v4_done")
+        )).scalar_one_or_none()
+        e4_done = e4 is not None and e4.param_value >= 1.0
+    if not e4_done:
+        _e4 = {"echo_loss_pts": -5.0, "echo_rug_pts": -15.0}
+        async with AsyncSessionLocal() as session:
+            for _pn, _pv in _e4.items():
+                _r = (await session.execute(
+                    select(AgentParam).where(AgentParam.param_name == _pn)
+                )).scalar_one_or_none()
+                if _r is None:
+                    session.add(AgentParam(param_name=_pn, param_value=float(_pv)))
+                else:
+                    _r.param_value = float(_pv)
+                    _r.updated_at = datetime.utcnow()
+            _f = (await session.execute(
+                select(AgentParam).where(AgentParam.param_name == "echo_points_v4_done")
+            )).scalar_one_or_none()
+            if _f is None:
+                session.add(AgentParam(param_name="echo_points_v4_done", param_value=1.0))
+            else:
+                _f.param_value = 1.0
+                _f.updated_at = datetime.utcnow()
+            await session.commit()
+        import logging as _logging
+        _logging.getLogger(__name__).info("Echo points v4 applied: %s", _e4)
         added += 1
 
     # ── One-shot v4: force wipe all paper trades + reset balance ──────

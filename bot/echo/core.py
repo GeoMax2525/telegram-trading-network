@@ -603,14 +603,16 @@ async def quality_grade(ca: str, window_min: float) -> str:
 
 
 async def _score_delta(kind: str, ath_mult: float) -> tuple[float, bool]:
-    """(points delta, is_win) for an outcome. kind: win | loss | rug."""
+    """(points delta, is_win). Win scales with PROFIT (peak-1) so big runners
+    dominate; fade/rug are small fixed penalties so good callers stay positive.
+    win = (peak-1)*10 (2x=+10, 5x=+40, 10x=+90); fade=-5; rug=-15."""
     from database.models import get_params
     cfg = await get_params("echo_win_pts_per_x", "echo_loss_pts", "echo_rug_pts")
     if kind == "win":
-        return round(float(ath_mult) * float(cfg.get("echo_win_pts_per_x") or 10.0), 1), True
+        return round((float(ath_mult) - 1.0) * float(cfg.get("echo_win_pts_per_x") or 10.0), 1), True
     if kind == "rug":
-        return float(cfg.get("echo_rug_pts") or -40.0), False
-    return float(cfg.get("echo_loss_pts") or -20.0), False
+        return float(cfg.get("echo_rug_pts") or -15.0), False
+    return float(cfg.get("echo_loss_pts") or -5.0), False
 
 
 async def upgrade_to_win(ca: str, ath_mult: float) -> None:
@@ -620,8 +622,8 @@ async def upgrade_to_win(ca: str, ath_mult: float) -> None:
         get_params, AsyncSessionLocal, select, EchoSighting, EchoGroup, EchoUser,
     )
     cfg = await get_params("echo_win_pts_per_x", "echo_loss_pts")
-    win_delta = round(float(ath_mult) * float(cfg.get("echo_win_pts_per_x") or 10.0), 1)
-    loss_pts = float(cfg.get("echo_loss_pts") or -20.0)
+    win_delta = round((float(ath_mult) - 1.0) * float(cfg.get("echo_win_pts_per_x") or 10.0), 1)
+    loss_pts = float(cfg.get("echo_loss_pts") or -5.0)
     delta = win_delta - loss_pts  # remove the loss penalty, add the win
     async with AsyncSessionLocal() as s:
         sightings = (await s.execute(

@@ -133,6 +133,52 @@ async def cmd_echo_check(message: Message) -> None:
     await message.reply("\n".join(lines), parse_mode="")
 
 
+@router.message(Command("echo_set_referrer"))
+async def cmd_set_referrer(message: Message) -> None:
+    """Manually credit a group's referral to a user (for groups added before
+    attribution worked). Usage: /echo_set_referrer <group_chat_id> <@user|id>"""
+    if not _ok(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.reply("Usage: /echo_set_referrer <group_chat_id> <@username|user_id>\n"
+                            "(find chat ids with /echo_groups)", parse_mode="")
+        return
+    try:
+        chat_id = int(parts[1])
+    except ValueError:
+        await message.reply("chat_id must be a number — see /echo_groups.", parse_mode="")
+        return
+    target = parts[2].lstrip("@")
+    from database.models import AsyncSessionLocal, select, EchoUser, EchoReferralGroup, EchoGroup
+    async with AsyncSessionLocal() as s:
+        if target.isdigit():
+            uid = int(target)
+            u = await s.get(EchoUser, uid)
+            uname = u.username if u else target
+        else:
+            u = (await s.execute(select(EchoUser).where(EchoUser.username == target))).scalars().first()
+            if u is None:
+                await message.reply(
+                    f"@{target} hasn't interacted with ECCO yet, so I don't have their "
+                    f"user ID. Get it (forward one of their msgs to @userinfobot) and run:\n"
+                    f"/echo_set_referrer {chat_id} <their_user_id>", parse_mode="")
+                return
+            uid, uname = u.user_id, u.username
+        title = None
+        eg = await s.get(EchoGroup, chat_id)
+        if eg:
+            title = eg.chat_title
+        g = await s.get(EchoReferralGroup, chat_id)
+        if g is None:
+            g = EchoReferralGroup(chat_id=chat_id, chat_title=title, is_admin=True, active=True)
+            s.add(g)
+        g.referrer_id = uid
+        g.referrer_username = uname
+        await s.commit()
+    await message.reply(f"✅ Group {chat_id} credited to @{uname} (id {uid}).", parse_mode="")
+
+
 @router.message(Command("echo_reset_scores"))
 async def cmd_reset_scores(message: Message) -> None:
     """Wipe Echo win/loss/points (keeps groups, users, sightings, referrals).
@@ -181,7 +227,7 @@ async def cmd_groups(message: Message) -> None:
     lines = [f"📡 GROUPS ({len(groups)})"]
     for g in groups:
         bl = " 🚫" if g.blacklisted else ""
-        lines.append(f"  {(g.chat_title or g.chat_id)} — {g.calls} calls · {g.points:.0f} pts{bl}")
+        lines.append(f"  {(g.chat_title or '?')[:20]} ({g.chat_id}) — {g.calls} calls · {g.points:.0f} pts{bl}")
     await message.reply("\n".join(lines) if groups else "No groups yet.", parse_mode="")
 
 
