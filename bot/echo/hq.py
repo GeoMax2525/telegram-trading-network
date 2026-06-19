@@ -176,7 +176,10 @@ async def cmd_set_referrer(message: Message) -> None:
         g.referrer_id = uid
         g.referrer_username = uname
         await s.commit()
-    await message.reply(f"✅ Group {chat_id} credited to @{uname} (id {uid}).", parse_mode="")
+    # Also put it on the pod board (it lives in a separate table).
+    from bot.echo import core
+    await core.ensure_group(chat_id, title)
+    await message.reply(f"✅ Group {chat_id} credited to @{uname} (id {uid}) + added to the pod board.", parse_mode="")
 
 
 @router.message(Command("echo_reset_scores"))

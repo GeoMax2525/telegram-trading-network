@@ -127,6 +127,7 @@ async def echo_tracker_loop(echo_bot) -> None:
     await asyncio.sleep(90)
     while True:
         try:
+            await core.backfill_groups_from_referrals()
             await _tracker_tick(echo_bot)
         except Exception as exc:
             logger.debug("echo tracker tick error: %s", exc)

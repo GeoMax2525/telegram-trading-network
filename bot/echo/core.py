@@ -424,6 +424,21 @@ async def ensure_group(chat_id: int, title) -> None:
         await s.commit()
 
 
+async def backfill_groups_from_referrals() -> None:
+    """Ensure every group ECCO was added to (recorded as a referral group) has an
+    EchoGroup row, so it shows on the pod board even if it's been quiet."""
+    from database.models import AsyncSessionLocal, select, EchoReferralGroup, EchoGroup
+    async with AsyncSessionLocal() as s:
+        refs = (await s.execute(
+            select(EchoReferralGroup).where(EchoReferralGroup.active.is_(True))
+        )).scalars().all()
+        for r in refs:
+            if await s.get(EchoGroup, r.chat_id) is None:
+                s.add(EchoGroup(chat_id=r.chat_id, chat_title=r.chat_title,
+                                last_active_at=datetime.utcnow()))
+        await s.commit()
+
+
 async def network_group_count() -> int:
     from database.models import AsyncSessionLocal, select, func, EchoGroup
     async with AsyncSessionLocal() as s:
