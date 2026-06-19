@@ -158,12 +158,20 @@ async def echo_tracker_loop(echo_bot) -> None:
     follow-ups (5x/10x/…) into the groups that received the signal."""
     await asyncio.sleep(90)
     while True:
+        # Each step isolated — a failure in backfill or the consensus sweep must
+        # NEVER block resolution (that's what stalled W/L scoring).
         try:
             await core.backfill_groups_from_referrals()
+        except Exception as exc:
+            logger.debug("echo backfill error: %s", exc)
+        try:
             await _consensus_sweep(echo_bot)
+        except Exception as exc:
+            logger.debug("echo consensus sweep error: %s", exc)
+        try:
             await _tracker_tick(echo_bot)
         except Exception as exc:
-            logger.debug("echo tracker tick error: %s", exc)
+            logger.warning("echo tracker tick error: %s", exc)
         await asyncio.sleep(60)
 
 
