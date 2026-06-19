@@ -704,6 +704,26 @@ async def init_db() -> None:
             except Exception:
                 pass
 
+        # Echo tokens — Phanes scoring bookkeeping columns added after the table
+        # shipped (awarded_points/scored/score_win for incremental re-scoring).
+        _echo_token_cols = [
+            ("awarded_points", "DOUBLE PRECISION DEFAULT 0", "REAL DEFAULT 0"),
+            ("scored", "BOOLEAN DEFAULT FALSE", "BOOLEAN DEFAULT 0"),
+            ("score_win", "BOOLEAN DEFAULT FALSE", "BOOLEAN DEFAULT 0"),
+        ]
+        for col, pg_def, lite_def in _echo_token_cols:
+            if is_postgres:
+                await conn.execute(text(
+                    f"ALTER TABLE echo_tokens ADD COLUMN IF NOT EXISTS {col} {pg_def}"
+                ))
+            else:
+                try:
+                    await conn.execute(text(
+                        f"ALTER TABLE echo_tokens ADD COLUMN {col} {lite_def}"
+                    ))
+                except Exception:
+                    pass
+
         for col_name, col_def in _NEW_CANDIDATE_COLS:
             if is_postgres:
                 await conn.execute(
@@ -2596,10 +2616,15 @@ class EchoToken(Base):
     ath_mc          = Column(Float, nullable=True)
     ath_mult        = Column(Float, default=1.0)
     last_checked_at = Column(DateTime, nullable=True)
-    status          = Column(String, default="tracking")  # tracking | win | loss
+    status          = Column(String, default="tracking")  # tracking | win | loss | rug | void
     signaled        = Column(Boolean, default=False)
     resolved        = Column(Boolean, default=False)
     milestones      = Column(String, default="")          # csv of posted X, e.g. "5,10"
+    # Phanes scoring bookkeeping — points already credited for this token, so
+    # re-scoring a climbing runner applies only the delta (no double-count).
+    awarded_points  = Column(Float, default=0.0)
+    scored          = Column(Boolean, default=False)
+    score_win       = Column(Boolean, default=False)      # last-scored hit-rate state
 
 
 class EchoGroup(Base):

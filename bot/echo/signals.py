@@ -242,6 +242,8 @@ async def _resolve_one_token(echo_bot, tok, now, win_mult, resolution_h,
     kind = None
     new_ms = []
     ath_mult = 1.0
+    do_score = False
+    first_mc_value = None
     async with AsyncSessionLocal() as s:
         t = await s.get(EchoToken, tok.ca)
         if t is None:
@@ -264,8 +266,9 @@ async def _resolve_one_token(echo_bot, tok, now, win_mult, resolution_h,
         age_h = (now - (t.first_seen_at or now)).total_seconds() / 3600.0
 
         if t.resolved:
-            # Only resolved LOSSES are revisited — solely to UPGRADE to win
-            # if the token finally tops 2x. Wins/rugs stay locked.
+            # Resolved non-void tokens are revisited within the upgrade window so
+            # points track the peak: a loss that finally tops 2x flips to a win,
+            # and a runner climbing into a higher bracket gets the extra points.
             if t.status == "loss" and ath_mult >= win_mult:
                 t.status, upgraded = "win", True
         else:
@@ -300,14 +303,19 @@ async def _resolve_one_token(echo_bot, tok, now, win_mult, resolution_h,
                     new_ms.append(ms)
             if new_ms:
                 t.milestones = ",".join(sorted(posted, key=lambda x: int(x)))
+        # Score when newly resolved (non-void), or re-score a resolved token that
+        # was already scored under the Phanes model (so runners climb brackets).
+        # Old-model tokens (scored=False) are left until /echo_reset_scores.
+        first_mc_value = t.first_mc
+        do_score = (t.status != "void") and (resolved_now or (t.resolved and bool(t.scored)))
         await s.commit()
 
-    if upgraded:
-        await core.upgrade_to_win(tok.ca, ath_mult)
-        logger.info("echo: UPGRADED %s loss->win at %.1fx", tok.ca[:8], ath_mult)
-    if resolved_now and kind in ("win", "loss", "rug"):
-        await core.award_resolution(tok.ca, ath_mult, kind)
-        logger.info("echo: RESOLVED %s — %s at %.1fx", tok.ca[:8], kind.upper(), ath_mult)
+    if do_score:
+        await core.apply_token_score(tok.ca, ath_mult, first_mc_value, win_mult)
+        if resolved_now:
+            logger.info("echo: RESOLVED %s — %s peak %.2fx", tok.ca[:8], (kind or "?").upper(), ath_mult)
+        elif upgraded:
+            logger.info("echo: UPGRADED %s loss->win at %.2fx", tok.ca[:8], ath_mult)
     for ms in new_ms:
         await _broadcast(
             echo_bot, tok.ca, window,
