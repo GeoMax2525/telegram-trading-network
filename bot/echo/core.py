@@ -503,6 +503,40 @@ async def user_avg_x(user_id: int) -> float:
     return float(avg or 0.0)
 
 
+def _avg_med(vals) -> tuple:
+    """(average, median) of a list of multiples — median is far less skewed by a
+    single huge runner, so it shows the 'typical' call."""
+    xs = sorted(float(v) for v in vals if v is not None)
+    if not xs:
+        return (0.0, 0.0)
+    n = len(xs)
+    mid = n // 2
+    med = xs[mid] if n % 2 else (xs[mid - 1] + xs[mid]) / 2.0
+    return (sum(xs) / n, med)
+
+
+async def group_avg_median_x(chat_id: int) -> tuple:
+    from database.models import AsyncSessionLocal, select, EchoSighting, EchoToken
+    async with AsyncSessionLocal() as s:
+        cas = select(EchoSighting.ca).where(EchoSighting.chat_id == chat_id)
+        vals = (await s.execute(
+            select(EchoToken.ath_mult).where(
+                EchoToken.ca.in_(cas), EchoToken.resolved.is_(True))
+        )).scalars().all()
+    return _avg_med(vals)
+
+
+async def user_avg_median_x(user_id: int) -> tuple:
+    from database.models import AsyncSessionLocal, select, EchoSighting, EchoToken
+    async with AsyncSessionLocal() as s:
+        cas = select(EchoSighting.ca).where(EchoSighting.user_id == user_id)
+        vals = (await s.execute(
+            select(EchoToken.ath_mult).where(
+                EchoToken.ca.in_(cas), EchoToken.resolved.is_(True))
+        )).scalars().all()
+    return _avg_med(vals)
+
+
 async def group_stats(chat_id: int) -> dict | None:
     """A single group's own stats block (for the /pod 'YOUR POD' section)."""
     from database.models import AsyncSessionLocal, EchoGroup
@@ -585,10 +619,11 @@ async def hub_stats() -> dict:
             select(EchoGroup).order_by(EchoGroup.points.desc()).limit(10))).scalars().all())
         top_groups = []
         for g in groups_raw:
+            avg_x, med_x = await group_avg_median_x(g.chat_id)
             top_groups.append({
                 "title": g.chat_title or str(g.chat_id),
                 "wins": g.wins or 0, "losses": g.losses or 0, "points": g.points or 0,
-                "avg_x": await group_avg_x(g.chat_id),
+                "avg_x": avg_x, "median_x": med_x,
                 "top_echoer": await _top_echoer_for_group(s, g.chat_id),
             })
 
@@ -596,10 +631,11 @@ async def hub_stats() -> dict:
             select(EchoUser).order_by(EchoUser.points.desc()).limit(10))).scalars().all())
         top_users = []
         for u in users_raw:
+            avg_x, med_x = await user_avg_median_x(u.user_id)
             top_users.append({
                 "name": (u.username or str(u.user_id)),
                 "wins": u.wins or 0, "losses": u.losses or 0, "points": u.points or 0,
-                "avg_x": await user_avg_x(u.user_id),
+                "avg_x": avg_x, "median_x": med_x,
             })
 
         sigs = list((await s.execute(
@@ -685,61 +721,79 @@ def phanes_points(peak, first_mc) -> float:
     return pts
 
 
-async def apply_token_score(ca: str, peak: float, first_mc, win_mult: float = 2.0) -> None:
-    """Score a resolved token to every group + caller that called it — idempotent
-    and incremental. Points = Phanes bracket of the post-call peak (positive
-    scaled by call-time MC tier). Re-running applies only the DELTA, so a runner
-    climbing into a higher bracket — or a loss that later tops 2x — updates
-    cleanly without double-counting. Win/loss counters track hit-rate (peak>=2x)."""
+async def apply_token_score(ca: str, peak_mc, win_mult: float = 2.0) -> None:
+    """Score a resolved token to every group + caller that called it, each off
+    THEIR OWN entry MC (their earliest sighting). Points = Phanes bracket of that
+    caller's return (peak_mc / their entry), positive scaled by the entry MC tier.
+    A per-(token,caller) ledger (EchoScore) makes it incremental: as the peak
+    climbs, only the delta is applied, and a caller's loss can flip to a win.
+    Win/loss counters track hit-rate (their return >= win_mult)."""
     from database.models import (
-        AsyncSessionLocal, select, EchoToken, EchoSighting, EchoGroup, EchoUser,
+        AsyncSessionLocal, select, EchoToken, EchoSighting, EchoGroup, EchoUser, EchoScore,
     )
-    target = phanes_points(peak, first_mc)
-    is_win = float(peak or 0.0) >= float(win_mult)
+    peak = float(peak_mc or 0.0)
+    if peak <= 0:
+        return
     async with AsyncSessionLocal() as s:
         tok = await s.get(EchoToken, ca)
         if tok is None:
             return
-        prev_pts = float(tok.awarded_points or 0.0)
-        was_scored = bool(tok.scored)
-        was_win = bool(tok.score_win)
-        d_pts = round(target - prev_pts, 2)
-        if was_scored and abs(d_pts) < 0.01 and was_win == is_win:
-            return  # nothing changed since last score — skip the writes
+        last = float(tok.awarded_points or 0.0)   # repurposed: peak MC at last score
+        if last > 0 and peak <= last * 1.0001:
+            return  # peak hasn't grown since last scoring — nothing to do
+
         sightings = (await s.execute(
-            select(EchoSighting).where(EchoSighting.ca == ca)
+            select(EchoSighting).where(EchoSighting.ca == ca).order_by(EchoSighting.seen_at.asc())
         )).scalars().all()
-
-        def _apply(e):
-            e.points = round((e.points or 0) + d_pts, 2)
-            if not was_scored:
-                e.calls = (e.calls or 0) + 1
-                if is_win:
-                    e.wins = (e.wins or 0) + 1
-                else:
-                    e.losses = (e.losses or 0) + 1
-            elif was_win != is_win:
-                if is_win:
-                    e.wins = (e.wins or 0) + 1
-                    e.losses = max(0, (e.losses or 0) - 1)
-                else:
-                    e.losses = (e.losses or 0) + 1
-                    e.wins = max(0, (e.wins or 0) - 1)
-
-        seen_g: set[int] = set()
-        seen_u: set[int] = set()
+        fb = tok.first_mc  # fallback entry when a caller's snapshot is missing
+        g_entry: dict = {}
+        u_entry: dict = {}
         for sg in sightings:
-            if sg.chat_id is not None and sg.chat_id not in seen_g:
-                seen_g.add(sg.chat_id)
-                g = await s.get(EchoGroup, sg.chat_id)
-                if g and not g.blacklisted:
-                    _apply(g)
-            if sg.user_id is not None and sg.user_id not in seen_u:
-                seen_u.add(sg.user_id)
-                u = await s.get(EchoUser, sg.user_id)
-                if u and not u.blacklisted:
-                    _apply(u)
-        tok.awarded_points = target
-        tok.scored = True
-        tok.score_win = is_win
+            mc = sg.entry_mc if (sg.entry_mc and sg.entry_mc > 0) else None
+            if sg.chat_id is not None and sg.chat_id not in g_entry:
+                g_entry[sg.chat_id] = mc or fb
+            if sg.user_id is not None and sg.user_id not in u_entry:
+                u_entry[sg.user_id] = mc or fb
+
+        async def _score(kind, model, entry_map):
+            for eid, entry in entry_map.items():
+                if not entry or entry <= 0:
+                    continue
+                ent = await s.get(model, eid)
+                if ent is None or ent.blacklisted:
+                    continue
+                ret = peak / float(entry)
+                target = phanes_points(ret, entry)
+                is_win = ret >= float(win_mult)
+                row = (await s.execute(
+                    select(EchoScore).where(
+                        EchoScore.ca == ca, EchoScore.kind == kind, EchoScore.entity_id == eid)
+                )).scalars().first()
+                if row is None:
+                    ent.points = round((ent.points or 0) + target, 2)
+                    ent.calls = (ent.calls or 0) + 1
+                    if is_win:
+                        ent.wins = (ent.wins or 0) + 1
+                    else:
+                        ent.losses = (ent.losses or 0) + 1
+                    s.add(EchoScore(ca=ca, kind=kind, entity_id=eid,
+                                    entry_mc=float(entry), points=target, is_win=is_win))
+                else:
+                    d = round(target - (row.points or 0), 2)
+                    if abs(d) >= 0.01:
+                        ent.points = round((ent.points or 0) + d, 2)
+                    if bool(row.is_win) != is_win:
+                        if is_win:
+                            ent.wins = (ent.wins or 0) + 1
+                            ent.losses = max(0, (ent.losses or 0) - 1)
+                        else:
+                            ent.losses = (ent.losses or 0) + 1
+                            ent.wins = max(0, (ent.wins or 0) - 1)
+                    row.points = target
+                    row.is_win = is_win
+                    row.entry_mc = float(entry)
+
+        await _score("group", EchoGroup, g_entry)
+        await _score("user", EchoUser, u_entry)
+        tok.awarded_points = peak  # remember last-scored peak MC
         await s.commit()

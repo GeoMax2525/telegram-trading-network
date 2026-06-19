@@ -2685,6 +2685,20 @@ class EchoSignal(Base):
     entry_mc     = Column(Float, nullable=True)
 
 
+class EchoScore(Base):
+    """Per-(token, caller) score ledger. Each group/caller is scored off THEIR
+    own entry MC, and re-scored by delta as the token's peak climbs — so points
+    update without double-counting and a caller's loss can flip to a win."""
+    __tablename__ = "echo_scores"
+    id        = Column(Integer, primary_key=True)
+    ca        = Column(String, index=True)
+    kind      = Column(String)               # "group" | "user"
+    entity_id = Column(BigInteger, index=True)
+    entry_mc  = Column(Float, nullable=True)  # this caller's MC at their call
+    points    = Column(Float, default=0.0)
+    is_win    = Column(Boolean, default=False)
+
+
 async def open_paper_trade(
     token_address: str, token_name: str | None,
     entry_mc: float | None, entry_price: float | None,

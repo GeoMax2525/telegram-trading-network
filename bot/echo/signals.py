@@ -216,7 +216,7 @@ async def _tracker_tick(echo_bot) -> None:
 
 async def _resolve_one_token(echo_bot, tok, now, win_mult, resolution_h,
                              window, rug_liq, death_mult, death_min_age) -> None:
-    from database.models import AsyncSessionLocal, EchoToken
+    from database.models import AsyncSessionLocal, select, EchoToken, EchoSighting
 
     mc, liq, pair = await _price_mc(tok.ca)
 
@@ -243,13 +243,15 @@ async def _resolve_one_token(echo_bot, tok, now, win_mult, resolution_h,
     new_ms = []
     ath_mult = 1.0
     do_score = False
-    first_mc_value = None
+    peak_mc_value = None
     async with AsyncSessionLocal() as s:
         t = await s.get(EchoToken, tok.ca)
         if t is None:
             return
         if t.first_mc is None and mc:
             t.first_mc = mc
+        if t.ath_mc is None and t.first_mc:
+            t.ath_mc = t.first_mc  # peak MC is at least the call MC
         base = t.first_mc or mc
         cur_mult = 1.0
         if mc and base:
@@ -257,8 +259,19 @@ async def _resolve_one_token(echo_bot, tok, now, win_mult, resolution_h,
             if cur_mult > (t.ath_mult or 1.0):
                 t.ath_mult = cur_mult
                 t.ath_mc = mc
+        if mc:
+            # Capture each caller's OWN entry MC at ~their call time — the tracker
+            # checks every token each tick, so a NULL snapshot is always recent
+            # (filled within one tick of the sighting). Later callers get their
+            # own, higher MC, so their points reflect their real entry.
+            for sg in (await s.execute(
+                select(EchoSighting).where(
+                    EchoSighting.ca == tok.ca, EchoSighting.entry_mc.is_(None))
+            )).scalars().all():
+                sg.entry_mc = mc
         if hist_ath and hist_ath > (t.ath_mult or 1.0):
             t.ath_mult = hist_ath  # true historical peak — never miss a top
+            t.ath_mc = max(t.ath_mc or 0.0, hist_ath * (t.first_mc or 0.0))
         t.last_checked_at = now
         ath_mult = t.ath_mult or 1.0
         signaled = t.signaled
@@ -303,15 +316,15 @@ async def _resolve_one_token(echo_bot, tok, now, win_mult, resolution_h,
                     new_ms.append(ms)
             if new_ms:
                 t.milestones = ",".join(sorted(posted, key=lambda x: int(x)))
-        # Score when newly resolved (non-void), or re-score a resolved token that
-        # was already scored under the Phanes model (so runners climb brackets).
-        # Old-model tokens (scored=False) are left until /echo_reset_scores.
-        first_mc_value = t.first_mc
-        do_score = (t.status != "void") and (resolved_now or (t.resolved and bool(t.scored)))
+        # Score when newly resolved (non-void), or re-check a resolved token in
+        # the upgrade window (apply_token_score no-ops if the peak hasn't grown,
+        # so runners climb brackets and losses can flip to wins).
+        peak_mc_value = t.ath_mc
+        do_score = (t.status != "void") and (resolved_now or t.resolved)
         await s.commit()
 
     if do_score:
-        await core.apply_token_score(tok.ca, ath_mult, first_mc_value, win_mult)
+        await core.apply_token_score(tok.ca, peak_mc_value, win_mult)
         if resolved_now:
             logger.info("echo: RESOLVED %s — %s peak %.2fx", tok.ca[:8], (kind or "?").upper(), ath_mult)
         elif upgraded:
