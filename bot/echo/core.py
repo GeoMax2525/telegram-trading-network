@@ -220,6 +220,26 @@ async def consensus_state(ca: str, window_min: float) -> tuple[int, int]:
     return int(callers), int(total)
 
 
+async def recent_unsignaled_cas(window_min: float, limit: int = 300) -> list[str]:
+    """Distinct CAs sighted within the window that haven't fired a signal yet —
+    so the bot lane can fire consensus alerts for CAs recorded by EITHER lane
+    (bot or the Telethon user-account listener)."""
+    from database.models import AsyncSessionLocal, select, func, EchoSighting, EchoToken
+    cutoff = datetime.utcnow() - timedelta(minutes=window_min)
+    out = []
+    async with AsyncSessionLocal() as s:
+        cas = (await s.execute(
+            select(func.distinct(EchoSighting.ca)).where(EchoSighting.seen_at >= cutoff)
+        )).scalars().all()
+        for ca in cas:
+            tok = await s.get(EchoToken, ca)
+            if tok is None or not tok.signaled:
+                out.append(ca)
+                if len(out) >= limit:
+                    break
+    return out
+
+
 async def calling_group_ids(ca: str, window_min: float) -> list[int]:
     from database.models import AsyncSessionLocal, select, func, EchoSighting
     cutoff = datetime.utcnow() - timedelta(minutes=window_min)

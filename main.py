@@ -250,6 +250,12 @@ async def main() -> None:
     asyncio.create_task(start_echo())
     logger.info("Echo: queued for startup (gated by ECHO_BOT_TOKEN)")
 
+    # ECCO Telethon listener — user account that sees bot-posted calls the Bot
+    # API can't. No-op unless ECCO_TG_SESSION + TG_API_ID/HASH are set.
+    from bot.echo.tg_listener import ecco_tg_listener_loop
+    asyncio.create_task(ecco_tg_listener_loop())
+    logger.info("ECCO TG listener: queued (gated by ECCO_TG_SESSION)")
+
     # Register the "/" command menu so commands autocomplete in HQ + DM.
     try:
         from aiogram.types import BotCommand

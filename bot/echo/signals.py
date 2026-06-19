@@ -140,6 +140,17 @@ async def _broadcast(echo_bot, ca: str, window: float, text: str, reply_markup=N
             logger.debug("echo: broadcast to %s failed: %s", chat_id, exc)
 
 
+async def _consensus_sweep(echo_bot) -> None:
+    """Fire consensus alerts for CAs that crossed the threshold — works for
+    sightings recorded by EITHER lane (bot handler or the Telethon listener)."""
+    window = await core.get_echo_param("echo_active_window_min", 60.0)
+    for ca in await core.recent_unsignaled_cas(window):
+        try:
+            await maybe_fire_signal(echo_bot, ca)
+        except Exception as exc:
+            logger.debug("echo: consensus sweep %s: %s", ca[:8], exc)
+
+
 # ── Performance tracker ─────────────────────────────────────────────────────
 async def echo_tracker_loop(echo_bot) -> None:
     """Track every Echo token's price/ATH, resolve win (>=2x) / loss (<2x after
@@ -149,6 +160,7 @@ async def echo_tracker_loop(echo_bot) -> None:
     while True:
         try:
             await core.backfill_groups_from_referrals()
+            await _consensus_sweep(echo_bot)
             await _tracker_tick(echo_bot)
         except Exception as exc:
             logger.debug("echo tracker tick error: %s", exc)
