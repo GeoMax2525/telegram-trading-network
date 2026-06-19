@@ -208,11 +208,11 @@ async def start_echo() -> None:
     asyncio.create_task(echo_tracker_loop(echo_bot))
     logger.info("Echo: starting (admins=%s)", core.ECHO_ADMIN_IDS)
     try:
-        await echo_bot.delete_webhook(drop_pending_updates=True)
+        await echo_bot.delete_webhook(drop_pending_updates=False)
         await _set_commands(echo_bot)
-        await dp.start_polling(echo_bot, allowed_updates=[
-            "message", "edited_message", "channel_post", "edited_channel_post",
-            "my_chat_member", "callback_query",
-        ])
+        # drop_pending_updates=False so messages queued during a restart gap
+        # aren't lost. aiogram auto-resolves allowed_updates from the registered
+        # handlers (includes my_chat_member, channel_post, etc.).
+        await dp.start_polling(echo_bot)
     finally:
         await echo_bot.session.close()
