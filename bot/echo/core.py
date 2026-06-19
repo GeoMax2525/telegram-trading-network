@@ -226,18 +226,17 @@ async def recent_unsignaled_cas(window_min: float, limit: int = 300) -> list[str
     (bot or the Telethon user-account listener)."""
     from database.models import AsyncSessionLocal, select, func, EchoSighting, EchoToken
     cutoff = datetime.utcnow() - timedelta(minutes=window_min)
-    out = []
     async with AsyncSessionLocal() as s:
         cas = (await s.execute(
             select(func.distinct(EchoSighting.ca)).where(EchoSighting.seen_at >= cutoff)
         )).scalars().all()
-        for ca in cas:
-            tok = await s.get(EchoToken, ca)
-            if tok is None or not tok.signaled:
-                out.append(ca)
-                if len(out) >= limit:
-                    break
-    return out
+        if not cas:
+            return []
+        # One batch query for the already-signaled set instead of N s.get() calls.
+        signaled = set((await s.execute(
+            select(EchoToken.ca).where(EchoToken.ca.in_(cas), EchoToken.signaled.is_(True))
+        )).scalars().all())
+    return [c for c in cas if c not in signaled][:limit]
 
 
 async def calling_group_ids(ca: str, window_min: float) -> list[int]:

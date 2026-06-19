@@ -151,7 +151,7 @@ async def cmd_waves(message: Message) -> None:
 # ── Inline-button navigation (operator DM only) ─────────────────────────────
 @router.callback_query(F.data.startswith("echo:"))
 async def on_nav(cb: CallbackQuery) -> None:
-    if not _op(cb.from_user) or (cb.message and cb.message.chat.type != "private"):
+    if not _op(cb.from_user) or not cb.message or cb.message.chat.type != "private":
         try:
             await cb.answer()
         except Exception:

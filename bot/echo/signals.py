@@ -203,97 +203,113 @@ async def _tracker_tick(echo_bot) -> None:
     tokens = pending + upgradable
 
     for tok in tokens:
-        mc, liq, pair = await _price_mc(tok.ca)
-
-        # When a token is aging out (or a resolved loss) without a spot-confirmed
-        # 2x, pull its TRUE peak from price history so a spike missed between
-        # 60s spot checks still counts as a win. One history call per token, only
-        # when it matters — not every tick.
-        hist_ath = None
+        # Isolate every token — one bad price/DB/broadcast must NOT stop the rest
+        # from resolving (that's what silently stalled W/L scoring).
         try:
-            tok_age_h = (now - (tok.first_seen_at or now)).total_seconds() / 3600.0
-        except Exception:
-            tok_age_h = 0.0
-        needs_hist = (
-            tok.first_mc is not None and (tok.ath_mult or 1.0) < win_mult
-            and tok.first_seen_at is not None
-            and ((not tok.resolved and tok_age_h >= resolution_h) or tok.status == "loss")
-        )
-        if needs_hist:
-            hist_ath = await core.historical_ath_mult(tok.ca, tok.first_seen_at)
-
-        upgraded = False
-        resolved_now = False
-        kind = None
-        new_ms = []
-        async with AsyncSessionLocal() as s:
-            t = await s.get(EchoToken, tok.ca)
-            if t is None:
-                continue
-            if t.first_mc is None and mc:
-                t.first_mc = mc
-            base = t.first_mc or mc
-            cur_mult = 1.0
-            if mc and base:
-                cur_mult = mc / base
-                if cur_mult > (t.ath_mult or 1.0):
-                    t.ath_mult = cur_mult
-                    t.ath_mc = mc
-            if hist_ath and hist_ath > (t.ath_mult or 1.0):
-                t.ath_mult = hist_ath  # true historical peak — never miss a top
-            t.last_checked_at = now
-            ath_mult = t.ath_mult or 1.0
-            signaled = t.signaled
-            posted = set(x for x in (t.milestones or "").split(",") if x)
-            age_h = (now - (t.first_seen_at or now)).total_seconds() / 3600.0
-
-            if t.resolved:
-                # Only resolved LOSSES are revisited — solely to UPGRADE to win
-                # if the token finally tops 2x. Wins/rugs stay locked.
-                if t.status == "loss" and ath_mult >= win_mult:
-                    t.status, upgraded = "win", True
-            else:
-                # WIN the moment it tops 2x (forever, ATH-based). Otherwise wait
-                # the full window, THEN decide: never-priced junk = VOID (no
-                # points); delisted or liquidity drained to ~zero = RUG; a token
-                # that still trades but never hit 2x = LOSS. No eager rug — a
-                # thin-but-alive memecoin is a loss, not a rug.
-                if ath_mult >= win_mult:
-                    t.status, t.resolved, resolved_now, kind = "win", True, True, "win"
-                elif (t.first_mc is not None and cur_mult <= death_mult
-                      and age_h >= death_min_age):
-                    # Crashed — dumped to <= death_mult of the call = the call is
-                    # dead, resolve now (don't wait the full window). LP drained =
-                    # rug, otherwise a deep-dump loss. Still upgradeable to a win
-                    # if it somehow recovers past 2x within the upgrade window.
-                    k = "rug" if (liq is not None and liq < rug_liq) else "loss"
-                    t.status, t.resolved, resolved_now, kind = k, True, True, k
-                elif age_h >= resolution_h:
-                    if t.first_mc is None:
-                        t.status, t.resolved, resolved_now, kind = "void", True, True, "void"
-                    elif liq is not None and liq < rug_liq:
-                        t.status, t.resolved, resolved_now, kind = "rug", True, True, "rug"
-                    else:
-                        t.status, t.resolved, resolved_now, kind = "loss", True, True, "loss"
-
-            # Milestone pings (signaled tokens only)
-            if signaled:
-                for ms in MILESTONES:
-                    if ath_mult >= ms and str(ms) not in posted:
-                        posted.add(str(ms))
-                        new_ms.append(ms)
-                if new_ms:
-                    t.milestones = ",".join(sorted(posted, key=lambda x: int(x)))
-            await s.commit()
-
-        if upgraded:
-            await core.upgrade_to_win(tok.ca, ath_mult)
-            logger.info("echo: UPGRADED %s loss->win at %.1fx", tok.ca[:8], ath_mult)
-        if resolved_now and kind in ("win", "loss", "rug"):
-            await core.award_resolution(tok.ca, ath_mult, kind)
-            logger.info("echo: RESOLVED %s — %s at %.1fx", tok.ca[:8], kind.upper(), ath_mult)
-        for ms in new_ms:
-            await _broadcast(
-                echo_bot, tok.ca, window,
-                style.sonar_pulse(tok.token_name or tok.ca[:6], ms),
+            await _resolve_one_token(
+                echo_bot, tok, now, win_mult, resolution_h,
+                window, rug_liq, death_mult, death_min_age,
             )
+        except Exception as exc:
+            logger.warning("echo: token %s resolve failed: %s", tok.ca[:8], exc)
+
+
+async def _resolve_one_token(echo_bot, tok, now, win_mult, resolution_h,
+                             window, rug_liq, death_mult, death_min_age) -> None:
+    from database.models import AsyncSessionLocal, EchoToken
+
+    mc, liq, pair = await _price_mc(tok.ca)
+
+    # When a token is aging out (or a resolved loss) without a spot-confirmed
+    # 2x, pull its TRUE peak from price history so a spike missed between
+    # 60s spot checks still counts as a win. One history call per token, only
+    # when it matters — not every tick.
+    hist_ath = None
+    try:
+        tok_age_h = (now - (tok.first_seen_at or now)).total_seconds() / 3600.0
+    except Exception:
+        tok_age_h = 0.0
+    needs_hist = (
+        tok.first_mc is not None and (tok.ath_mult or 1.0) < win_mult
+        and tok.first_seen_at is not None
+        and ((not tok.resolved and tok_age_h >= resolution_h) or tok.status == "loss")
+    )
+    if needs_hist:
+        hist_ath = await core.historical_ath_mult(tok.ca, tok.first_seen_at)
+
+    upgraded = False
+    resolved_now = False
+    kind = None
+    new_ms = []
+    ath_mult = 1.0
+    async with AsyncSessionLocal() as s:
+        t = await s.get(EchoToken, tok.ca)
+        if t is None:
+            return
+        if t.first_mc is None and mc:
+            t.first_mc = mc
+        base = t.first_mc or mc
+        cur_mult = 1.0
+        if mc and base:
+            cur_mult = mc / base
+            if cur_mult > (t.ath_mult or 1.0):
+                t.ath_mult = cur_mult
+                t.ath_mc = mc
+        if hist_ath and hist_ath > (t.ath_mult or 1.0):
+            t.ath_mult = hist_ath  # true historical peak — never miss a top
+        t.last_checked_at = now
+        ath_mult = t.ath_mult or 1.0
+        signaled = t.signaled
+        posted = set(x for x in (t.milestones or "").split(",") if x)
+        age_h = (now - (t.first_seen_at or now)).total_seconds() / 3600.0
+
+        if t.resolved:
+            # Only resolved LOSSES are revisited — solely to UPGRADE to win
+            # if the token finally tops 2x. Wins/rugs stay locked.
+            if t.status == "loss" and ath_mult >= win_mult:
+                t.status, upgraded = "win", True
+        else:
+            # WIN the moment it tops 2x (forever, ATH-based). Otherwise wait
+            # the full window, THEN decide: never-priced junk = VOID (no
+            # points); delisted or liquidity drained to ~zero = RUG; a token
+            # that still trades but never hit 2x = LOSS. No eager rug — a
+            # thin-but-alive memecoin is a loss, not a rug.
+            if ath_mult >= win_mult:
+                t.status, t.resolved, resolved_now, kind = "win", True, True, "win"
+            elif (t.first_mc is not None and cur_mult <= death_mult
+                  and age_h >= death_min_age):
+                # Crashed — dumped to <= death_mult of the call = the call is
+                # dead, resolve now (don't wait the full window). LP drained =
+                # rug, otherwise a deep-dump loss. Still upgradeable to a win
+                # if it somehow recovers past 2x within the upgrade window.
+                k = "rug" if (liq is not None and liq < rug_liq) else "loss"
+                t.status, t.resolved, resolved_now, kind = k, True, True, k
+            elif age_h >= resolution_h:
+                if t.first_mc is None:
+                    t.status, t.resolved, resolved_now, kind = "void", True, True, "void"
+                elif liq is not None and liq < rug_liq:
+                    t.status, t.resolved, resolved_now, kind = "rug", True, True, "rug"
+                else:
+                    t.status, t.resolved, resolved_now, kind = "loss", True, True, "loss"
+
+        # Milestone pings (signaled tokens only)
+        if signaled:
+            for ms in MILESTONES:
+                if ath_mult >= ms and str(ms) not in posted:
+                    posted.add(str(ms))
+                    new_ms.append(ms)
+            if new_ms:
+                t.milestones = ",".join(sorted(posted, key=lambda x: int(x)))
+        await s.commit()
+
+    if upgraded:
+        await core.upgrade_to_win(tok.ca, ath_mult)
+        logger.info("echo: UPGRADED %s loss->win at %.1fx", tok.ca[:8], ath_mult)
+    if resolved_now and kind in ("win", "loss", "rug"):
+        await core.award_resolution(tok.ca, ath_mult, kind)
+        logger.info("echo: RESOLVED %s — %s at %.1fx", tok.ca[:8], kind.upper(), ath_mult)
+    for ms in new_ms:
+        await _broadcast(
+            echo_bot, tok.ca, window,
+            style.sonar_pulse(tok.token_name or tok.ca[:6], ms),
+        )
