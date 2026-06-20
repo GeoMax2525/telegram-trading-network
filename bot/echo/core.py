@@ -686,40 +686,21 @@ async def quality_grade(ca: str, window_min: float) -> str:
     return "Low Quality Signal"
 
 
-# ── Phanes-style points: bracket on the post-call peak, scaled by MC tier ────
-def _points_for_return(mult) -> float:
-    """Points purely from the post-call return multiple (peak MC / call MC)."""
-    m = float(mult or 0.0)
+# ── Phanes points: pure bracket on the post-call return ─────────────────────
+def phanes_points(peak, _mc=None) -> float:
+    """Points from the post-call peak multiple — exactly the Phanes table,
+    no MC-tier scaling."""
+    m = float(peak or 0.0)
     if m < 1.0:   return -2.0
     if m < 1.3:   return -1.0
-    if m < 1.8:   return 0.0
-    if m < 5.0:   return 1.0
-    if m < 10.0:  return 2.0
-    if m < 20.0:  return 3.0
-    if m < 50.0:  return 4.0
-    if m < 100.0: return 7.0
+    if m < 1.8:   return  0.0
+    if m < 5.0:   return  1.0
+    if m < 10.0:  return  2.0
+    if m < 20.0:  return  3.0
+    if m < 50.0:  return  4.0
+    if m < 100.0: return  7.0
     if m < 200.0: return 10.0
     return 15.0
-
-
-def _mc_tier_mult(mc) -> float:
-    """Positive points scale by how hard the call was — a pump from $20k is easy,
-    a pump from $1M is not. Unknown MC = full credit (no penalty). Losses are
-    never scaled (a bad call is a bad call regardless of size)."""
-    if not mc or mc <= 0:
-        return 1.0
-    if mc < 25_000:    return 0.5
-    if mc < 50_000:    return 0.65
-    if mc < 100_000:   return 0.8
-    if mc < 250_000:   return 0.9
-    return 1.0
-
-
-def phanes_points(peak, first_mc) -> float:
-    pts = _points_for_return(peak)
-    if pts > 0:
-        pts = round(pts * _mc_tier_mult(first_mc), 2)
-    return pts
 
 
 async def apply_token_score(ca: str, peak_mc, win_mult: float = 2.0) -> None:

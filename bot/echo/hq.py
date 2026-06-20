@@ -182,6 +182,40 @@ async def cmd_set_referrer(message: Message) -> None:
     await message.reply(f"✅ Group {chat_id} credited to @{uname} (id {uid}) + added to the pod board.", parse_mode="")
 
 
+@router.message(Command("echo_rescore"))
+async def cmd_rescore(message: Message) -> None:
+    """Re-score all resolved tokens with the current formula (no wipe needed).
+    Use after a scoring formula change — applies the delta so W/L counters are
+    preserved and only the points difference is credited/debited."""
+    if not _ok(message):
+        return
+    from database.models import AsyncSessionLocal, select, EchoToken, EchoScore
+    from bot.echo.core import apply_token_score
+    await message.reply("⏳ Re-scoring resolved tokens…", parse_mode="")
+    async with AsyncSessionLocal() as s:
+        tokens = list((await s.execute(
+            select(EchoToken).where(
+                EchoToken.resolved.is_(True),
+                EchoToken.status != "void",
+            )
+        )).scalars().all())
+        # Clear the ledger so apply_token_score treats every token as fresh
+        # (needed when the formula itself changes, not just the peak).
+        for sc in (await s.execute(select(EchoScore))).scalars().all():
+            await s.delete(sc)
+        for t in tokens:
+            t.awarded_points = 0.0
+        await s.commit()
+    n = 0
+    for tok in tokens:
+        try:
+            await apply_token_score(tok.ca, tok.ath_mc)
+            n += 1
+        except Exception:
+            pass
+    await message.reply(f"✅ Re-scored {n} tokens with updated formula.", parse_mode="")
+
+
 @router.message(Command("echo_reset_scores"))
 async def cmd_reset_scores(message: Message) -> None:
     """Wipe Echo win/loss/points (keeps groups, users, sightings, referrals).
@@ -194,9 +228,6 @@ async def cmd_reset_scores(message: Message) -> None:
             g.points = 0.0; g.wins = 0; g.losses = 0; g.calls = 0
         for u in (await s.execute(select(EchoUser))).scalars().all():
             u.points = 0.0; u.wins = 0; u.losses = 0; u.calls = 0
-        # DELETE tokens (don't re-baseline — that caused instant-losses because
-        # old first_seen_at + fresh ath = immediately past the resolution window).
-        # New sightings will create fresh tokens that track from the call.
         for t in (await s.execute(select(EchoToken))).scalars().all():
             await s.delete(t)
         await s.commit()
