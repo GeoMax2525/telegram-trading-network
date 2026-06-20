@@ -503,40 +503,6 @@ async def user_avg_x(user_id: int) -> float:
     return float(avg or 0.0)
 
 
-def _avg_med(vals) -> tuple:
-    """(average, median) of a list of multiples — median is far less skewed by a
-    single huge runner, so it shows the 'typical' call."""
-    xs = sorted(float(v) for v in vals if v is not None)
-    if not xs:
-        return (0.0, 0.0)
-    n = len(xs)
-    mid = n // 2
-    med = xs[mid] if n % 2 else (xs[mid - 1] + xs[mid]) / 2.0
-    return (sum(xs) / n, med)
-
-
-async def group_avg_median_x(chat_id: int) -> tuple:
-    from database.models import AsyncSessionLocal, select, EchoSighting, EchoToken
-    async with AsyncSessionLocal() as s:
-        cas = select(EchoSighting.ca).where(EchoSighting.chat_id == chat_id)
-        vals = (await s.execute(
-            select(EchoToken.ath_mult).where(
-                EchoToken.ca.in_(cas), EchoToken.resolved.is_(True))
-        )).scalars().all()
-    return _avg_med(vals)
-
-
-async def user_avg_median_x(user_id: int) -> tuple:
-    from database.models import AsyncSessionLocal, select, EchoSighting, EchoToken
-    async with AsyncSessionLocal() as s:
-        cas = select(EchoSighting.ca).where(EchoSighting.user_id == user_id)
-        vals = (await s.execute(
-            select(EchoToken.ath_mult).where(
-                EchoToken.ca.in_(cas), EchoToken.resolved.is_(True))
-        )).scalars().all()
-    return _avg_med(vals)
-
-
 async def group_stats(chat_id: int) -> dict | None:
     """A single group's own stats block (for the /pod 'YOUR POD' section)."""
     from database.models import AsyncSessionLocal, EchoGroup
@@ -619,11 +585,10 @@ async def hub_stats() -> dict:
             select(EchoGroup).order_by(EchoGroup.points.desc()).limit(10))).scalars().all())
         top_groups = []
         for g in groups_raw:
-            avg_x, med_x = await group_avg_median_x(g.chat_id)
             top_groups.append({
                 "title": g.chat_title or str(g.chat_id),
                 "wins": g.wins or 0, "losses": g.losses or 0, "points": g.points or 0,
-                "avg_x": avg_x, "median_x": med_x,
+                "avg_x": await group_avg_x(g.chat_id),
                 "top_echoer": await _top_echoer_for_group(s, g.chat_id),
             })
 
@@ -631,11 +596,10 @@ async def hub_stats() -> dict:
             select(EchoUser).order_by(EchoUser.points.desc()).limit(10))).scalars().all())
         top_users = []
         for u in users_raw:
-            avg_x, med_x = await user_avg_median_x(u.user_id)
             top_users.append({
                 "name": (u.username or str(u.user_id)),
                 "wins": u.wins or 0, "losses": u.losses or 0, "points": u.points or 0,
-                "avg_x": avg_x, "median_x": med_x,
+                "avg_x": await user_avg_x(u.user_id),
             })
 
         sigs = list((await s.execute(

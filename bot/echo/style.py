@@ -176,7 +176,7 @@ def hub_dashboard(st: dict, footer: str = "") -> str:
     if st["top_groups"]:
         for i, g in enumerate(st["top_groups"], 1):
             L.append(f"{i}. {g['title'][:24]}")
-            L.append(f"   {g['wins']}W / {g['losses']}L ({_wr(g['wins'], g['losses'])})  ·  avg {g.get('avg_x', 0):.1f}x · med {g.get('median_x', 0):.1f}x  ·  {g['points']:+.0f} pts")
+            L.append(f"   {g['wins']}W / {g['losses']}L ({_wr(g['wins'], g['losses'])})  ·  avg {g.get('avg_x', 0):.1f}x  ·  {g['points']:+.0f} pts")
             if g["top_echoer"]:
                 nm, w = g["top_echoer"]
                 L.append(f"   Top Echoer: {_handle(nm)} ({w}W)")
@@ -187,7 +187,7 @@ def hub_dashboard(st: dict, footer: str = "") -> str:
     if st["top_users"]:
         for i, u in enumerate(st["top_users"], 1):
             tag = f"{i}. {_handle(u['name'])[:16]}"
-            L.append(f"{tag:<20}{u['wins']}W/{u['losses']}L ({_wr(u['wins'], u['losses'])})  avg {u.get('avg_x', 0):.1f}x · med {u.get('median_x', 0):.1f}x  {u['points']:+.0f}pts")
+            L.append(f"{tag:<20}{u['wins']}W/{u['losses']}L ({_wr(u['wins'], u['losses'])})  avg {u.get('avg_x', 0):.1f}x  {u['points']:+.0f}pts")
     else:
         L.append("(no echoers yet)")
     L += ["", "📡 RECENT SIGNALS"]
