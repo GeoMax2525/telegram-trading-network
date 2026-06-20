@@ -220,23 +220,32 @@ async def consensus_state(ca: str, window_min: float) -> tuple[int, int]:
     return int(callers), int(total)
 
 
-async def recent_unsignaled_cas(window_min: float, limit: int = 300) -> list[str]:
-    """Distinct CAs sighted within the window that haven't fired a signal yet —
-    so the bot lane can fire consensus alerts for CAs recorded by EITHER lane
-    (bot or the Telethon user-account listener)."""
-    from database.models import AsyncSessionLocal, select, func, EchoSighting, EchoToken
+async def recent_active_cas(window_min: float, limit: int = 300) -> list[str]:
+    """Distinct CAs sighted within the window — the consensus sweep re-checks all
+    of them so a signal can FIRE (first tier) or SURGE (climb into a higher tier),
+    regardless of which lane recorded the sighting. maybe_fire_signal dedups by
+    tier, so already-alerted CAs at the same strength are cheap no-ops."""
+    from database.models import AsyncSessionLocal, select, func, EchoSighting
     cutoff = datetime.utcnow() - timedelta(minutes=window_min)
     async with AsyncSessionLocal() as s:
         cas = (await s.execute(
             select(func.distinct(EchoSighting.ca)).where(EchoSighting.seen_at >= cutoff)
         )).scalars().all()
-        if not cas:
-            return []
-        # One batch query for the already-signaled set instead of N s.get() calls.
-        signaled = set((await s.execute(
-            select(EchoToken.ca).where(EchoToken.ca.in_(cas), EchoToken.signaled.is_(True))
-        )).scalars().all())
-    return [c for c in cas if c not in signaled][:limit]
+    return list(cas)[:limit]
+
+
+async def admin_group_ids() -> list[int]:
+    """Chat ids where ECCO is an active ADMIN — used to broadcast consensus
+    alerts network-wide (it can reliably post there)."""
+    from database.models import AsyncSessionLocal, select, EchoReferralGroup
+    async with AsyncSessionLocal() as s:
+        rows = (await s.execute(
+            select(EchoReferralGroup.chat_id).where(
+                EchoReferralGroup.is_admin.is_(True),
+                EchoReferralGroup.active.is_(True),
+            )
+        )).scalars().all()
+    return [int(r) for r in rows]
 
 
 async def calling_group_ids(ca: str, window_min: float) -> list[int]:

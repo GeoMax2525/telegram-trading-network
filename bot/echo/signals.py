@@ -64,31 +64,55 @@ async def _rug_ok(ca: str, pair) -> tuple[bool, str]:
         return False, f"rug_check_error:{exc}"
 
 
+# Escalation tiers above the base threshold — a growing network gets LOUDER as
+# more pods pile onto the same call, instead of going silent after the first 4.
+_CONSENSUS_TIERS = [7, 10, 15, 20, 30, 50, 75, 100, 150, 200]
+
+
+def _consensus_tier(callers: int, threshold: int) -> int:
+    """Highest alert tier reached: the base threshold first, then each milestone
+    as more distinct pods call it. 0 = not at consensus yet."""
+    tier = threshold if callers >= threshold else 0
+    for t in _CONSENSUS_TIERS:
+        if callers >= t:
+            tier = t
+    return tier
+
+
 async def maybe_fire_signal(echo_bot, ca: str) -> None:
-    """If a CA has crossed the cross-group consensus threshold, rug-check it and
-    post the clean Entry alert into every group that called it. Once per CA."""
+    """Fire the cross-group consensus alert when a CA first crosses the threshold,
+    and RE-fire (surge) each time it climbs into a higher pod-count tier. Posts
+    into every calling group plus — if enabled — every group where ECCO is admin
+    (network-wide alpha). Dedups by tier so a given strength alerts only once."""
     from database.models import AsyncSessionLocal, EchoToken, EchoSignal
 
-    threshold = await core.get_echo_param("echo_consensus_threshold", 4.0)
+    threshold = int(await core.get_echo_param("echo_consensus_threshold", 4.0))
     window = await core.get_echo_param("echo_active_window_min", 60.0)
 
     callers, total = await core.consensus_state(ca, window)
-    if callers < threshold:
+    tier = _consensus_tier(callers, threshold)
+    if tier == 0:
         return
 
     async with AsyncSessionLocal() as s:
         tok = await s.get(EchoToken, ca)
-        if tok is None or tok.signaled:
-            return  # already alerted (or unknown)
+        if tok is None:
+            return
+        already = int(tok.signal_tier or 0)
+    if tier <= already:
+        return  # already alerted at this strength or higher — nothing new
+    first_alert = already == 0
 
     mc, _liq, pair = await _price_mc(ca)
     if not mc or pair is None:
         return  # not tradeable / indexable yet — wait for the next sighting
 
-    rug_ok, rug_reason = await _rug_ok(ca, pair)
-    if not rug_ok:
-        logger.info("echo: signal blocked by rug filter %s — %s", ca[:8], rug_reason)
-        return
+    # Rug-check on the FIRST alert only; surges are already validated.
+    if first_alert:
+        rug_ok, rug_reason = await _rug_ok(ca, pair)
+        if not rug_ok:
+            logger.info("echo: signal blocked by rug filter %s — %s", ca[:8], rug_reason)
+            return
 
     quality = await core.quality_grade(ca, window)
     pct = round(100.0 * callers / max(total, callers), 0)
@@ -102,12 +126,13 @@ async def maybe_fire_signal(echo_bot, ca: str) -> None:
         pass
     label = name or sym or (ca[:6] + "…")
 
-    # Mark signaled + persist + set baseline MC, all before posting (idempotent).
+    # Claim this tier + persist baseline, before posting (idempotent / race-safe).
     async with AsyncSessionLocal() as s:
         tok = await s.get(EchoToken, ca)
-        if tok is None or tok.signaled:
-            return
+        if tok is None or int(tok.signal_tier or 0) >= tier:
+            return  # another worker already claimed this tier
         tok.signaled = True
+        tok.signal_tier = tier
         if tok.first_mc is None:
             tok.first_mc = mc
         if name:
@@ -117,17 +142,24 @@ async def maybe_fire_signal(echo_bot, ca: str) -> None:
         s.add(EchoSignal(ca=ca, num_groups=callers, pct_chats=pct, quality=quality, entry_mc=mc))
         await s.commit()
 
-    # Personalized broadcast — each pod sees its OWN leaderboard rank (no
-    # cross-group leak); pod_strength = how many pods detected it.
+    # Targets: every group currently calling it + (if enabled) every admin group
+    # network-wide. Each pod still sees its OWN rank (no cross-group leak), and
+    # pod_strength = how many pods detected it (a count, never group names).
+    targets = set(await core.calling_group_ids(ca, window))
+    if await core.get_echo_param("echo_broadcast_all_admins", 1.0) >= 0.5:
+        targets |= set(await core.admin_group_ids())
+
     kb = style.kb_copy(ca)
-    for chat_id in await core.calling_group_ids(ca, window):
+    surge = not first_alert
+    for chat_id in targets:
         try:
             rank = await core.group_rank(chat_id)
-            text = style.sonar_report(label, mc, pct, quality, callers, rank=rank)
+            text = style.sonar_report(label, mc, pct, quality, callers, rank=rank, surge=surge)
             await echo_bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=kb)
         except Exception as exc:
             logger.debug("echo: alert to %s failed: %s", chat_id, exc)
-    logger.info("echo: SIGNAL %s (%s) — %d/%d groups, %s", label, ca[:8], callers, total, quality)
+    logger.info("echo: SIGNAL %s (%s) tier=%d — %d/%d groups %s",
+                label, ca[:8], tier, callers, total, "(surge)" if surge else quality)
 
 
 async def _broadcast(echo_bot, ca: str, window: float, text: str, reply_markup=None) -> None:
@@ -144,7 +176,7 @@ async def _consensus_sweep(echo_bot) -> None:
     """Fire consensus alerts for CAs that crossed the threshold — works for
     sightings recorded by EITHER lane (bot handler or the Telethon listener)."""
     window = await core.get_echo_param("echo_active_window_min", 60.0)
-    for ca in await core.recent_unsignaled_cas(window):
+    for ca in await core.recent_active_cas(window):
         try:
             await maybe_fire_signal(echo_bot, ca)
         except Exception as exc:

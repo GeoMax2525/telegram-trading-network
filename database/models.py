@@ -710,6 +710,7 @@ async def init_db() -> None:
             ("awarded_points", "DOUBLE PRECISION DEFAULT 0", "REAL DEFAULT 0"),
             ("scored", "BOOLEAN DEFAULT FALSE", "BOOLEAN DEFAULT 0"),
             ("score_win", "BOOLEAN DEFAULT FALSE", "BOOLEAN DEFAULT 0"),
+            ("signal_tier", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
         ]
         for col, pg_def, lite_def in _echo_token_cols:
             if is_postgres:
@@ -2618,6 +2619,7 @@ class EchoToken(Base):
     last_checked_at = Column(DateTime, nullable=True)
     status          = Column(String, default="tracking")  # tracking | win | loss | rug | void
     signaled        = Column(Boolean, default=False)
+    signal_tier     = Column(Integer, default=0)          # highest pod-count tier alerted
     resolved        = Column(Boolean, default=False)
     milestones      = Column(String, default="")          # csv of posted X, e.g. "5,10"
     # Phanes scoring bookkeeping — points already credited for this token, so
@@ -3491,6 +3493,7 @@ AGENT_PARAM_DEFAULTS = {
 
     # ── Echo (Trojan Horse signal bot) tuning ───────────────────────────────
     "echo_consensus_threshold":  4.0,    # same CA in N+ distinct groups -> alert
+    "echo_broadcast_all_admins": 1.0,    # 1 = consensus alerts go to ALL admin groups (network-wide), not just callers
     "echo_active_window_min":    60.0,   # sightings within this window count toward consensus
     "echo_resolution_hours":     24.0,   # token marked loss (<2x) after this long
     "echo_rug_filter_enabled":   1.0,    # run on-chain rug checks before any alert
