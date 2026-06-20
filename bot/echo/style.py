@@ -199,6 +199,24 @@ def hub_dashboard(st: dict, footer: str = "") -> str:
             L.append(f"• {r['name'][:18]} — {r['quality']} — {r['mult']:.1f}x")
     else:
         L.append("• Sonar quiet")
+    L += ["", "📞 RECENT CALLS"]
+    from datetime import datetime, timezone
+    now_ts = datetime.utcnow()
+    if st.get("recent_calls"):
+        for c in st["recent_calls"]:
+            seen = c["seen_at"]
+            if seen:
+                secs = (now_ts - seen).total_seconds()
+                m = secs / 60.0
+                ago = (f"{int(m)}m ago" if m < 60 else
+                       f"{int(m/60)}h ago" if m < 1440 else f"{int(m/1440)}d ago")
+            else:
+                ago = "?"
+            # Status badge — shows if the call already resolved
+            badge = {"win": "✅", "loss": "❌", "rug": "💀", "void": "⬜"}.get(c["status"], "🔵")
+            L.append(f"{badge} {c['name'][:10]:<10} {c['group'][:14]:<14} {c['caller'][:12]:<12} {ago}")
+    else:
+        L.append("• No calls yet")
     out = "```\n" + "\n".join(L) + "\n```"
     if footer:
         out += f"\n{footer}"

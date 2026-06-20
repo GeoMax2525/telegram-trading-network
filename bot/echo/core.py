@@ -621,10 +621,31 @@ async def hub_stats() -> dict:
                 "quality": (sig.quality or "Medium Quality Signal").replace(" Signal", ""),
                 "mult": (tok.ath_mult if tok else 1.0) or 1.0,
             })
+
+        # Recent calls feed — last 15 sightings, enriched with token name + status.
+        # Lets the operator confirm exactly which group/caller ECCO received in.
+        calls_raw = list((await s.execute(
+            select(EchoSighting).order_by(EchoSighting.seen_at.desc()).limit(15)
+        )).scalars().all())
+        recent_calls = []
+        for sg in calls_raw:
+            tok = await s.get(EchoToken, sg.ca)
+            name = (tok.token_name or tok.symbol or sg.ca[:8]) if tok else sg.ca[:8]
+            status = (tok.status or "tracking") if tok else "tracking"
+            recent_calls.append({
+                "name": name,
+                "group": (sg.chat_title or str(sg.chat_id))[:18],
+                "caller": (f"@{sg.username}" if sg.username else
+                           str(sg.user_id) if sg.user_id else "anon"),
+                "status": status,
+                "seen_at": sg.seen_at,
+            })
+
     return {
         "n_groups": n_groups, "n_users": n_users, "n_sightings": n_sightings,
         "n_signals": n_signals, "n_wins": n_wins, "n_losses": n_losses,
         "top_groups": top_groups, "top_users": top_users, "recent": recent,
+        "recent_calls": recent_calls,
     }
 
 
