@@ -169,7 +169,14 @@ async def on_nav(cb: CallbackQuery) -> None:
             text, kb = style.waves_help(), None
         else:
             text, kb = await _dive_text(), style.kb_menu()
-        await cb.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+        # Refresh (dive) edits in place; other views post a new message below.
+        if action == "dive":
+            try:
+                await cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+            except Exception:
+                await cb.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+        else:
+            await cb.message.answer(text, parse_mode="Markdown", reply_markup=kb)
     except Exception as exc:
         logger.debug("ecco nav error: %s", exc)
     try:

@@ -40,6 +40,7 @@ def kb_copy(ca: str) -> InlineKeyboardMarkup:
 
 def kb_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Refresh", callback_data="echo:dive")],
         [InlineKeyboardButton(text="🌊 View Pod", callback_data="echo:pod"),
          InlineKeyboardButton(text="🔵 View Echoers", callback_data="echo:echoers")],
         [InlineKeyboardButton(text="🌀 Run Sonar", callback_data="echo:sonar"),
@@ -199,7 +200,8 @@ def hub_dashboard(st: dict, footer: str = "") -> str:
             L.append(f"• {r['name'][:18]} — {r['quality']} — {r['mult']:.1f}x")
     else:
         L.append("• Sonar quiet")
-    L += ["", "📞 RECENT CALLS"]
+    L += ["", "📞 RECENT CALLS",
+          "🔵tracking  ✅win  ❌loss  💀rug"]
     from datetime import datetime, timezone
     now_ts = datetime.utcnow()
     if st.get("recent_calls"):
