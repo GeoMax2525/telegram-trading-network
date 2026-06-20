@@ -132,15 +132,8 @@ async def maybe_fire_signal(echo_bot, ca: str) -> None:
     first_alert = already == 0
 
     mc, _liq, pair = await _price_mc(ca)
-    if not mc or pair is None:
-        return  # not tradeable / indexable yet — wait for the next sighting
-
-    # Rug-check on the FIRST alert only; surges are already validated.
-    if first_alert:
-        rug_ok, rug_reason = await _rug_ok(ca, pair)
-        if not rug_ok:
-            logger.info("echo: signal blocked by rug filter %s — %s", ca[:8], rug_reason)
-            return
+    if not mc:
+        return  # no price at all yet — wait for the next sighting
 
     quality = await core.quality_grade(ca, window)
     pct = round(100.0 * callers / max(total, callers), 0)
