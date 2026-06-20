@@ -234,6 +234,52 @@ async def cmd_groups(message: Message) -> None:
     await message.reply("\n".join(lines) if groups else "No groups yet.", parse_mode="")
 
 
+@router.message(Command("echo_health"))
+async def cmd_health(message: Message) -> None:
+    """Per-group health: 👑=admin, when ECCO last RECEIVED a message there, and
+    CA sightings in 24h. ⚠️ flags a group gone quiet (>6h) — likely removed,
+    demoted, or privacy not applied. The surest 'is it working everywhere' view."""
+    if not _ok(message):
+        return
+    from datetime import datetime, timedelta
+    from database.models import (
+        AsyncSessionLocal, select, func, EchoGroup, EchoReferralGroup, EchoSighting,
+    )
+    now = datetime.utcnow()
+    day_ago = now - timedelta(hours=24)
+    async with AsyncSessionLocal() as s:
+        groups = list((await s.execute(
+            select(EchoGroup).order_by(EchoGroup.last_active_at.desc()).limit(40)
+        )).scalars().all())
+        refs = {r.chat_id: r for r in
+                (await s.execute(select(EchoReferralGroup))).scalars().all()}
+        lines = [f"🩺 GROUP HEALTH ({len(groups)})",
+                 "👑=admin · last msg seen · CAs/24h", ""]
+        live = 0
+        for g in groups:
+            last = g.last_active_at
+            if last is None:
+                ago, quiet = "never", True
+            else:
+                secs = (now - last).total_seconds()
+                quiet = secs > 6 * 3600
+                m = secs / 60.0
+                ago = (f"{int(m)}m" if m < 60 else
+                       f"{int(m/60)}h" if m < 1440 else f"{int(m/1440)}d")
+            r = refs.get(g.chat_id)
+            adm = "👑" if (r and r.is_admin) else "  "
+            cnt = (await s.execute(
+                select(func.count(EchoSighting.id)).where(
+                    EchoSighting.chat_id == g.chat_id, EchoSighting.seen_at >= day_ago)
+            )).scalar() or 0
+            if not quiet:
+                live += 1
+            flag = " ⚠️QUIET" if quiet else ""
+            lines.append(f"{adm} {(g.chat_title or str(g.chat_id))[:20]} — {ago} · {cnt}/24h{flag}")
+        lines += ["", f"✅ {live}/{len(groups)} active in last 6h"]
+    await message.reply("\n".join(lines) if groups else "No groups yet.", parse_mode="")
+
+
 @router.message(Command("echo_threshold"))
 async def cmd_threshold(message: Message) -> None:
     if not _ok(message):

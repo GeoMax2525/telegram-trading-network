@@ -75,17 +75,18 @@ async def _ingest(message: Message) -> None:
             logger.debug("echo: ingest error %s: %s", ca[:8], exc)
 
 
-_known_groups: set = set()
+# {chat_id: last DB-touch epoch} — refresh a group's last_active_at on ANY
+# message (throttled to once/60s) so /echo_health can tell, per group, when ECCO
+# last actually RECEIVED a message there (a bot can't list its own chats).
+_group_touch: dict = {}
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
 async def on_group_message(message: Message) -> None:
-    # Register the group the first time we see ANY message from it — so a group
-    # ECCO is already in shows on the board without re-adding (a bot can't list
-    # its own chats, but it does receive their messages). Once per chat/session.
     cid = message.chat.id
-    if cid not in _known_groups:
-        _known_groups.add(cid)
+    now = datetime.utcnow().timestamp()
+    if now - _group_touch.get(cid, 0.0) > 60:
+        _group_touch[cid] = now
         try:
             await core.ensure_group(cid, message.chat.title)
         except Exception:
