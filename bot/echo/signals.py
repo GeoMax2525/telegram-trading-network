@@ -152,6 +152,11 @@ async def _consensus_sweep(echo_bot) -> None:
 
 
 # ── Performance tracker ─────────────────────────────────────────────────────
+# Throttle GeckoTerminal history calls: {ca: last_pull_epoch}. In-memory is fine
+# (single tracker task); bounded since old CAs stop being re-checked.
+_last_hist_check: dict = {}
+
+
 async def echo_tracker_loop(echo_bot) -> None:
     """Track every Echo token's price/ATH, resolve win (>=2x) / loss (<2x after
     the resolution window) to drive the points engine, and post milestone
@@ -191,14 +196,17 @@ async def _tracker_tick(echo_bot) -> None:
         pending = list((await s.execute(
             select(EchoToken).where(EchoToken.resolved.is_(False)).limit(40)
         )).scalars().all())
-        # Resolved LOSSES stay watched for a while — a loss can still become a
-        # WIN if the token tops 2x days later ("based off the top of the call").
+        # Resolved tokens (wins AND losses) stay watched within the upgrade
+        # window so the PEAK keeps updating: a win that 2x-resolved on a 60s
+        # snapshot can run much higher between checks, and a loss can still top
+        # 2x days later. Rotate by least-recently-checked so all get revisited.
         upg_cutoff = now - timedelta(days=max_upg_days)
         upgradable = list((await s.execute(
             select(EchoToken).where(
-                EchoToken.status == "loss",
+                EchoToken.resolved.is_(True),
+                EchoToken.status != "void",
                 EchoToken.first_seen_at >= upg_cutoff,
-            ).limit(40)
+            ).order_by(EchoToken.last_checked_at.asc()).limit(40)
         )).scalars().all())
     tokens = pending + upgradable
 
@@ -220,21 +228,24 @@ async def _resolve_one_token(echo_bot, tok, now, win_mult, resolution_h,
 
     mc, liq, pair = await _price_mc(tok.ca)
 
-    # When a token is aging out (or a resolved loss) without a spot-confirmed
-    # 2x, pull its TRUE peak from price history so a spike missed between
-    # 60s spot checks still counts as a win. One history call per token, only
-    # when it matters — not every tick.
+    # Pull the TRUE peak from minute-candle history so a spike missed between
+    # 60s spot checks is captured — for aging unresolved tokens (finalize) AND
+    # recently-resolved wins/losses (their peak can still climb). Throttled to
+    # at most once / 8 min per token so GeckoTerminal isn't hammered.
     hist_ath = None
     try:
         tok_age_h = (now - (tok.first_seen_at or now)).total_seconds() / 3600.0
     except Exception:
         tok_age_h = 0.0
-    needs_hist = (
-        tok.first_mc is not None and (tok.ath_mult or 1.0) < win_mult
-        and tok.first_seen_at is not None
-        and ((not tok.resolved and tok_age_h >= resolution_h) or tok.status == "loss")
+    need_hist = (
+        tok.first_mc is not None and tok.first_seen_at is not None
+        and (
+            (not tok.resolved and tok_age_h >= resolution_h)
+            or (tok.resolved and tok.status in ("win", "loss") and tok_age_h <= 48.0)
+        )
     )
-    if needs_hist:
+    if need_hist and (now.timestamp() - _last_hist_check.get(tok.ca, 0.0)) >= 480:
+        _last_hist_check[tok.ca] = now.timestamp()
         hist_ath = await core.historical_ath_mult(tok.ca, tok.first_seen_at)
 
     upgraded = False
