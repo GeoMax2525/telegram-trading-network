@@ -64,6 +64,34 @@ async def _rug_ok(ca: str, pair) -> tuple[bool, str]:
         return False, f"rug_check_error:{exc}"
 
 
+async def capture_entry_mc(ca: str, chat_id: int, user_id) -> None:
+    """Snapshot the MC ~the instant a CA is called and store it on that sighting,
+    so each caller's entry reflects THEIR real entry (~2s) instead of the tracker's
+    next-tick backfill (~60s). Fire-and-forget — on any failure the tracker
+    backfill still fills it later, so nothing is lost."""
+    try:
+        mc, _liq, _pair = await _price_mc(ca)
+        if not mc or mc <= 0:
+            return
+        from database.models import AsyncSessionLocal, select, EchoSighting
+        async with AsyncSessionLocal() as s:
+            q = select(EchoSighting).where(
+                EchoSighting.ca == ca,
+                EchoSighting.chat_id == chat_id,
+                EchoSighting.entry_mc.is_(None),
+            )
+            if user_id is not None:
+                q = q.where(EchoSighting.user_id == user_id)
+            sg = (await s.execute(
+                q.order_by(EchoSighting.seen_at.desc())
+            )).scalars().first()
+            if sg is not None:
+                sg.entry_mc = mc
+                await s.commit()
+    except Exception as exc:
+        logger.debug("echo: entry MC capture %s: %s", ca[:8], exc)
+
+
 # Escalation tiers above the base threshold — a growing network gets LOUDER as
 # more pods pile onto the same call, instead of going silent after the first 4.
 _CONSENSUS_TIERS = [7, 10, 15, 20, 30, 50, 75, 100, 150, 200]

@@ -16,7 +16,7 @@ from aiogram.types import Message, ChatMemberUpdated
 from aiogram.client.default import DefaultBotProperties
 
 from bot.echo import core
-from bot.echo.signals import maybe_fire_signal, echo_tracker_loop
+from bot.echo.signals import maybe_fire_signal, echo_tracker_loop, capture_entry_mc
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -68,6 +68,8 @@ async def _ingest(message: Message) -> None:
                 username=(user.username or user.full_name) if user else None,
                 message_id=message.message_id, msg_link=link,
             )
+            # Snapshot this caller's entry MC right now (~2s), off the hot path.
+            asyncio.create_task(capture_entry_mc(ca, chat.id, user.id if user else None))
             if is_new_group:
                 # A new distinct group called this CA — re-check consensus.
                 await maybe_fire_signal(message.bot, ca)

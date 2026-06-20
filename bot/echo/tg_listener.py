@@ -94,6 +94,9 @@ async def ecco_tg_listener_loop() -> None:
                         user_id=user_id, username=username,
                         message_id=event.message.id, msg_link=link,
                     )
+                    # Snapshot this caller's entry MC now (~2s), off the hot path.
+                    from bot.echo.signals import capture_entry_mc
+                    asyncio.create_task(capture_entry_mc(ca, chat_id, user_id))
                 except Exception as exc:
                     logger.debug("ECCO TG listener: record %s: %s", ca[:8], exc)
             logger.info("ECCO TG listener: %d CA(s) in %s (bot_sender=%s)",
