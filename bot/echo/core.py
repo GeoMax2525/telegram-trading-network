@@ -622,10 +622,17 @@ async def hub_stats() -> dict:
                 "mult": (tok.ath_mult if tok else 1.0) or 1.0,
             })
 
-        # Recent calls feed — last 15 sightings, enriched with token name + status.
-        # Lets the operator confirm exactly which group/caller ECCO received in.
+        # Recent calls feed — last 15 distinct (CA, group) pairs, most recent
+        # sighting per pair. Deduped so a CA posted twice in the same group only
+        # shows once (the latest). Lets the operator confirm which group/caller
+        # ECCO received in without noise from repeat posts.
         calls_raw = list((await s.execute(
-            select(EchoSighting).order_by(EchoSighting.seen_at.desc()).limit(15)
+            select(EchoSighting).where(
+                EchoSighting.id.in_(
+                    select(func.max(EchoSighting.id)).group_by(
+                        EchoSighting.ca, EchoSighting.chat_id)
+                )
+            ).order_by(EchoSighting.seen_at.desc()).limit(15)
         )).scalars().all())
         recent_calls = []
         for sg in calls_raw:
