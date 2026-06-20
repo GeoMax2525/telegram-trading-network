@@ -241,7 +241,10 @@ async def _resolve_one_token(echo_bot, tok, now, win_mult, resolution_h,
         tok.first_mc is not None and tok.first_seen_at is not None
         and (
             (not tok.resolved and tok_age_h >= resolution_h)
-            or (tok.resolved and tok.status in ("win", "loss") and tok_age_h <= 48.0)
+            # Resolved tokens: keep capturing the true peak for the WHOLE upgrade
+            # window (the upgradable query already bounds this to max_upgrade_days)
+            # so a token that pumps days after the call still credits its ATH.
+            or (tok.resolved and tok.status in ("win", "loss"))
         )
     )
     if need_hist and (now.timestamp() - _last_hist_check.get(tok.ca, 0.0)) >= 480:
