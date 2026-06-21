@@ -693,13 +693,10 @@ async def quality_grade(ca: str, window_min: float) -> str:
 
 
 # ── Phanes points: pure bracket on the post-call return ─────────────────────
-def phanes_points(peak, _mc=None) -> float:
-    """Points from the post-call peak multiple — exactly the Phanes table,
-    no MC-tier scaling."""
-    m = float(peak or 0.0)
-    if m < 1.0:   return -2.0
-    if m < 1.3:   return -1.0
-    if m < 1.8:   return  0.0
+def phanes_points(mult, _mc=None) -> float:
+    """Points by return bracket. Wins scale with size; L=-1; rug=-2."""
+    m = float(mult or 0.0)
+    if m < 1.8:   return  0.0   # placeholder — wins/losses handled by status below
     if m < 5.0:   return  1.0
     if m < 10.0:  return  2.0
     if m < 20.0:  return  3.0
@@ -707,6 +704,15 @@ def phanes_points(peak, _mc=None) -> float:
     if m < 100.0: return  7.0
     if m < 200.0: return 10.0
     return 15.0
+
+
+def token_points(status: str, ath_mult: float) -> float:
+    """Simple flat scoring: wins scale by bracket, L=-1, rug=-2."""
+    if status == "win":
+        return phanes_points(ath_mult)
+    if status == "rug":
+        return -2.0
+    return -1.0  # loss
 
 
 async def _credit_status_only(ca: str, status: str) -> None:
@@ -756,7 +762,7 @@ async def apply_token_score(ca: str, peak_mc=None, win_mult: float = 2.0) -> Non
         if tok is None:
             return
         mult = float(tok.ath_mult or 1.0)
-        target = phanes_points(mult)
+        target = token_points(tok.status, mult)
         is_win = tok.status == "win"
         # awarded_points repurposed: last ath_mult scored. Skip if unchanged.
         if float(tok.awarded_points or 0.0) == mult and bool(tok.score_win) == is_win:
