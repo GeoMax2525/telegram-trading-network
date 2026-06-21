@@ -164,9 +164,11 @@ async def _set_commands(echo_bot) -> None:
         BotCommandScopeDefault, BotCommandScopeChat,
     )
     try:
-        # Groups: only /pod (rankings + that group's own stats — no cross-group data).
+        # Groups: pod + rug/loser leaderboards (all group-specific, no cross-group leak).
         await echo_bot.set_my_commands([
-            BotCommand(command="pod", description="Pod rankings + your group's stats"),
+            BotCommand(command="pod",    description="Pod rankings + your group's stats"),
+            BotCommand(command="rugs",   description="Top rug callers in this group"),
+            BotCommand(command="losers", description="Worst performers in this group"),
         ], scope=BotCommandScopeAllGroupChats())
         # Everyone else (non-allowed users): only the public commands that
         # actually work for them — so they never see a command that does nothing.

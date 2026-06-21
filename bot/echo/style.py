@@ -116,6 +116,48 @@ def pod_screen(groups: list, own: dict | None = None, total: int = 0) -> str:
     return box("POD RANKINGS", lines)
 
 
+def _caller_row(i: int, u: dict, show_rugs: bool = False) -> str:
+    name = _handle((u.get("username") or str(u["user_id"]))[:14])
+    calls = u["calls"]
+    if show_rugs:
+        rugs = u["rugs"]
+        rug_rate = f"{round(100*rugs/calls)}%" if calls else "—"
+        return f"{i:>2}. {name:<16} {rugs}💀 / {calls} calls ({rug_rate} rug rate)"
+    pts_sign = "+" if u.get("pts", 0) >= 0 else ""
+    return (f"{i:>2}. {name:<16} {u['wins']}W/{u['losses']}L"
+            f"  avg {u['avg_x']:.1f}x")
+
+
+def rugs_screen(callers: list, group_title: str = "") -> str:
+    """Top rug callers in a group (or across the network)."""
+    header = f"TOP RUG CALLERS — {group_title[:20]}" if group_title else "TOP RUG CALLERS (NETWORK)"
+    if not callers:
+        return box(header, ["No rugs recorded yet."])
+    lines = []
+    for i, u in enumerate(callers[:10], 1):
+        lines.append(_caller_row(i, u, show_rugs=True))
+        non_rug_xs = []  # avg X excluding rugs — shows if they're still catching runners
+        lines[-1] += f"  avg {u['avg_x']:.1f}x"
+    return box(header, lines)
+
+
+def losers_screen(callers: list, group_title: str = "") -> str:
+    """Worst performers in a group (or across the network)."""
+    header = f"BOTTOM PERFORMERS — {group_title[:20]}" if group_title else "BOTTOM PERFORMERS (NETWORK)"
+    if not callers:
+        return box(header, ["No resolved calls yet."])
+    lines = []
+    for i, u in enumerate(callers[:10], 1):
+        total = u["calls"]
+        loss_rate = f"{round(100*(u['losses'])/total)}%" if total else "—"
+        name = _handle((u.get("username") or str(u["user_id"]))[:14])
+        lines.append(
+            f"{i:>2}. {name:<16} {u['wins']}W/{u['losses']}L"
+            f"  avg {u['avg_x']:.1f}x  ({loss_rate} loss rate)"
+        )
+    return box(header, lines)
+
+
 def pod_rankings(groups: list) -> str:
     lines = []
     for i, g in enumerate(groups, 1):

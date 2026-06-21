@@ -33,7 +33,7 @@ def _op_dm(message: Message) -> bool:
     return _op(message.from_user) and message.chat.type == "private"
 
 
-# ── PUBLIC: /pod — the only command that works in groups ────────────────────
+# ── PUBLIC: /pod, /rugs, /losers — work in groups ───────────────────────────
 @router.message(Command("pod"))
 async def cmd_pod(message: Message) -> None:
     own = None
@@ -44,6 +44,34 @@ async def cmd_pod(message: Message) -> None:
         style.pod_screen(await core.top_groups(10), own, total),
         parse_mode="Markdown",
     )
+
+
+@router.message(Command("rugs"))
+async def cmd_rugs(message: Message) -> None:
+    """Top rug callers. In a group → that group only. Operator DM → network."""
+    in_group = message.chat.type in ("group", "supergroup")
+    if not in_group and not _op_dm(message):
+        return
+    chat_id = message.chat.id if in_group else None
+    title = message.chat.title if in_group else ""
+    callers = await core.group_caller_stats(chat_id)
+    callers = [c for c in callers if c["rugs"] > 0]
+    callers.sort(key=lambda c: (-c["rugs"], c["avg_x"]))
+    await message.answer(style.rugs_screen(callers, title), parse_mode="Markdown")
+
+
+@router.message(Command("losers"))
+async def cmd_losers(message: Message) -> None:
+    """Worst performers. In a group → that group only. Operator DM → network."""
+    in_group = message.chat.type in ("group", "supergroup")
+    if not in_group and not _op_dm(message):
+        return
+    chat_id = message.chat.id if in_group else None
+    title = message.chat.title if in_group else ""
+    callers = await core.group_caller_stats(chat_id)
+    callers = [c for c in callers if c["calls"] > 0]
+    callers.sort(key=lambda c: (-(c["losses"]), c["avg_x"]))
+    await message.answer(style.losers_screen(callers, title), parse_mode="Markdown")
 
 
 # ── PUBLIC, DM-only: /rank — your own standing ──────────────────────────────

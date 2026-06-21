@@ -512,6 +512,57 @@ async def user_avg_x(user_id: int) -> float:
     return float(avg or 0.0)
 
 
+async def group_caller_stats(chat_id: int | None = None) -> list[dict]:
+    """Per-caller breakdown: wins/losses/rugs/calls/avg_x.
+    chat_id=None → cross-group (all callers across the whole network).
+    Each (user, token) pair counted once regardless of how many times posted."""
+    from database.models import AsyncSessionLocal, select, EchoSighting, EchoToken
+    async with AsyncSessionLocal() as s:
+        q = (
+            select(EchoSighting.user_id, EchoSighting.username,
+                   EchoToken.ca, EchoToken.status, EchoToken.ath_mult)
+            .join(EchoToken, EchoToken.ca == EchoSighting.ca)
+            .where(
+                EchoSighting.user_id.isnot(None),
+                EchoSighting.is_bot.is_(False),
+                EchoToken.resolved.is_(True),
+            )
+        )
+        if chat_id is not None:
+            q = q.where(EchoSighting.chat_id == chat_id)
+        rows = (await s.execute(q)).all()
+
+    seen: set = set()
+    users: dict = {}
+    for r in rows:
+        key = (r.user_id, r.ca)
+        if key in seen:
+            continue
+        seen.add(key)
+        if r.user_id not in users:
+            users[r.user_id] = {
+                "user_id": r.user_id, "username": r.username,
+                "calls": 0, "wins": 0, "losses": 0, "rugs": 0, "xs": [],
+            }
+        u = users[r.user_id]
+        u["calls"] += 1
+        if r.status == "win":
+            u["wins"] += 1
+        elif r.status == "rug":
+            u["rugs"] += 1; u["losses"] += 1
+        elif r.status == "loss":
+            u["losses"] += 1
+        if r.ath_mult:
+            u["xs"].append(float(r.ath_mult))
+
+    out = []
+    for u in users.values():
+        u["avg_x"] = round(sum(u["xs"]) / len(u["xs"]), 2) if u["xs"] else 0.0
+        del u["xs"]
+        out.append(u)
+    return out
+
+
 async def group_stats(chat_id: int) -> dict | None:
     """A single group's own stats block (for the /pod 'YOUR POD' section)."""
     from database.models import AsyncSessionLocal, EchoGroup
