@@ -3492,7 +3492,7 @@ AGENT_PARAM_DEFAULTS = {
     "pf_stream_enabled":           0.0,   # 0 = off, 1 = on
 
     # ── Echo (Trojan Horse signal bot) tuning ───────────────────────────────
-    "echo_consensus_threshold":  4.0,    # same CA in N+ distinct groups -> alert
+    "echo_consensus_threshold":  3.0,    # same CA in N+ distinct groups -> alert
     "echo_broadcast_all_admins": 1.0,    # 1 = consensus alerts go to ALL admin groups (network-wide), not just callers
     "echo_active_window_min":    60.0,   # sightings within this window count toward consensus
     "echo_resolution_hours":     24.0,   # token marked loss (<2x) after this long

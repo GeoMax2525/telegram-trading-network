@@ -184,28 +184,36 @@ async def cmd_set_referrer(message: Message) -> None:
 
 @router.message(Command("echo_rescore"))
 async def cmd_rescore(message: Message) -> None:
-    """Re-score all resolved tokens with the current formula (no wipe needed).
-    Use after a scoring formula change — applies the delta so W/L counters are
-    preserved and only the points difference is credited/debited."""
+    """Re-score all resolved tokens with the current formula from scratch.
+    Resets group/user points+calls+wins+losses to 0, clears the score ledger,
+    then re-applies every resolved token so the final numbers are clean."""
     if not _ok(message):
         return
-    from database.models import AsyncSessionLocal, select, EchoToken, EchoScore
+    from database.models import (
+        AsyncSessionLocal, select, EchoToken, EchoScore, EchoGroup, EchoUser,
+    )
     from bot.echo.core import apply_token_score
     await message.reply("⏳ Re-scoring resolved tokens…", parse_mode="")
     async with AsyncSessionLocal() as s:
+        # 1. Zero all group + user counters so re-scoring starts fresh.
+        for g in (await s.execute(select(EchoGroup))).scalars().all():
+            g.points = 0.0; g.wins = 0; g.losses = 0; g.calls = 0
+        for u in (await s.execute(select(EchoUser))).scalars().all():
+            u.points = 0.0; u.wins = 0; u.losses = 0; u.calls = 0
+        # 2. Clear the per-token score ledger + awarded_points bookkeeping.
+        for sc in (await s.execute(select(EchoScore))).scalars().all():
+            await s.delete(sc)
         tokens = list((await s.execute(
             select(EchoToken).where(
                 EchoToken.resolved.is_(True),
                 EchoToken.status != "void",
             )
         )).scalars().all())
-        # Clear the ledger so apply_token_score treats every token as fresh
-        # (needed when the formula itself changes, not just the peak).
-        for sc in (await s.execute(select(EchoScore))).scalars().all():
-            await s.delete(sc)
         for t in tokens:
             t.awarded_points = 0.0
         await s.commit()
+    # 3. Re-score each token — apply_token_score now starts from 0 so points
+    #    are set (not added on top of stale values).
     n = 0
     for tok in tokens:
         try:
