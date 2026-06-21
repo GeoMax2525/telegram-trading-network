@@ -712,6 +712,32 @@ async def init_db() -> None:
             ("score_win", "BOOLEAN DEFAULT FALSE", "BOOLEAN DEFAULT 0"),
             ("signal_tier", "INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
         ]
+        # echo_sightings — is_bot flag to reliably exclude bot senders from scoring.
+        for col, pg_def, lite_def in [
+            ("is_bot", "BOOLEAN DEFAULT FALSE", "BOOLEAN DEFAULT 0"),
+        ]:
+            if is_postgres:
+                await conn.execute(text(
+                    f"ALTER TABLE echo_sightings ADD COLUMN IF NOT EXISTS {col} {pg_def}"
+                ))
+            else:
+                try:
+                    await conn.execute(text(
+                        f"ALTER TABLE echo_sightings ADD COLUMN {col} {lite_def}"
+                    ))
+                except Exception:
+                    pass
+        # Backfill is_bot=True for existing sightings from known bot patterns.
+        if is_postgres:
+            await conn.execute(text(
+                "UPDATE echo_sightings SET is_bot = TRUE WHERE "
+                "username ILIKE '%bot' OR username ILIKE 'sectleaderboard%'"
+            ))
+        else:
+            await conn.execute(text(
+                "UPDATE echo_sightings SET is_bot = 1 WHERE "
+                "lower(username) LIKE '%bot' OR lower(username) LIKE 'sectleaderboard%'"
+            ))
         for col, pg_def, lite_def in _echo_token_cols:
             if is_postgres:
                 await conn.execute(text(
@@ -2604,6 +2630,7 @@ class EchoSighting(Base):
     token_name   = Column(String, nullable=True)
     token_symbol = Column(String, nullable=True)
     entry_mc     = Column(Float, nullable=True)   # MC snapshot at first sighting
+    is_bot       = Column(Boolean, default=False) # sender was a Telegram bot
     seen_at      = Column(DateTime, default=datetime.utcnow, index=True)
 
 

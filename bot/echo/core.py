@@ -151,7 +151,7 @@ async def is_blacklisted(chat_id: int | None, user_id: int | None) -> bool:
 
 async def record_sighting(*, ca, chat_id, chat_title, user_id, username,
                           message_id, msg_link, token_name=None, token_symbol=None,
-                          entry_mc=None) -> bool:
+                          entry_mc=None, is_bot=False) -> bool:
     """Record one CA sighting + ensure group/user/token rows. Returns True if
     this is a NEW (ca, chat_id) pair (i.e. counts toward consensus)."""
     from database.models import (
@@ -172,7 +172,7 @@ async def record_sighting(*, ca, chat_id, chat_title, user_id, username,
             ca=ca, chat_id=chat_id, chat_title=chat_title, user_id=user_id,
             username=username, message_id=message_id, message_link=msg_link,
             token_name=token_name, token_symbol=token_symbol, entry_mc=entry_mc,
-            seen_at=now,
+            is_bot=is_bot, seen_at=now,
         ))
 
         grp = await s.get(EchoGroup, chat_id)
@@ -779,23 +779,16 @@ async def apply_token_score(ca: str, peak_mc=None, win_mult: float = 2.0) -> Non
             .order_by(EchoSighting.seen_at.asc())
         )).scalars().all())
 
-        def _is_bot(sg) -> bool:
-            """Catch bots by username pattern — covers old sightings where
-            user_id was set before the ingest-level bot filter landed."""
-            u = (sg.username or "").lower().rstrip()
-            return u.endswith("bot") or u.endswith("_bot")
-
         # first_caller[chat_id] = first HUMAN user_id to call this CA there.
-        # Groups where only a bot ever called it are excluded entirely — those
-        # calls shouldn't count toward the group's record.
+        # Uses the is_bot flag (set at ingest from user.is_bot, backfilled for
+        # old sightings in the migration). Groups where only bots called it are
+        # excluded entirely — those calls don't count toward the group's record.
         first_caller: dict = {}
         for sg in sightings:
-            if sg.chat_id is None:
+            if sg.chat_id is None or sg.chat_id in first_caller:
                 continue
-            if sg.chat_id in first_caller:
+            if sg.is_bot or sg.user_id is None:
                 continue
-            if _is_bot(sg) or sg.user_id is None:
-                continue  # skip bot / anon sightings
             first_caller[sg.chat_id] = sg.user_id
 
         async def _already_scored(kind: str, eid: int) -> bool:
