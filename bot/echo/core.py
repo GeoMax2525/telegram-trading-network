@@ -749,66 +749,39 @@ async def _credit_status_only(ca: str, status: str) -> None:
 
 
 async def apply_token_score(ca: str, peak_mc=None, win_mult: float = 2.0) -> None:
-    """Score every group + caller that called this token using the token's own
-    ath_mult — same multiple for everyone, same as how Phanes works at the token
-    level. Win = token hit 2x (status='win'). Points = Phanes bracket of ath_mult.
-    EchoScore ledger makes it incremental: re-running applies only the delta so a
-    runner climbing brackets or a loss flipping to a win updates cleanly."""
-    from database.models import (
-        AsyncSessionLocal, select, EchoToken, EchoSighting, EchoGroup, EchoUser, EchoScore,
-    )
+    """Credit every group + caller that sighted this CA with the token's score.
+    Dead simple — no ledger, no per-caller MC, no complex queries that can fail.
+    Called by the tracker on resolution and by /echo_rescore (which zeroes first)."""
+    from database.models import AsyncSessionLocal, select, EchoToken, EchoSighting, EchoGroup, EchoUser
     async with AsyncSessionLocal() as s:
         tok = await s.get(EchoToken, ca)
-        if tok is None:
+        if tok is None or tok.status in ("tracking", "void"):
             return
-        mult = float(tok.ath_mult or 1.0)
-        target = token_points(tok.status, mult)
+        mult   = float(tok.ath_mult or 1.0)
+        pts    = token_points(tok.status, mult)
         is_win = tok.status == "win"
-        # awarded_points repurposed: last ath_mult scored. Skip if unchanged.
-        if float(tok.awarded_points or 0.0) == mult and bool(tok.score_win) == is_win:
-            return
-
         sightings = (await s.execute(
             select(EchoSighting).where(EchoSighting.ca == ca)
         )).scalars().all()
-        seen_g: set[int] = set()
-        seen_u: set[int] = set()
+        seen_g: set = set()
+        seen_u: set = set()
         for sg in sightings:
-            for kind, model, eid in [
-                ("group", EchoGroup, sg.chat_id),
-                ("user",  EchoUser,  sg.user_id),
-            ]:
-                if eid is None or eid in (seen_g if kind == "group" else seen_u):
-                    continue
-                (seen_g if kind == "group" else seen_u).add(eid)
-                ent = await s.get(model, eid)
-                if ent is None or ent.blacklisted:
-                    continue
-                row = (await s.execute(
-                    select(EchoScore).where(
-                        EchoScore.ca == ca, EchoScore.kind == kind,
-                        EchoScore.entity_id == eid)
-                )).scalars().first()
-                if row is None:
-                    ent.points = round((ent.points or 0) + target, 2)
-                    ent.calls  = (ent.calls  or 0) + 1
-                    ent.wins   = (ent.wins   or 0) + (1 if is_win else 0)
-                    ent.losses = (ent.losses or 0) + (0 if is_win else 1)
-                    s.add(EchoScore(ca=ca, kind=kind, entity_id=eid,
-                                    points=target, is_win=is_win))
-                else:
-                    d = round(target - float(row.points or 0), 2)
-                    if abs(d) >= 0.01:
-                        ent.points = round((ent.points or 0) + d, 2)
-                    if bool(row.is_win) != is_win:
-                        if is_win:
-                            ent.wins   = (ent.wins   or 0) + 1
-                            ent.losses = max(0, (ent.losses or 0) - 1)
-                        else:
-                            ent.losses = (ent.losses or 0) + 1
-                            ent.wins   = max(0, (ent.wins   or 0) - 1)
-                    row.points = target
-                    row.is_win = is_win
+            if sg.chat_id is not None and sg.chat_id not in seen_g:
+                seen_g.add(sg.chat_id)
+                g = await s.get(EchoGroup, sg.chat_id)
+                if g and not g.blacklisted:
+                    g.calls   = (g.calls   or 0) + 1
+                    g.wins    = (g.wins    or 0) + (1 if is_win else 0)
+                    g.losses  = (g.losses  or 0) + (0 if is_win else 1)
+                    g.points  = round((g.points or 0) + pts, 2)
+            if sg.user_id is not None and sg.user_id not in seen_u:
+                seen_u.add(sg.user_id)
+                u = await s.get(EchoUser, sg.user_id)
+                if u and not u.blacklisted:
+                    u.calls   = (u.calls   or 0) + 1
+                    u.wins    = (u.wins    or 0) + (1 if is_win else 0)
+                    u.losses  = (u.losses  or 0) + (0 if is_win else 1)
+                    u.points  = round((u.points or 0) + pts, 2)
         tok.awarded_points = mult
         tok.score_win = is_win
         await s.commit()
