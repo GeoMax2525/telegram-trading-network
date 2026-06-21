@@ -705,11 +705,23 @@ async def hub_stats() -> dict:
                 "seen_at": sg.seen_at,
             })
 
+    # Rugs + losers leaderboards (network-wide, for the operator dashboard).
+    all_callers = await group_caller_stats(None)
+    top_ruggers = sorted(
+        [c for c in all_callers if c["rugs"] > 0],
+        key=lambda c: (-c["rugs"], c["avg_x"])
+    )[:5]
+    top_losers = sorted(
+        [c for c in all_callers if c["losses"] > 0],
+        key=lambda c: (-c["losses"], c["avg_x"])
+    )[:5]
+
     return {
         "n_groups": n_groups, "n_users": n_users, "n_sightings": n_sightings,
         "n_signals": n_signals, "n_wins": n_wins, "n_losses": n_losses,
         "top_groups": top_groups, "top_users": top_users, "recent": recent,
         "recent_calls": recent_calls,
+        "top_ruggers": top_ruggers, "top_losers": top_losers,
     }
 
 

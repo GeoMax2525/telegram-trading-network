@@ -236,6 +236,24 @@ def hub_dashboard(st: dict, footer: str = "") -> str:
             L.append(f"{tag:<20}{u['wins']}W/{u['losses']}L ({_wr(u['wins'], u['losses'])})  avg {u.get('avg_x', 0):.1f}x  {u['points']:+.0f}pts")
     else:
         L.append("(no echoers yet)")
+    L.append("")
+    L.append("💀 TOP RUGGERS")
+    if st.get("top_ruggers"):
+        for i, u in enumerate(st["top_ruggers"], 1):
+            name = _handle((u.get("username") or str(u["user_id"]))[:14])
+            rug_rate = f"{round(100*u['rugs']/u['calls'])}%" if u["calls"] else "—"
+            L.append(f"{i}. {name:<16} {u['rugs']}💀 / {u['calls']} calls  {rug_rate}  avg {u['avg_x']:.1f}x")
+    else:
+        L.append("(no rugs yet)")
+    L.append("")
+    L.append("📉 WORST PERFORMERS")
+    if st.get("top_losers"):
+        for i, u in enumerate(st["top_losers"], 1):
+            name = _handle((u.get("username") or str(u["user_id"]))[:14])
+            loss_rate = f"{round(100*u['losses']/u['calls'])}%" if u["calls"] else "—"
+            L.append(f"{i}. {name:<16} {u['wins']}W/{u['losses']}L  avg {u['avg_x']:.1f}x  ({loss_rate} loss rate)")
+    else:
+        L.append("(no losses yet)")
     L += ["", "📡 RECENT SIGNALS"]
     if st["recent"]:
         for r in st["recent"]:
