@@ -237,7 +237,7 @@ def hub_dashboard(st: dict, footer: str = "") -> str:
     else:
         L.append("(no echoers yet)")
     L.append("")
-    L.append("💀 TOP RUGGERS")
+    L.append("💀 TOP RUGS")
     if st.get("top_ruggers"):
         for i, u in enumerate(st["top_ruggers"], 1):
             name = _handle((u.get("username") or str(u["user_id"]))[:14])
