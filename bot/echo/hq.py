@@ -212,29 +212,14 @@ async def cmd_rescore(message: Message) -> None:
             t.awarded_points = 0.0
         await s.commit()
 
-    n, skipped = 0, 0
+    n = 0
     for tok in tokens:
         try:
-            peak = tok.ath_mc
-            if not peak and tok.ath_mult and tok.first_mc:
-                peak = float(tok.ath_mult) * float(tok.first_mc)
-            if not peak:
-                # Token has no price data at all — credit it as a win/loss based
-                # on status so it doesn't disappear from the record.
-                if tok.status == "win":
-                    await _credit_status_only(tok.ca, "win")
-                elif tok.status in ("loss", "rug"):
-                    await _credit_status_only(tok.ca, tok.status)
-                skipped += 1
-                continue
-            await apply_token_score(tok.ca, peak)
+            await apply_token_score(tok.ca)
             n += 1
         except Exception:
-            skipped += 1
-    await message.reply(
-        f"✅ Re-scored {n} tokens. {skipped} used status fallback (no price data).",
-        parse_mode=""
-    )
+            pass
+    await message.reply(f"✅ Re-scored {n} tokens.", parse_mode="")
 
 
 @router.message(Command("echo_reset_scores"))
