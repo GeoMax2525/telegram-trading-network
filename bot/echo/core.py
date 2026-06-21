@@ -771,14 +771,19 @@ async def apply_token_score(ca: str, peak_mc, win_mult: float = 2.0) -> None:
             select(EchoSighting).where(EchoSighting.ca == ca).order_by(EchoSighting.seen_at.asc())
         )).scalars().all()
         fb = tok.first_mc  # fallback entry when a caller's snapshot is missing
+        # Last resort: if first_mc is also missing, derive a synthetic $1 entry
+        # from peak / ath_mult so the return ratio is still correct.
+        # This means no caller is ever skipped just because pricing data is absent.
+        ath = float(tok.ath_mult or 1.0)
+        fb_synthetic = (peak / ath) if (not fb and ath > 0) else None
         g_entry: dict = {}
         u_entry: dict = {}
         for sg in sightings:
             mc = sg.entry_mc if (sg.entry_mc and sg.entry_mc > 0) else None
             if sg.chat_id is not None and sg.chat_id not in g_entry:
-                g_entry[sg.chat_id] = mc or fb
+                g_entry[sg.chat_id] = mc or fb or fb_synthetic
             if sg.user_id is not None and sg.user_id not in u_entry:
-                u_entry[sg.user_id] = mc or fb
+                u_entry[sg.user_id] = mc or fb or fb_synthetic
 
         async def _score(kind, model, entry_map):
             for eid, entry in entry_map.items():
