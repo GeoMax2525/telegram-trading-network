@@ -60,8 +60,9 @@ async def cmd_rank(message: Message) -> None:
 # ── PUBLIC, DM-only: /start (captures referrals) + /referral ────────────────
 def _ref_link(bot_username: str, user_id) -> str:
     """Referral link that opens Telegram's group picker. When an admin selects
-    a group, ECCO is added and the sharer automatically gets referral credit."""
-    return f"https://t.me/{bot_username}?startgroup=ref_{user_id}"
+    a group, ECCO is added and the sharer automatically gets referral credit.
+    Payload uses 'r' prefix (no underscore) to avoid Markdown parse errors."""
+    return f"https://t.me/{bot_username}?startgroup=r{user_id}"
 
 
 @router.message(CommandStart())
@@ -74,8 +75,8 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
     # Telegram sends /start ref_XXX into the group. Record the credit immediately
     # — this overrides any auto-detected adder credit since it's explicit intent.
     if message.chat.type in ("group", "supergroup"):
-        if payload.startswith("ref_") and payload[4:].isdigit():
-            referrer_id = int(payload[4:])
+        if payload.startswith("r") and payload[1:].isdigit():
+            referrer_id = int(payload[1:])
             try:
                 member_count = await message.bot.get_chat_member_count(message.chat.id)
             except Exception:
