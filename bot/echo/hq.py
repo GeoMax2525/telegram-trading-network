@@ -217,7 +217,13 @@ async def cmd_rescore(message: Message) -> None:
     n = 0
     for tok in tokens:
         try:
-            await apply_token_score(tok.ca, tok.ath_mc)
+            # Use ath_mc if available; fall back to ath_mult*first_mc for tokens
+            # where price fetch failed (apply_token_score handles this too but
+            # being explicit here avoids a silent skip).
+            peak = tok.ath_mc or (
+                (tok.ath_mult or 1.0) * tok.first_mc if tok.first_mc else None
+            )
+            await apply_token_score(tok.ca, peak)
             n += 1
         except Exception:
             pass

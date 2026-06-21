@@ -601,8 +601,10 @@ async def hub_stats() -> dict:
                 "top_echoer": await _top_echoer_for_group(s, g.chat_id),
             })
 
+        # Only show echoers with at least 1 point — 0-0 users waste space.
         users_raw = list((await s.execute(
-            select(EchoUser).order_by(EchoUser.points.desc()).limit(10))).scalars().all())
+            select(EchoUser).where(EchoUser.points >= 1)
+            .order_by(EchoUser.points.desc()).limit(10))).scalars().all())
         top_users = []
         for u in users_raw:
             top_users.append({
@@ -714,11 +716,15 @@ async def apply_token_score(ca: str, peak_mc, win_mult: float = 2.0) -> None:
         AsyncSessionLocal, select, EchoToken, EchoSighting, EchoGroup, EchoUser, EchoScore,
     )
     peak = float(peak_mc or 0.0)
-    if peak <= 0:
-        return
     async with AsyncSessionLocal() as s:
         tok = await s.get(EchoToken, ca)
         if tok is None:
+            return
+        # ath_mc can be NULL if the price fetch failed at resolution time.
+        # Reconstruct from ath_mult * first_mc so the token isn't stuck tracking.
+        if peak <= 0 and tok.ath_mult and tok.first_mc:
+            peak = float(tok.ath_mult) * float(tok.first_mc)
+        if peak <= 0:
             return
         last = float(tok.awarded_points or 0.0)   # repurposed: peak MC at last score
         if last > 0 and peak <= last * 1.0001:
