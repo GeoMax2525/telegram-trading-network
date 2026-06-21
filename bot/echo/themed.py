@@ -58,26 +58,48 @@ async def cmd_rank(message: Message) -> None:
 
 
 # ── PUBLIC, DM-only: /start (captures referrals) + /referral ────────────────
+def _ref_link(bot_username: str, user_id) -> str:
+    """Referral link that opens Telegram's group picker. When an admin selects
+    a group, ECCO is added and the sharer automatically gets referral credit."""
+    return f"https://t.me/{bot_username}?startgroup=ref_{user_id}"
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject) -> None:
-    if message.chat.type != "private":
-        return
+    """DM /start — show welcome. Group /start ref_XXX — record referral credit."""
     u = message.from_user
+    payload = (command.args or "").strip()
+
+    # Group flow: someone added ECCO via a referral link (?startgroup=ref_XXX).
+    # Telegram sends /start ref_XXX into the group. Record the credit immediately
+    # — this overrides any auto-detected adder credit since it's explicit intent.
+    if message.chat.type in ("group", "supergroup"):
+        if payload.startswith("ref_") and payload[4:].isdigit():
+            referrer_id = int(payload[4:])
+            try:
+                member_count = await message.bot.get_chat_member_count(message.chat.id)
+            except Exception:
+                member_count = None
+            await core.record_bot_membership(
+                message.chat.id, referrer_id, None, message.chat.title,
+                is_admin=True, active=True, member_count=member_count,
+            )
+            logger.info("ecco: referral credit %s -> group %s via startgroup link",
+                        referrer_id, message.chat.id)
+        return
+
+    # DM flow — standard welcome screen.
     if u:
         await core.upsert_referrer_username(u.id, u.username or u.full_name)
-    payload = (command.args or "").strip()
-    if payload.isdigit() and u:
-        await core.set_referred_by(u.id, int(payload))  # credited to the sharer
     me = await message.bot.get_me()
-    ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
-    add_link = f"https://t.me/{me.username}?startgroup=true"
+    ref_link = _ref_link(me.username, u.id if u else "")
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 My Referral Stats", callback_data="echo:referral")],
-        [InlineKeyboardButton(text="➕ Add ECCO to a group", url=add_link)],
+        [InlineKeyboardButton(text="➕ Add ECCO to a group", url=ref_link)],
     ])
     await message.answer(
-        style.welcome(core.ECCO_CONTACT) + f"\n\n🔗 Your referral link: {ref_link}",
+        style.welcome(core.ECCO_CONTACT) + f"\n\n🔗 Your referral link:\n{ref_link}",
         parse_mode="Markdown",
         reply_markup=kb,
     )
@@ -85,16 +107,14 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("shill"))
 async def cmd_shill(message: Message) -> None:
-    """Hands the user a forwardable recruit-a-group promo with their referral
-    link baked in (so they get the credit)."""
     if message.chat.type != "private":
         return
     u = message.from_user
     if u:
         await core.upsert_referrer_username(u.id, u.username or u.full_name)
     me = await message.bot.get_me()
-    ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
-    await message.answer("📡 Forward the message below to any group to recruit it — you get the credit:")
+    ref_link = _ref_link(me.username, u.id if u else "")
+    await message.answer("📡 Forward the message below to recruit a group — you get the credit:")
     await message.answer(style.shill(ref_link, core.ECCO_CONTACT), parse_mode="Markdown")
 
 
@@ -107,13 +127,12 @@ async def cmd_referral(message: Message) -> None:
         if u:
             await core.upsert_referrer_username(u.id, u.username or u.full_name)
         me = await message.bot.get_me()
-        ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
-        add_link = f"https://t.me/{me.username}?startgroup=true"
+        ref_link = _ref_link(me.username, u.id if u else "")
         stats = await core.user_referral_stats(u.id if u else 0)
         board = await core.referral_leaderboard(5)
         await message.answer(
             style.referral_screen(stats, board)
-            + f"\n\n🔗 Your referral link: {ref_link}\n➕ Add to a group: {add_link}",
+            + f"\n\n🔗 Share this link — when someone adds ECCO via it, you get credit:\n{ref_link}",
             parse_mode="Markdown",
         )
     except Exception as exc:
@@ -182,12 +201,11 @@ async def on_nav(cb: CallbackQuery) -> None:
         elif action == "referral":
             u = cb.from_user
             me = await cb.bot.get_me()
-            ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
-            add_link = f"https://t.me/{me.username}?startgroup=true"
+            ref_link = _ref_link(me.username, u.id if u else "")
             stats = await core.user_referral_stats(u.id if u else 0)
             board = await core.referral_leaderboard(5)
             text = (style.referral_screen(stats, board)
-                    + f"\n\n🔗 Your referral link: {ref_link}\n➕ Add to a group: {add_link}")
+                    + f"\n\n🔗 Share this link — when someone adds ECCO via it, you get credit:\n{ref_link}")
             kb = None
         else:
             text, kb = await _dive_text(), style.kb_menu()
