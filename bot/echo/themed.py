@@ -71,9 +71,15 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
     me = await message.bot.get_me()
     ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
     add_link = f"https://t.me/{me.username}?startgroup=true"
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 My Referral Stats", callback_data="echo:referral")],
+        [InlineKeyboardButton(text="➕ Add ECCO to a group", url=add_link)],
+    ])
     await message.answer(
-        style.welcome(core.ECCO_CONTACT) + f"\n\n➕ Add ECCO to a group: {add_link}\n🔗 Your referral link: {ref_link}",
+        style.welcome(core.ECCO_CONTACT) + f"\n\n🔗 Your referral link: {ref_link}",
         parse_mode="Markdown",
+        reply_markup=kb,
     )
 
 
@@ -155,13 +161,15 @@ async def cmd_waves(message: Message) -> None:
 # ── Inline-button navigation (operator DM only) ─────────────────────────────
 @router.callback_query(F.data.startswith("echo:"))
 async def on_nav(cb: CallbackQuery) -> None:
-    if not _op(cb.from_user) or not cb.message or cb.message.chat.type != "private":
+    action = (cb.data or "").split(":", 1)[-1]
+    # Referral stats are public (anyone can check their own standing).
+    # All other echo: callbacks are operator-only and DM-only.
+    if action != "referral" and (not _op(cb.from_user) or not cb.message or cb.message.chat.type != "private"):
         try:
             await cb.answer()
         except Exception:
             pass
         return
-    action = (cb.data or "").split(":", 1)[-1]
     try:
         if action == "pod":
             text, kb = style.pod_screen(await core.top_groups(10), total=await core.network_group_count()), None
@@ -171,6 +179,16 @@ async def on_nav(cb: CallbackQuery) -> None:
             text, kb = style.sonar_sweep(await core.active_signals(12)), None
         elif action == "waves":
             text, kb = style.waves_help(), None
+        elif action == "referral":
+            u = cb.from_user
+            me = await cb.bot.get_me()
+            ref_link = f"https://t.me/{me.username}?start={u.id if u else ''}"
+            add_link = f"https://t.me/{me.username}?startgroup=true"
+            stats = await core.user_referral_stats(u.id if u else 0)
+            board = await core.referral_leaderboard(5)
+            text = (style.referral_screen(stats, board)
+                    + f"\n\n🔗 Your referral link: {ref_link}\n➕ Add to a group: {add_link}")
+            kb = None
         else:
             text, kb = await _dive_text(), style.kb_menu()
         # Refresh (dive) edits in place; other views post a new message below.
