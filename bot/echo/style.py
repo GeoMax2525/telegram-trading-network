@@ -111,8 +111,8 @@ def pod_screen(groups: list, own: dict | None = None, total: int = 0) -> str:
             f"Record: {own['wins']}W / {own['losses']}L ({_wr(own['wins'], own['losses'])})   {own['points']:+.0f} pts",
         ]
         if own["top_echoer"]:
-            nm, w = own["top_echoer"]
-            lines.append(f"Top Echoer: {_handle(nm)} ({w}W)")
+            nm, w, l = own["top_echoer"]
+            lines.append(f"Top Echoer: {_handle(nm)} ({w}W/{l}L)")
     return box("POD RANKINGS", lines)
 
 
@@ -182,8 +182,8 @@ def hub_dashboard(st: dict, footer: str = "") -> str:
             L.append(f"{i}. {g['title'][:24]}")
             L.append(f"   {g['wins']}W / {g['losses']}L ({_wr(g['wins'], g['losses'])})  ·  avg {g.get('avg_x', 0):.1f}x  ·  {g['points']:+.0f} pts")
             if g["top_echoer"]:
-                nm, w = g["top_echoer"]
-                L.append(f"   Top Echoer: {_handle(nm)} ({w}W)")
+                nm, w, l = g["top_echoer"]
+                L.append(f"   Top Echoer: {_handle(nm)} ({w}W/{l}L)")
             L.append("")
     else:
         L += ["Clicking through the waves…", "(no pods yet)", ""]

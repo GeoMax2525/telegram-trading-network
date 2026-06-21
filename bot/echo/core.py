@@ -536,11 +536,12 @@ async def top_groups(n: int = 10) -> list:
 
 
 async def top_users(n: int = 10) -> list:
-    # Phanes rule: you need at least 1 point to appear on the top callers list.
+    # Show anyone with at least 1 resolved call — 0-0 echoers are filtered out,
+    # but a caller with wins AND losses (net 0 pts) still deserves a spot.
     from database.models import AsyncSessionLocal, select, EchoUser
     async with AsyncSessionLocal() as s:
         return list((await s.execute(
-            select(EchoUser).where(EchoUser.points >= 1)
+            select(EchoUser).where(EchoUser.calls >= 1)
             .order_by(EchoUser.points.desc()).limit(n)
         )).scalars().all())
 
@@ -570,7 +571,9 @@ async def _top_echoer_for_group(s, chat_id) -> tuple | None:
     u = await s.get(EchoUser, row[0])
     if u is None:
         return None
-    return (u.username or str(u.user_id), int(row[1] or 0))
+    # Show their FULL record (total wins/losses across all groups), not just
+    # their wins in this specific group — that's the number callers care about.
+    return (u.username or str(u.user_id), u.wins or 0, u.losses or 0)
 
 
 async def hub_stats() -> dict:
@@ -585,10 +588,11 @@ async def hub_stats() -> dict:
         n_users = (await s.execute(select(func.count(EchoUser.user_id)))).scalar() or 0
         n_sightings = (await s.execute(select(func.count(EchoSighting.id)))).scalar() or 0
         n_signals = (await s.execute(select(func.count(EchoSignal.id)))).scalar() or 0
-        n_wins = (await s.execute(
-            select(func.count(EchoToken.ca)).where(EchoToken.status == "win"))).scalar() or 0
-        n_losses = (await s.execute(
-            select(func.count(EchoToken.ca)).where(EchoToken.status.in_(("loss", "rug"))))).scalar() or 0
+        # Sum wins/losses from groups so Pod Record matches what you see in the
+        # group list. (Token-level counts 1 win per token regardless of how many
+        # groups called it; group-level correctly counts each group's record.)
+        n_wins = (await s.execute(select(func.sum(EchoGroup.wins)))).scalar() or 0
+        n_losses = (await s.execute(select(func.sum(EchoGroup.losses)))).scalar() or 0
 
         groups_raw = list((await s.execute(
             select(EchoGroup).order_by(EchoGroup.points.desc()).limit(10))).scalars().all())
@@ -601,9 +605,9 @@ async def hub_stats() -> dict:
                 "top_echoer": await _top_echoer_for_group(s, g.chat_id),
             })
 
-        # Only show echoers with at least 1 point — 0-0 users waste space.
+        # Only show echoers with at least 1 resolved call — no 0-0 filler.
         users_raw = list((await s.execute(
-            select(EchoUser).where(EchoUser.points >= 1)
+            select(EchoUser).where(EchoUser.calls >= 1)
             .order_by(EchoUser.points.desc()).limit(10))).scalars().all())
         top_users = []
         for u in users_raw:
