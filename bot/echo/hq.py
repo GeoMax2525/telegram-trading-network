@@ -192,42 +192,49 @@ async def cmd_rescore(message: Message) -> None:
     from database.models import (
         AsyncSessionLocal, select, EchoToken, EchoScore, EchoGroup, EchoUser,
     )
-    from bot.echo.core import apply_token_score
+    from bot.echo.core import apply_token_score, _credit_status_only
     await message.reply("⏳ Re-scoring resolved tokens…", parse_mode="")
     async with AsyncSessionLocal() as s:
-        # 1. Zero all group + user counters so re-scoring starts fresh.
-        for g in (await s.execute(select(EchoGroup))).scalars().all():
-            g.points = 0.0; g.wins = 0; g.losses = 0; g.calls = 0
-        for u in (await s.execute(select(EchoUser))).scalars().all():
-            u.points = 0.0; u.wins = 0; u.losses = 0; u.calls = 0
-        # 2. Clear the per-token score ledger + awarded_points bookkeeping.
-        for sc in (await s.execute(select(EchoScore))).scalars().all():
-            await s.delete(sc)
         tokens = list((await s.execute(
             select(EchoToken).where(
                 EchoToken.resolved.is_(True),
                 EchoToken.status != "void",
             )
         )).scalars().all())
+        # Zero counters and clear ledger only AFTER we have the token list.
+        for g in (await s.execute(select(EchoGroup))).scalars().all():
+            g.points = 0.0; g.wins = 0; g.losses = 0; g.calls = 0
+        for u in (await s.execute(select(EchoUser))).scalars().all():
+            u.points = 0.0; u.wins = 0; u.losses = 0; u.calls = 0
+        for sc in (await s.execute(select(EchoScore))).scalars().all():
+            await s.delete(sc)
         for t in tokens:
             t.awarded_points = 0.0
         await s.commit()
-    # 3. Re-score each token — apply_token_score now starts from 0 so points
-    #    are set (not added on top of stale values).
-    n = 0
+
+    n, skipped = 0, 0
     for tok in tokens:
         try:
-            # Use ath_mc if available; fall back to ath_mult*first_mc for tokens
-            # where price fetch failed (apply_token_score handles this too but
-            # being explicit here avoids a silent skip).
-            peak = tok.ath_mc or (
-                (tok.ath_mult or 1.0) * tok.first_mc if tok.first_mc else None
-            )
+            peak = tok.ath_mc
+            if not peak and tok.ath_mult and tok.first_mc:
+                peak = float(tok.ath_mult) * float(tok.first_mc)
+            if not peak:
+                # Token has no price data at all — credit it as a win/loss based
+                # on status so it doesn't disappear from the record.
+                if tok.status == "win":
+                    await _credit_status_only(tok.ca, "win")
+                elif tok.status in ("loss", "rug"):
+                    await _credit_status_only(tok.ca, tok.status)
+                skipped += 1
+                continue
             await apply_token_score(tok.ca, peak)
             n += 1
         except Exception:
-            pass
-    await message.reply(f"✅ Re-scored {n} tokens with updated formula.", parse_mode="")
+            skipped += 1
+    await message.reply(
+        f"✅ Re-scored {n} tokens. {skipped} used status fallback (no price data).",
+        parse_mode=""
+    )
 
 
 @router.message(Command("echo_reset_scores"))

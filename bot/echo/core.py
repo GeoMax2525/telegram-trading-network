@@ -709,6 +709,39 @@ def phanes_points(peak, _mc=None) -> float:
     return 15.0
 
 
+async def _credit_status_only(ca: str, status: str) -> None:
+    """Fallback for resolved tokens with no price data at all — can't compute
+    a return multiple, so just credit the W/L count and a fixed 0-point entry
+    so the record stays accurate. Win = 0 pts (no multiple to score), loss = -1."""
+    from database.models import AsyncSessionLocal, select, EchoSighting, EchoGroup, EchoUser
+    pts = 0.0 if status == "win" else -1.0
+    is_win = status == "win"
+    async with AsyncSessionLocal() as s:
+        sightings = (await s.execute(
+            select(EchoSighting).where(EchoSighting.ca == ca)
+        )).scalars().all()
+        seen_g: set = set()
+        seen_u: set = set()
+        for sg in sightings:
+            if sg.chat_id is not None and sg.chat_id not in seen_g:
+                seen_g.add(sg.chat_id)
+                g = await s.get(EchoGroup, sg.chat_id)
+                if g and not g.blacklisted:
+                    g.calls = (g.calls or 0) + 1
+                    g.wins = (g.wins or 0) + (1 if is_win else 0)
+                    g.losses = (g.losses or 0) + (0 if is_win else 1)
+                    g.points = round((g.points or 0) + pts, 2)
+            if sg.user_id is not None and sg.user_id not in seen_u:
+                seen_u.add(sg.user_id)
+                u = await s.get(EchoUser, sg.user_id)
+                if u and not u.blacklisted:
+                    u.calls = (u.calls or 0) + 1
+                    u.wins = (u.wins or 0) + (1 if is_win else 0)
+                    u.losses = (u.losses or 0) + (0 if is_win else 1)
+                    u.points = round((u.points or 0) + pts, 2)
+        await s.commit()
+
+
 async def apply_token_score(ca: str, peak_mc, win_mult: float = 2.0) -> None:
     """Score a resolved token to every group + caller that called it, each off
     THEIR OWN entry MC (their earliest sighting). Points = Phanes bracket of that
