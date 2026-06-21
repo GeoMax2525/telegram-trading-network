@@ -59,17 +59,20 @@ async def _ingest(message: Message) -> None:
         return
     if not _rate_ok(chat.id):
         return
+    # Bots (e.g. @sectleaderboardbot) don't get user credit — the CA is still
+    # recorded for consensus, but user_id=None so no one scores off it.
+    is_bot_sender = bool(user and getattr(user, "is_bot", False))
+    user_id   = None if (not user or is_bot_sender) else user.id
+    username  = None if (not user or is_bot_sender) else (user.username or user.full_name)
     link = core.message_link(chat.id, chat.username, message.message_id)
     for ca in cas:
         try:
             is_new_group = await core.record_sighting(
                 ca=ca, chat_id=chat.id, chat_title=chat.title,
-                user_id=user.id if user else None,
-                username=(user.username or user.full_name) if user else None,
+                user_id=user_id, username=username,
                 message_id=message.message_id, msg_link=link,
             )
-            # Snapshot this caller's entry MC right now (~2s), off the hot path.
-            asyncio.create_task(capture_entry_mc(ca, chat.id, user.id if user else None))
+            asyncio.create_task(capture_entry_mc(ca, chat.id, user_id))
             if is_new_group:
                 # A new distinct group called this CA — re-check consensus.
                 await maybe_fire_signal(message.bot, ca)

@@ -749,10 +749,21 @@ async def _credit_status_only(ca: str, status: str) -> None:
 
 
 async def apply_token_score(ca: str, peak_mc=None, win_mult: float = 2.0) -> None:
-    """Credit every group + caller that sighted this CA with the token's score.
-    Dead simple — no ledger, no per-caller MC, no complex queries that can fail.
-    Called by the tracker on resolution and by /echo_rescore (which zeroes first)."""
-    from database.models import AsyncSessionLocal, select, EchoToken, EchoSighting, EchoGroup, EchoUser
+    """Score every group + first caller per group for this token.
+
+    Rules (matching Phanes):
+    - Each group that sighted the CA gets credit once.
+    - Only the FIRST person to call it in each group gets user credit.
+      Everyone else in that same group who posted it later is ignored.
+    - Bots have user_id=None in sightings (stripped at ingest), so they
+      never appear here.
+    - EchoScore ledger prevents double-crediting on re-runs. If the ledger
+      row already exists for a (ca, kind, entity), skip it.
+    """
+    from database.models import (
+        AsyncSessionLocal, select, EchoToken, EchoSighting,
+        EchoGroup, EchoUser, EchoScore,
+    )
     async with AsyncSessionLocal() as s:
         tok = await s.get(EchoToken, ca)
         if tok is None or tok.status in ("tracking", "void"):
@@ -760,28 +771,48 @@ async def apply_token_score(ca: str, peak_mc=None, win_mult: float = 2.0) -> Non
         mult   = float(tok.ath_mult or 1.0)
         pts    = token_points(tok.status, mult)
         is_win = tok.status == "win"
-        sightings = (await s.execute(
-            select(EchoSighting).where(EchoSighting.ca == ca)
-        )).scalars().all()
-        seen_g: set = set()
-        seen_u: set = set()
+
+        # Sightings ordered earliest-first so we always pick the first caller.
+        sightings = list((await s.execute(
+            select(EchoSighting)
+            .where(EchoSighting.ca == ca)
+            .order_by(EchoSighting.seen_at.asc())
+        )).scalars().all())
+
+        # first_caller[chat_id] = user_id of whoever posted this CA first there.
+        first_caller: dict = {}
         for sg in sightings:
-            if sg.chat_id is not None and sg.chat_id not in seen_g:
-                seen_g.add(sg.chat_id)
-                g = await s.get(EchoGroup, sg.chat_id)
-                if g and not g.blacklisted:
-                    g.calls   = (g.calls   or 0) + 1
-                    g.wins    = (g.wins    or 0) + (1 if is_win else 0)
-                    g.losses  = (g.losses  or 0) + (0 if is_win else 1)
-                    g.points  = round((g.points or 0) + pts, 2)
-            if sg.user_id is not None and sg.user_id not in seen_u:
-                seen_u.add(sg.user_id)
-                u = await s.get(EchoUser, sg.user_id)
-                if u and not u.blacklisted:
-                    u.calls   = (u.calls   or 0) + 1
-                    u.wins    = (u.wins    or 0) + (1 if is_win else 0)
-                    u.losses  = (u.losses  or 0) + (0 if is_win else 1)
-                    u.points  = round((u.points or 0) + pts, 2)
+            if sg.chat_id is not None and sg.chat_id not in first_caller:
+                first_caller[sg.chat_id] = sg.user_id  # may be None (bot/anon)
+
+        async def _already_scored(kind: str, eid: int) -> bool:
+            row = (await s.execute(
+                select(EchoScore.id).where(
+                    EchoScore.ca == ca,
+                    EchoScore.kind == kind,
+                    EchoScore.entity_id == eid,
+                )
+            )).scalar()
+            return row is not None
+
+        async def _credit(kind: str, model, eid: int) -> None:
+            if await _already_scored(kind, eid):
+                return
+            ent = await s.get(model, eid)
+            if ent is None or ent.blacklisted:
+                return
+            ent.calls  = (ent.calls  or 0) + 1
+            ent.wins   = (ent.wins   or 0) + (1 if is_win else 0)
+            ent.losses = (ent.losses or 0) + (0 if is_win else 1)
+            ent.points = round((ent.points or 0) + pts, 2)
+            s.add(EchoScore(ca=ca, kind=kind, entity_id=eid,
+                            points=pts, is_win=is_win))
+
+        for chat_id, user_id in first_caller.items():
+            await _credit("group", EchoGroup, chat_id)
+            if user_id is not None:
+                await _credit("user", EchoUser, user_id)
+
         tok.awarded_points = mult
         tok.score_win = is_win
         await s.commit()
