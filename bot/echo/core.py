@@ -791,28 +791,40 @@ async def apply_token_score(ca: str, peak_mc=None, win_mult: float = 2.0) -> Non
                 continue
             first_caller[sg.chat_id] = sg.user_id
 
-        async def _already_scored(kind: str, eid: int) -> bool:
+        async def _credit(kind: str, model, eid: int) -> None:
+            ent = await s.get(model, eid)
+            if ent is None or ent.blacklisted:
+                return
             row = (await s.execute(
-                select(EchoScore.id).where(
+                select(EchoScore).where(
                     EchoScore.ca == ca,
                     EchoScore.kind == kind,
                     EchoScore.entity_id == eid,
                 )
-            )).scalar()
-            return row is not None
-
-        async def _credit(kind: str, model, eid: int) -> None:
-            if await _already_scored(kind, eid):
-                return
-            ent = await s.get(model, eid)
-            if ent is None or ent.blacklisted:
-                return
-            ent.calls  = (ent.calls  or 0) + 1
-            ent.wins   = (ent.wins   or 0) + (1 if is_win else 0)
-            ent.losses = (ent.losses or 0) + (0 if is_win else 1)
-            ent.points = round((ent.points or 0) + pts, 2)
-            s.add(EchoScore(ca=ca, kind=kind, entity_id=eid,
-                            points=pts, is_win=is_win))
+            )).scalars().first()
+            if row is None:
+                # First time scoring this token for this entity.
+                ent.calls  = (ent.calls  or 0) + 1
+                ent.wins   = (ent.wins   or 0) + (1 if is_win else 0)
+                ent.losses = (ent.losses or 0) + (0 if is_win else 1)
+                ent.points = round((ent.points or 0) + pts, 2)
+                s.add(EchoScore(ca=ca, kind=kind, entity_id=eid,
+                                points=pts, is_win=is_win))
+            else:
+                # Already scored — apply delta only if points or win status changed
+                # (e.g. token climbed from 2x to 5x, or loss flipped to win).
+                d = round(pts - float(row.points or 0), 2)
+                if abs(d) >= 0.01:
+                    ent.points = round((ent.points or 0) + d, 2)
+                if bool(row.is_win) != is_win:
+                    if is_win:
+                        ent.wins   = (ent.wins   or 0) + 1
+                        ent.losses = max(0, (ent.losses or 0) - 1)
+                    else:
+                        ent.losses = (ent.losses or 0) + 1
+                        ent.wins   = max(0, (ent.wins   or 0) - 1)
+                row.points = pts
+                row.is_win = is_win
 
         for chat_id, user_id in first_caller.items():
             await _credit("group", EchoGroup, chat_id)
