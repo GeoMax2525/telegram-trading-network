@@ -779,11 +779,24 @@ async def apply_token_score(ca: str, peak_mc=None, win_mult: float = 2.0) -> Non
             .order_by(EchoSighting.seen_at.asc())
         )).scalars().all())
 
-        # first_caller[chat_id] = user_id of whoever posted this CA first there.
+        def _is_bot(sg) -> bool:
+            """Catch bots by username pattern — covers old sightings where
+            user_id was set before the ingest-level bot filter landed."""
+            u = (sg.username or "").lower().rstrip()
+            return u.endswith("bot") or u.endswith("_bot")
+
+        # first_caller[chat_id] = first HUMAN user_id to call this CA there.
+        # Groups where only a bot ever called it are excluded entirely — those
+        # calls shouldn't count toward the group's record.
         first_caller: dict = {}
         for sg in sightings:
-            if sg.chat_id is not None and sg.chat_id not in first_caller:
-                first_caller[sg.chat_id] = sg.user_id  # may be None (bot/anon)
+            if sg.chat_id is None:
+                continue
+            if sg.chat_id in first_caller:
+                continue
+            if _is_bot(sg) or sg.user_id is None:
+                continue  # skip bot / anon sightings
+            first_caller[sg.chat_id] = sg.user_id
 
         async def _already_scored(kind: str, eid: int) -> bool:
             row = (await s.execute(
