@@ -72,6 +72,63 @@ from database.models import (
 
 logger = logging.getLogger(__name__)
 
+
+async def _broadcast_entry(
+    *, source: str, name: str, mint: str, size_sol: float, entry_mc: float,
+    tp_x: float, sl_pct: float, reason: str | None,
+    is_bundle: bool = False, bundle_pct: float | None = None,
+) -> None:
+    """Post an ENTRY card to the caller group + community feed showing WHY we
+    entered and the in/out strategy. Uses only data we already have at entry —
+    zero extra API/Claude cost. source: 'bundle' | 'scanner' | '4am'."""
+    try:
+        from bot.config import CALLER_GROUP_ID, SCAN_TOPIC_ID
+        from bot.community_feed import post_to_community
+        import bot.state as _st
+
+        bot_ref = getattr(_st, "bot", None)
+        mc_str = f"${entry_mc/1000:.0f}K" if entry_mc else "?"
+
+        if is_bundle:
+            head = f"📦 BUNDLED ENTRY — {name[:20]}"
+            strat = (f"⚡ Bundle strategy: quick flip — TP {tp_x:.1f}x, SL {sl_pct:.0f}%, "
+                     f"cut if flat 15m (dump-window exit)")
+            extra = f"🔗 Bundle: top-10 hold {bundle_pct:.0f}% of supply" if bundle_pct else ""
+        elif source == "4am":
+            head = f"⚡ 4AM ENTRY — {name[:20]}"
+            strat = f"🎯 Strategy: ride runner — TP {tp_x:.1f}x, SL {sl_pct:.0f}%, trail above 1.5x"
+            extra = ""
+        else:
+            head = f"🔍 SCANNER ENTRY — {name[:20]}"
+            strat = f"🎯 Strategy: TP {tp_x:.1f}x, SL {sl_pct:.0f}%, trail above 2x"
+            extra = ""
+
+        lines = [
+            head,
+            f"🪙 {name[:24]} | Entry MC: {mc_str} | Size: {size_sol:.2f} SOL",
+        ]
+        if extra:
+            lines.append(extra)
+        if reason:
+            lines.append(f"📝 Why: {reason[:160]}")
+        lines.append(strat)
+        text = "\n".join(lines)
+
+        if bot_ref is not None:
+            try:
+                await bot_ref.send_message(
+                    CALLER_GROUP_ID, text, message_thread_id=SCAN_TOPIC_ID,
+                )
+            except Exception:
+                pass
+            try:
+                await post_to_community(bot_ref, text)
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("entry broadcast failed %s: %s", mint[:12] if mint else "?", exc)
+
+
 PROFILES_URL    = "https://api.dexscreener.com/token-profiles/latest/v1"
 RUGCHECK_URL    = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
@@ -1253,13 +1310,14 @@ async def run_once() -> tuple[int, int]:
             from bot.agents.entry_filter import detect_bundle, bundle_trade_params
             tg_tp_x, tg_sl_pct = 8.0, 20.0
             tg_pattern = "tg_signal"
+            tg_is_bundle, tg_top10 = False, None
             try:
-                is_bundle, top10 = await detect_bundle(mint)
-                if is_bundle:
+                tg_is_bundle, tg_top10 = await detect_bundle(mint)
+                if tg_is_bundle:
                     tg_tp_x, tg_sl_pct = bundle_trade_params(tg_tp_x, tg_sl_pct)
                     tg_pattern = "tg_signal_bundle"
                     logger.info("Scanner: TG %s is BUNDLE (top10=%.0f%%) — tp=%.1fx sl=%.0f%%",
-                                token_name[:16], top10 or 0, tg_tp_x, tg_sl_pct)
+                                token_name[:16], tg_top10 or 0, tg_tp_x, tg_sl_pct)
             except Exception as _be:
                 logger.debug("Scanner: bundle detect failed %s: %s", mint[:12], _be)
 
@@ -1280,6 +1338,16 @@ async def run_once() -> tuple[int, int]:
             logger.info(
                 "Scanner: TG AUTO-BUY %s at MC=%s | %.2f SOL | bal=%.4f",
                 token_name[:20], entry_mc, tg_paper_sol, state.paper_balance,
+            )
+
+            # Entry card — source, size, reason, in/out strategy (free: uses
+            # data we already have). Bundles say so + show the cluster %.
+            await _broadcast_entry(
+                source="bundle" if tg_is_bundle else "4am",
+                name=token_name, mint=mint, size_sol=tg_paper_sol, entry_mc=entry_mc,
+                tp_x=tg_tp_x, sl_pct=tg_sl_pct,
+                reason=f"4am channel call [{tg.get('tg_channel', '?')}] — trusted source",
+                is_bundle=tg_is_bundle, bundle_pct=tg_top10,
             )
 
             # Relay to subscribers
@@ -1711,6 +1779,7 @@ async def run_once() -> tuple[int, int]:
                 # tighter SL, 15-min time-exit applied in the monitor). Tag the
                 # pattern so the monitor and reports can see it's a bundle.
                 _scan_pattern = scored.get("profile_tag") or scored.get("source") or ""
+                _is_b, _t10 = False, None
                 try:
                     from bot.agents.entry_filter import detect_bundle, bundle_trade_params
                     _is_b, _t10 = await detect_bundle(scored.get("mint", ""))
@@ -1740,6 +1809,18 @@ async def run_once() -> tuple[int, int]:
                 state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                 state.paper_trades_today += 1
                 logger.info("Scanner: paper trade id=%s bal=%.4f SOL", pt.id, state.paper_balance)
+
+                # Entry card — source, size, reason, in/out strategy. The reason
+                # is the confidence engine's own trade_reasoning (already computed).
+                await _broadcast_entry(
+                    source="bundle" if _is_b else "scanner",
+                    name=scored.get("name") or "?", mint=scored.get("mint", ""),
+                    size_sol=paper_sol, entry_mc=fresh_mc,
+                    tp_x=tp_for_open, sl_pct=sl_for_open,
+                    reason=(scored.get("trade_reasoning")
+                            or f"confidence {scored.get('confidence_score', 0):.0f}/100"),
+                    is_bundle=_is_b, bundle_pct=_t10,
+                )
 
                 # Relay trade to subscribers (runs in background; delay=RELAY_DELAY)
                 try:
