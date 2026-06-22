@@ -287,6 +287,7 @@ async def main() -> None:
             BotCommand(command="papertrades", description="Recent paper trades"),
             BotCommand(command="audit", description="Pre-live GO/NO-GO audit"),
             # ── Bundles & wallets ──
+            BotCommand(command="sourcestats", description="4am vs scanner W/L + PnL"),
             BotCommand(command="bundlers", description="Top bundle wallets by avg X"),
             BotCommand(command="wallets", description="Top wallet leaderboard"),
             # ── Token tools ──

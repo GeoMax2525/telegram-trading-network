@@ -2224,6 +2224,88 @@ async def cmd_bundlers(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
+# ── /sourcestats — per-source trade counts, W/L, PnL ──────────────────────
+@router.message(Command("sourcestats"))
+async def cmd_sourcestats(message: Message):
+    """Breakdown of CLOSED trades by source (4am / scanner / bundle): how many,
+    wins, losses, win rate, and total PnL. Optional window: /sourcestats 7
+    (days, default 7). /sourcestats all for all-time."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from datetime import datetime, timedelta
+    from database.models import AsyncSessionLocal, select, PaperTrade
+
+    parts = (message.text or "").split()
+    window_label = "7d"
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    if len(parts) > 1:
+        arg = parts[1].lower().strip()
+        if arg in ("all", "alltime", "a"):
+            cutoff, window_label = None, "all-time"
+        else:
+            try:
+                d = float(arg)
+                cutoff, window_label = datetime.utcnow() - timedelta(days=d), f"{int(d)}d"
+            except ValueError:
+                pass
+
+    async with AsyncSessionLocal() as s:
+        q = select(PaperTrade).where(
+            PaperTrade.status == "closed",
+            PaperTrade.subscriber_id.is_(None),   # HQ trades only
+        )
+        if cutoff is not None:
+            q = q.where(PaperTrade.closed_at >= cutoff)
+        trades = list((await s.execute(q)).scalars().all())
+
+    def _bucket(t) -> str:
+        p = (t.pattern_type or "").lower()
+        if "bundle" in p:
+            return "bundle"
+        if "tg_signal" in p:
+            return "4am"
+        return "scanner"
+
+    groups: dict = {"4am": [], "scanner": [], "bundle": []}
+    for t in trades:
+        groups[_bucket(t)].append(t)
+
+    def _stats(rows) -> dict:
+        n = len(rows)
+        pnl = sum((r.paper_pnl_sol or 0) for r in rows)
+        wins = sum(1 for r in rows if (r.paper_pnl_sol or 0) > 0)
+        losses = n - wins
+        wr = (wins / n * 100) if n else 0
+        return {"n": n, "pnl": pnl, "wins": wins, "losses": losses, "wr": wr}
+
+    labels = {"4am": "⚡ 4AM", "scanner": "🔍 SCANNER", "bundle": "📦 BUNDLE"}
+    lines = [
+        f"📊 SOURCE BREAKDOWN ({window_label})",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+    tot = _stats(trades)
+    for key in ("4am", "scanner", "bundle"):
+        st = _stats(groups[key])
+        if st["n"] == 0:
+            lines.append(f"{labels[key]}: no trades")
+            lines.append("")
+            continue
+        lines += [
+            f"{labels[key]}",
+            f"  Trades: {st['n']}  |  {st['wins']}W / {st['losses']}L  ({st['wr']:.0f}% WR)",
+            f"  PnL: {st['pnl']:+.3f} SOL  (avg {st['pnl']/st['n']:+.4f}/trade)",
+            "",
+        ]
+    lines += [
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"TOTAL: {tot['n']} trades  |  {tot['wins']}W / {tot['losses']}L "
+        f"({tot['wr']:.0f}% WR)",
+        f"NET PnL: {tot['pnl']:+.3f} SOL",
+    ]
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /scannerwhy — Diagnose why scanner isn't opening paper trades ─────────
 
 @router.message(Command("scannerwhy"))
