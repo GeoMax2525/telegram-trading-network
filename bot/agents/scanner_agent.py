@@ -1358,10 +1358,50 @@ async def run_once() -> tuple[int, int]:
                 )
                 continue
 
-            # Confirmation gate REMOVED — speed matters more than confirmation
-            # for memecoins. Rug protection comes from safety filters + phase SL.
-            # The 30+ second delay was killing entry quality — by the time we
-            # confirmed, the token had already pumped 50-200%.
+            # Confirmation gate — wait, re-fetch, confirm buying pressure is STILL
+            # there before entering. Dead launches die in this window. Real pumps
+            # survive it. CapitalOS uses this pattern and it's why their hit rate
+            # is high. The old gate was removed because it "killed entries on fast
+            # pumps" but 165 no_momentum exits (-4 SOL/7d) prove the opposite: we
+            # need the gate more than we need speed. A pump that fades in 30s was
+            # never a good entry. Tunable via /setparam scanner_confirm_delay_sec.
+            try:
+                _confirm_cfg = await get_params("scanner_confirm_delay_sec", "entry_min_buy_sell_ratio")
+                _delay = float(_confirm_cfg.get("scanner_confirm_delay_sec") or 30.0)
+                _min_ratio = float(_confirm_cfg.get("entry_min_buy_sell_ratio") or 1.3)
+                if _delay > 0 and mint_addr:
+                    await asyncio.sleep(_delay)
+                    # Re-fetch after the delay — check that buying pressure held.
+                    _confirm_pair = await fetch_token_data(mint_addr)
+                    if _confirm_pair is None:
+                        logger.info("Scanner: CONFIRM-GATE skip %s — no pair after delay",
+                                    (scored.get("name") or mint_addr[:12]))
+                        continue
+                    _cm = parse_token_metrics(_confirm_pair)
+                    _cb = float(_cm.get("buys_m5") or 0)
+                    _cs = float(_cm.get("sells_m5") or 0)
+                    _ratio = _cb / max(_cs, 1.0)
+                    if _ratio < _min_ratio:
+                        logger.info(
+                            "Scanner: CONFIRM-GATE skip %s — ratio %.2f < %.2f after %ds",
+                            (scored.get("name") or mint_addr[:12]), _ratio, _min_ratio, int(_delay),
+                        )
+                        continue
+                    # Update buys/sells/mc from the confirmed snapshot
+                    fresh_buys_m5 = _cb
+                    fresh_sells_m5 = _cs
+                    _new_mc = float(_cm.get("market_cap") or 0)
+                    if _new_mc > 0:
+                        fresh_mc = _new_mc
+                        fresh_metrics_full = _cm
+                    logger.info(
+                        "Scanner: CONFIRM-GATE passed %s — ratio=%.2f after %ds",
+                        (scored.get("name") or mint_addr[:12]), _ratio, int(_delay),
+                    )
+            except Exception as _cge:
+                logger.debug("Scanner: confirm gate error %s: %s",
+                             mint_addr[:12] if mint_addr else "?", _cge)
+
             token_name = scored.get("name")
 
             # Hard cap on concurrent open positions. Runs BEFORE any

@@ -3491,7 +3491,8 @@ AGENT_PARAM_DEFAULTS = {
     # on missing txn data so it can't halt the pipeline. Disable live with
     # /setparam entry_momentum_gate_enabled 0.
     "entry_momentum_gate_enabled": 1.0,   # 0 = off
-    "entry_min_buy_sell_ratio":    1.0,   # require m5 buys >= sells (net buying)
+    "entry_min_buy_sell_ratio":    1.3,   # require m5 buys/sells >= this ratio
+    "scanner_confirm_delay_sec":   30.0,  # wait this long then re-check before entry (0=off)
     "entry_min_m5_buys":           0.0,   # min m5 buy count (0 = ratio gate only)
     # Reject backside entries: skip if m5 price already falling harder than
     # this % at signal time ("caught the backside of the dump"). -25 = skip if
