@@ -3536,6 +3536,18 @@ AGENT_PARAM_DEFAULTS = {
     # chop the second leg — 1.5 is the balance. /setparam tg_signal_trail_trigger.
     "tg_signal_trail_trigger": 1.5,
 
+    # ── 4am "LET RUNNERS RUN" profile ────────────────────────────────────────
+    # The 4am report proved the source hits monster runners (avg true peak 710x,
+    # some 70,000x+) but our early-exit logic dumps them at ~1x — we capture
+    # 0.87x avg and miss ~100% of the upside. These make 4am genuinely different:
+    # skip the fast-cut killers and ALWAYS keep an un-stoppable moonbag so a
+    # token that dumps-then-moons is never fully missed. EV is hugely positive
+    # given the peak distribution. Toggle off with tg_let_runners_run 0.
+    "tg_let_runners_run":   1.0,    # 1 = skip no_momentum + time_stop for 4am
+    "tg_moonbag_pct":      25.0,    # % of a 4am position that NEVER stop-losses
+                                    # (rides for the moon; the rest still SLs)
+    "tg_moonbag_trail_pct": 0.60,   # moonbag trail width once it's running (wide)
+
     # Dead-token close threshold (USD MC). Was hardcoded 5000; raised
     # to 10000 because /weeklyreport showed 82 dead_token closes/week at
     # avg -0.16 SOL each (-13 SOL total drag). Closing earlier at $10K

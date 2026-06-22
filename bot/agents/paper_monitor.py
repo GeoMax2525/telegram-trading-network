@@ -429,6 +429,7 @@ async def _check_open_trades(bot) -> None:
         "paper_stop_slippage_pct",
         "time_stop_minutes", "entry_eject_after_sec", "entry_eject_peak_mult",
         "bundle_time_exit_min", "bundle_time_exit_mult",
+        "tg_let_runners_run", "tg_moonbag_pct", "tg_moonbag_trail_pct",
     )
 
     for pt in trades:
@@ -512,15 +513,20 @@ async def _check_open_trades(bot) -> None:
                 override = getattr(pt, "claude_trail_override_pct", None)
                 if override is not None and 0.05 <= override <= 0.80:
                     return float(override)
-                # Profit Protection v2 (7d/233-trade audit): avg peak 1.45x vs
-                # realized 0.96x — trades round-tripped past breakeven into
-                # sl_hit. The old 50% trail below 3x gave back the ENTIRE gain
-                # (2x peak * 0.50 = 1.0x exit = breakeven). Tighten the low tier
-                # to lock the median winner; keep the 6x+ tier loose so the rare
-                # fat-tail runner (which carries the P&L) still runs.
-                if peak_m < 3.0:    return 0.30  # 1.3-3x: lock the gain (was 0.50)
-                if peak_m < 6.0:    return 0.28  # 3-6x: lock the meat (was 0.30)
-                return 0.20                       # 6x+: protect the runner
+                # 4am "let runners run": the report proved the P&L lives in the
+                # fat tail (avg true peak 710x) and our tight trail capped us at
+                # 0.87x. For 4am, trail MUCH wider so a 100x isn't shaken out at
+                # 6x by a normal pullback. Median winners give back more — that's
+                # the correct trade when the tail is this fat.
+                if is_tg_signal and float(cfg.get("tg_let_runners_run", 1.0) or 0) >= 0.5:
+                    wide = float(cfg.get("tg_moonbag_trail_pct", 0.60) or 0.60)
+                    if peak_m < 2.0:   return 0.35
+                    if peak_m < 5.0:   return 0.45
+                    return wide                    # 5x+: let the monster run
+                # Scanner: tighter ladder (no fat tail to protect — it scalps).
+                if peak_m < 3.0:    return 0.30
+                if peak_m < 6.0:    return 0.28
+                return 0.20
 
             # ── SANITY CAP on corrupt MC readings ──────────────────────
             # DexScreener occasionally returns absurd MC values for new
@@ -543,6 +549,12 @@ async def _check_open_trades(bot) -> None:
                 continue  # skip this tick, retry next poll with fresh data
 
             is_tg_signal = "tg_signal" in (pt.pattern_type or "")
+            # 4am "let runners run" — computed early so it guards EVERY 4am
+            # exit (timeouts, no_momentum, time_stop, SL moonbag). The report
+            # proved runners peak hours later, so 4am must survive the timeouts.
+            _let_run = (is_tg_signal
+                        and float(cfg.get("tg_let_runners_run", 1.0) or 0) >= 0.5)
+            _skip_fast = _let_run
             peak_mc = max(pt.peak_mc or 0, current_mc)
             peak_mult = max(pt.peak_multiple or 1.0, current_mult)
 
@@ -597,6 +609,12 @@ async def _check_open_trades(bot) -> None:
             elif age_hours >= stale_h and current_mult < stale_thr:
                 time_exit_reason = "stale"
 
+            # 4am runners survive the time-based cleanups — the report proved
+            # they moon hours later (peaked 2504x while "stale"). Only the
+            # dead_token / dead_api floor (true collapse) closes a 4am moonbag.
+            if time_exit_reason and _let_run:
+                time_exit_reason = None
+
             if time_exit_reason:
                 remaining_sol = sol * (remaining / 100.0)
                 realized = float(getattr(pt, "realized_pnl_sol", 0) or 0)
@@ -620,7 +638,7 @@ async def _check_open_trades(bot) -> None:
             # current price so capital doesn't get stuck riding a
             # consolidating token forever.
             hard_timeout_h = float(cfg.get("hard_timeout_hours", 4.0) or 4.0)
-            if age_hours >= hard_timeout_h:
+            if age_hours >= hard_timeout_h and not _let_run:
                 remaining_sol = sol * (remaining / 100.0)
                 pnl = round(realized + remaining_sol * (current_mult - 1), 4)
                 logger.info(
@@ -643,10 +661,12 @@ async def _check_open_trades(bot) -> None:
             # and is below entry after the eject window (~90s) gets cut now
             # instead of riding the full time stop. Directly targets the
             # sl_hit/dead_token DOA leak (-5.7 SOL in the report).
+            # (4am "let runners run" guard _skip_fast was computed at loop top.)
             eject_after_h = float(cfg.get("entry_eject_after_sec", 90.0) or 90.0) / 3600.0
             eject_peak = float(cfg.get("entry_eject_peak_mult", 1.10) or 1.10)
             _ts_min = float(cfg.get("time_stop_minutes", 5.0) or 5.0)
-            if (eject_after_h <= age_hours < (_ts_min / 60.0)
+            if (not _skip_fast
+                    and eject_after_h <= age_hours < (_ts_min / 60.0)
                     and peak_mult < eject_peak
                     and current_mult < 1.0):
                 remaining_sol = sol * (remaining / 100.0)
@@ -697,7 +717,8 @@ async def _check_open_trades(bot) -> None:
             # fast; stale capital is dead capital. Cut from 8→5 min per report.
             time_stop_min = float(cfg.get("time_stop_minutes", 5.0) or 5.0)
             time_stop_thr = float(cfg.get("time_stop_threshold", 1.50) or 1.50)
-            if (age_hours >= (time_stop_min / 60.0)
+            if (not _skip_fast
+                    and age_hours >= (time_stop_min / 60.0)
                     and peak_mult < time_stop_thr
                     and current_mult < time_stop_thr):
                 remaining_sol = sol * (remaining / 100.0)
@@ -954,13 +975,60 @@ async def _check_open_trades(bot) -> None:
                 should_sl = current_mult <= sl_threshold
 
             if should_sl:
-                # PnL accounts for remaining position + already realized profit.
-                # Slippage penalty: real stop fills on illiquid pump.fun
-                # launches gap well past the stop level (observed sl_hit avg
-                # -0.127 SOL where the nominal stop implies -0.036). Model a
-                # worse fill so paper PnL stops flattering the stops.
                 slip = float(cfg.get("paper_stop_slippage_pct", 15.0) or 15.0) / 100.0
                 fill_mult = current_mult * (1.0 - slip)
+
+                # 4am MOONBAG: never fully stop out a 4am call. The report proved
+                # 4am tokens dump-then-moon (closed 0x → peaked 2504x). So on SL we
+                # sell down to the moonbag and let that slice ride with NO further
+                # stop — it either dies (tiny capped loss) or catches the runner.
+                moonbag_pct = (float(cfg.get("tg_moonbag_pct", 25.0) or 0)
+                               if (is_tg_signal and _let_run) else 0.0)
+                if moonbag_pct > 0 and remaining > moonbag_pct + 0.5:
+                    sell_pct = remaining - moonbag_pct
+                    sold_sol = sol * (sell_pct / 100.0)
+                    realized_delta = round(sold_sol * (fill_mult - 1.0), 4)  # negative
+                    new_realized = round(realized + realized_delta, 4)
+                    try:
+                        async with AsyncSessionLocal() as sess:
+                            tr = await sess.get(PaperTrade, pt.id)
+                            if tr:
+                                tr.remaining_pct = moonbag_pct
+                                tr.realized_pnl_sol = new_realized
+                                await sess.commit()
+                    except Exception:
+                        pass
+                    try:
+                        from bot.live_mirror import mirror_partial
+                        await mirror_partial(pt.id, pt.token_address, sell_pct / max(remaining, 1.0))
+                    except Exception as exc:
+                        logger.error("live_mirror moonbag partial failed: %s", exc)
+                    logger.info(
+                        "Paper: 4AM MOONBAG %s — SL'd %.0f%% at %.2fx, %.0f%% rides | realized %+.4f",
+                        name, sell_pct, current_mult, moonbag_pct, new_realized,
+                    )
+                    from html import escape as _html_escape
+                    _txt = (f"🌙 <b>4AM MOONBAG</b> — {_html_escape(str(name)[:22])}\n\n"
+                            f"Cut {sell_pct:.0f}% at {current_mult:.2f}x — "
+                            f"<b>{moonbag_pct:.0f}% rides for the moon</b> 🚀\n"
+                            f"No stop on the moonbag. It moons or it doesn't.")
+                    try:
+                        await bot.send_message(CALLER_GROUP_ID, _txt,
+                                               message_thread_id=SCAN_TOPIC_ID, parse_mode="HTML")
+                    except Exception:
+                        pass
+                    try:
+                        from bot.community_feed import post_to_community
+                        await post_to_community(bot, _txt, parse_mode="HTML")
+                    except Exception:
+                        pass
+                    continue
+                if moonbag_pct > 0 and remaining <= moonbag_pct + 0.5:
+                    # Already riding the moonbag — never SL it. It exits only via
+                    # profit-trail (if it moons) or the dead_token/dead_api floor.
+                    continue
+
+                # Normal full SL close (scanner, or 4am with moonbag disabled).
                 remaining_sol = sol * (remaining / 100.0)
                 loss_on_remaining = round(-remaining_sol * (1.0 - fill_mult), 4)
                 pnl = round(realized + loss_on_remaining, 4)
