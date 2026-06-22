@@ -654,8 +654,15 @@ async def _check_open_trades(bot) -> None:
                         "Paper: BUNDLE TIME-EXIT %s — age=%.1fm peak=%.2fx now=%.2fx pnl=%+.4f",
                         name, age_hours * 60, peak_mult, current_mult, pnl,
                     )
-                    await _finalize_silent_close(
-                        pt, "bundle_time_exit", pnl, peak_mc, peak_mult,
+                    _icon = "✅" if pnl > 0 else "❌"
+                    await _finalize_paper_close(
+                        bot, pt, "bundle_time_exit", pnl, peak_mc, peak_mult, [
+                            f"📦 BUNDLE EXIT — dump-window cut",
+                            f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
+                            f"Flat after {age_hours*60:.0f}m — cut before the dump {_icon}",
+                            f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
+                            "Balance: {bal:.2f} SOL",
+                        ],
                     )
                     continue
 
