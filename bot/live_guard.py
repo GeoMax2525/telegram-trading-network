@@ -23,8 +23,8 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# {"date": "YYYY-MM-DD", "spent_sol": float, "buys": int}
-_today = {"date": "", "spent_sol": 0.0, "buys": 0}
+# {"date": "YYYY-MM-DD", "spent_sol": float, "buys": int, "realized_pnl": float}
+_today = {"date": "", "spent_sol": 0.0, "buys": 0, "realized_pnl": 0.0}
 
 
 def _roll_day() -> None:
@@ -33,6 +33,7 @@ def _roll_day() -> None:
         _today["date"] = today
         _today["spent_sol"] = 0.0
         _today["buys"] = 0
+        _today["realized_pnl"] = 0.0
 
 
 async def live_preflight(amount_sol: float) -> tuple[bool, str]:
@@ -45,12 +46,24 @@ async def live_preflight(amount_sol: float) -> tuple[bool, str]:
         "live_max_trade_sol",
         "live_daily_spend_cap_sol",
         "live_max_buys_per_day",
+        "live_daily_loss_cap_sol",
     )
 
     if float(cfg.get("live_trading_armed") or 0) < 1.0:
         return False, (
             "Live trading is NOT armed (real-money safety lock). "
             "Arm it with /setparam live_trading_armed 1 once the strategy is validated."
+        )
+
+    # Daily LOSS circuit breaker — halt new buys once today's realized live PnL
+    # drops past the cap. Stops a bad streak from running, separate from the
+    # spend cap (which only bounds capital deployed, not losses).
+    loss_cap = float(cfg.get("live_daily_loss_cap_sol") or 0.0)
+    if loss_cap > 0 and _today["realized_pnl"] <= -loss_cap:
+        return False, (
+            f"Daily LOSS circuit breaker tripped: today's realized "
+            f"{_today['realized_pnl']:.3f} SOL <= -{loss_cap:.3f}. Trading halted "
+            f"until UTC rollover (/setparam live_daily_loss_cap_sol to adjust)."
         )
 
     max_trade = float(cfg.get("live_max_trade_sol") or 0.1)
@@ -85,6 +98,17 @@ def record_live_buy(amount_sol: float) -> None:
     logger.info(
         "live_guard: recorded live buy %.3f SOL — today spent=%.3f buys=%d",
         amount_sol, _today["spent_sol"], _today["buys"],
+    )
+
+
+def record_live_close(pnl_sol: float) -> None:
+    """Record the realized PnL of a closed live position against today's running
+    net — drives the daily-loss circuit breaker."""
+    _roll_day()
+    _today["realized_pnl"] = round(_today["realized_pnl"] + float(pnl_sol or 0), 4)
+    logger.info(
+        "live_guard: recorded live close %+.4f SOL — today realized=%+.4f",
+        pnl_sol, _today["realized_pnl"],
     )
 
 

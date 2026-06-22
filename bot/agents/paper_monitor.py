@@ -251,7 +251,8 @@ async def _finalize_paper_close(
     # every close reason, so a live position can never miss its sell.
     try:
         from bot.live_mirror import mirror_close
-        await mirror_close(pt.id, pt.token_address)
+        _pnl_frac = float(pnl or 0) / float(pt.paper_sol_spent or 1)
+        await mirror_close(pt.id, pt.token_address, pnl_frac=_pnl_frac)
     except Exception as exc:
         logger.error("live_mirror close hook failed: %s", exc)
 

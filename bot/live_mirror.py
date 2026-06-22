@@ -157,10 +157,14 @@ async def _execute_sell(mint: str, keypair) -> str | None:
     return await execute_ultra_order(order, keypair)
 
 
-async def mirror_close(paper_trade_id: int, mint: str) -> None:
+async def mirror_close(paper_trade_id: int, mint: str, pnl_frac: float = 0.0) -> None:
     """Mirror a paper CLOSE with a real sell of the full live position.
     No-op if this trade was never mirrored live. On sell failure the row is
-    marked 'failed' for the reconcile loop to retry — never left silently open."""
+    marked 'failed' for the reconcile loop to retry — never left silently open.
+
+    pnl_frac is the paper trade's realized return fraction (paper_pnl /
+    paper_size). Live mirrors paper 1:1, so live PnL ≈ lm.sol_spent * pnl_frac —
+    fed to the daily-loss circuit breaker."""
     from database.models import AsyncSessionLocal, LiveMirror, select
     from bot.wallet import get_keypair
 
@@ -183,6 +187,12 @@ async def mirror_close(paper_trade_id: int, mint: str) -> None:
     try:
         sig = await _execute_sell(mint, keypair)
         await _mark(lm.id, "closed", sell_sig=sig)
+        # Feed the daily-loss circuit breaker with the realized live PnL.
+        try:
+            from bot.live_guard import record_live_close
+            record_live_close(float(lm.sol_spent or 0) * float(pnl_frac or 0))
+        except Exception:
+            pass
         logger.info("live_mirror: LIVE SELL %s done  sig=%s", (mint or "?")[:8], (sig or "none")[:10])
     except Exception as exc:
         logger.error("live_mirror: LIVE SELL FAILED %s: %s — marked failed, reconcile will retry", (mint or "?")[:8], exc)

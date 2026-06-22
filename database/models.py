@@ -3645,6 +3645,7 @@ AGENT_PARAM_DEFAULTS = {
     "live_mirror_size_sol":      0.05,   # SOL per autonomous live trade (capped by live_max_trade_sol)
     "live_max_trade_sol":        0.1,    # hard per-trade size cap
     "live_daily_spend_cap_sol":  0.5,    # daily live spend circuit breaker
+    "live_daily_loss_cap_sol":   0.3,    # daily realized-LOSS circuit breaker (halt after net -this)
     "live_max_buys_per_day":     10.0,   # daily live trade count cap
     "slippage_tolerance_bps":    500.0,  # 500 = 5% max slippage on live swaps
     "max_price_impact_pct":      10.0,   # reject live buy above this price impact
