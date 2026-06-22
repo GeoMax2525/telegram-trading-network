@@ -228,6 +228,132 @@ async def fetch_bundle_wallets(mint: str, top_n: int = 8) -> list[str]:
     return out
 
 
+async def detect_launch_bundle(mint: str) -> dict:
+    """REAL bundle detection: analyse the launch block. A bundle = many distinct
+    wallets receiving the token in the SAME launch slot(s) — the dev's coordinated
+    Jito-bundle snipe at block 0. This is the true definition, not a concentration
+    proxy.
+
+    Returns {determinable, is_bundle, wallet_count, wallets, launch_slot}. If the
+    token is too old/busy to page back to its launch within the cost cap,
+    determinable=False (caller falls back to the concentration check).
+    """
+    cfg = await get_params("bundle_min_launch_wallets")
+    min_wallets = int(float(cfg.get("bundle_min_launch_wallets") or 4))
+
+    async def _rpc(method, params):
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        timeout = aiohttp.ClientTimeout(total=_HELIUS_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(HELIUS_RPC_URL, json=payload) as resp:
+                if resp.status != 200:
+                    return None
+                return await resp.json(content_type=None)
+
+    # 1. Page back to the OLDEST signatures (the launch). Cap pages so an old,
+    #    high-volume token doesn't blow the cost budget.
+    sigs: list[dict] = []
+    before = None
+    MAX_PAGES = 2
+    reached_oldest = False
+    try:
+        for _ in range(MAX_PAGES):
+            params = [mint, {"limit": 1000}]
+            if before:
+                params[1]["before"] = before
+            data = await _rpc("getSignaturesForAddress", params)
+            batch = (data or {}).get("result") or []
+            if not batch:
+                reached_oldest = True
+                break
+            sigs.extend(batch)
+            before = batch[-1].get("signature")
+            if len(batch) < 1000:
+                reached_oldest = True
+                break
+    except Exception as exc:
+        logger.debug("detect_launch_bundle: sig paging %s failed: %s", mint[:12], exc)
+        return {"determinable": False}
+
+    if not reached_oldest or not sigs:
+        return {"determinable": False}  # couldn't see the launch — defer
+
+    launch_slot = min(int(s.get("slot") or 0) for s in sigs if s.get("slot"))
+    if launch_slot <= 0:
+        return {"determinable": False}
+
+    # 2. The launch-window signatures (creation slot + a slot or two). Cap parse.
+    WINDOW_SLOTS = 2
+    MAX_PARSE = 20
+    launch_sigs = [s for s in sigs
+                   if 0 < int(s.get("slot") or 0) <= launch_slot + WINDOW_SLOTS]
+    launch_sigs = launch_sigs[:MAX_PARSE]
+
+    # 3. Parse each launch tx; collect distinct wallets that RECEIVED the mint.
+    buyers: set[str] = set()
+    async def _buyers_in(sig: str):
+        try:
+            d = await _rpc("getTransaction",
+                           [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+            meta = (d or {}).get("result", {}).get("meta", {}) or {}
+            for tb in (meta.get("postTokenBalances") or []):
+                if tb.get("mint") == mint and tb.get("owner"):
+                    buyers.add(tb["owner"])
+        except Exception:
+            pass
+    try:
+        await asyncio.gather(*[_buyers_in(s["signature"]) for s in launch_sigs
+                               if s.get("signature")])
+    except Exception as exc:
+        logger.debug("detect_launch_bundle: tx parse %s failed: %s", mint[:12], exc)
+        return {"determinable": False}
+
+    wallets = list(buyers)
+    is_bundle = len(wallets) >= min_wallets
+    if is_bundle:
+        logger.info("detect_launch_bundle: BUNDLE %s — %d wallets bought in launch slot %d",
+                    mint[:12], len(wallets), launch_slot)
+    return {
+        "determinable": True, "is_bundle": is_bundle,
+        "wallet_count": len(wallets), "wallets": wallets, "launch_slot": launch_slot,
+    }
+
+
+async def classify_launch(mint: str) -> dict:
+    """Unified entry classifier. Tries REAL launch-bundle detection first; if it
+    can't see the launch, falls back to the holder-concentration proxy. Returns
+    {kind, label, wallets, detail} where kind is 'bundle' | 'concentration' | None.
+    Both kinds get the tighter bundle trade rules; only the LABEL differs so the
+    entry card is honest about what we actually detected."""
+    # Real launch bundle (authoritative)
+    try:
+        lb = await detect_launch_bundle(mint)
+        if lb.get("determinable") and lb.get("is_bundle"):
+            return {
+                "kind": "bundle",
+                "label": f"BUNDLED — {lb['wallet_count']} wallets sniped at launch",
+                "wallets": lb.get("wallets") or [],
+                "detail": f"{lb['wallet_count']} wallets bought in the launch block",
+            }
+    except Exception as exc:
+        logger.debug("classify_launch: launch-bundle %s err: %s", mint[:12], exc)
+
+    # Concentration proxy (fallback / additional signal)
+    try:
+        is_conc, top10 = await detect_bundle(mint)
+        if is_conc:
+            return {
+                "kind": "concentration",
+                "label": f"HIGH CONCENTRATION — top-10 hold {top10:.0f}% of supply",
+                "wallets": [],
+                "detail": f"top-10 hold {top10:.0f}% of supply",
+            }
+    except Exception as exc:
+        logger.debug("classify_launch: concentration %s err: %s", mint[:12], exc)
+
+    return {"kind": None, "label": "", "wallets": [], "detail": ""}
+
+
 def bundle_trade_params(clean_tp: float, clean_sl: float) -> tuple[float, float]:
     """Tighter exits for a bundle: lower TP (take the fast pop), tighter SL
     (the dump is sudden). Research consensus: 2x TP / 35% SL for bundles vs

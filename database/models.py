@@ -3577,6 +3577,7 @@ AGENT_PARAM_DEFAULTS = {
     "bundle_time_exit_min":        15.0,  # bundle un-pumped after this = exit (dump window)
     "bundle_time_exit_mult":       1.30,  # ...unless it's already above this mult
     "bundle_track_wallets_enabled": 1.0,  # record bundle participant wallets for the /bundlers board
+    "bundle_min_launch_wallets":    4.0,  # >= this many wallets buying in the launch block = real bundle
     "entry_min_m5_buys":           0.0,   # min m5 buy count (0 = ratio gate only)
     # Reject backside entries: skip if m5 price already falling harder than
     # this % at signal time ("caught the backside of the dump"). -25 = skip if

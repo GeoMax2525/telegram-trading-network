@@ -76,11 +76,12 @@ logger = logging.getLogger(__name__)
 async def _broadcast_entry(
     *, source: str, name: str, mint: str, size_sol: float, entry_mc: float,
     tp_x: float, sl_pct: float, reason: str | None,
-    is_bundle: bool = False, bundle_pct: float | None = None,
+    cls_label: str | None = None,
 ) -> None:
     """Post an ENTRY card to the caller group + community feed showing WHY we
     entered and the in/out strategy. Uses only data we already have at entry —
-    zero extra API/Claude cost. source: 'bundle' | 'scanner' | '4am'."""
+    zero extra API/Claude cost. source: 'bundle' | 'concentration' | 'scanner'
+    | '4am'. cls_label is the honest detected-launch description."""
     try:
         from bot.config import CALLER_GROUP_ID, SCAN_TOPIC_ID
         from bot.community_feed import post_to_community
@@ -89,11 +90,16 @@ async def _broadcast_entry(
         bot_ref = getattr(_st, "bot", None)
         mc_str = f"${entry_mc/1000:.0f}K" if entry_mc else "?"
 
-        if is_bundle:
+        if source == "bundle":
             head = f"📦 BUNDLED ENTRY — {name[:20]}"
             strat = (f"⚡ Bundle strategy: quick flip — TP {tp_x:.1f}x, SL {sl_pct:.0f}%, "
                      f"cut if flat 15m (dump-window exit)")
-            extra = f"🔗 Bundle: top-10 hold {bundle_pct:.0f}% of supply" if bundle_pct else ""
+            extra = f"🔗 {cls_label}" if cls_label else ""
+        elif source == "concentration":
+            head = f"🎯 HIGH-CONCENTRATION ENTRY — {name[:20]}"
+            strat = (f"⚡ Tight strategy: TP {tp_x:.1f}x, SL {sl_pct:.0f}%, "
+                     f"cut if flat 15m (concentrated = fast dump risk)")
+            extra = f"🔗 {cls_label}" if cls_label else ""
         elif source == "4am":
             head = f"⚡ 4AM ENTRY — {name[:20]}"
             strat = f"🎯 Strategy: ride runner — TP {tp_x:.1f}x, SL {sl_pct:.0f}%, trail above 1.5x"
@@ -129,21 +135,24 @@ async def _broadcast_entry(
         logger.debug("entry broadcast failed %s: %s", mint[:12] if mint else "?", exc)
 
 
-async def _record_bundle_wallets(mint: str, entry_mc: float | None) -> None:
-    """Resolve a bundle's top holder wallets and record a sighting per wallet,
-    so the /bundlers leaderboard can rank them by the avg peak X their tokens
-    reach. Fully off the hot path — never blocks or fails a trade."""
+async def _record_bundle_wallets(mint: str, entry_mc: float | None,
+                                 wallets: list | None = None) -> None:
+    """Record a sighting per bundle wallet so /bundlers can rank them by the avg
+    peak X their tokens reach. Prefers the REAL launch-bundle wallets (passed in);
+    falls back to resolving top holders. Off the hot path — never blocks a trade."""
     try:
-        from bot.agents.entry_filter import fetch_bundle_wallets
         from database.models import record_bundle_sighting
-        wallets = await fetch_bundle_wallets(mint)
-        for w in wallets:
+        ws = list(wallets or [])
+        if not ws:
+            from bot.agents.entry_filter import fetch_bundle_wallets
+            ws = await fetch_bundle_wallets(mint)
+        for w in ws:
             try:
                 await record_bundle_sighting(mint, w, entry_mc)
             except Exception:
                 pass
-        if wallets:
-            logger.info("Bundle: recorded %d wallets for %s", len(wallets), mint[:12])
+        if ws:
+            logger.info("Bundle: recorded %d wallets for %s", len(ws), mint[:12])
     except Exception as exc:
         logger.debug("Bundle: record wallets failed %s: %s", mint[:12], exc)
 
@@ -1324,22 +1333,23 @@ async def run_once() -> tuple[int, int]:
             if state.paper_balance < tg_paper_sol + 0.05:
                 continue
 
-            # Bundle-aware: detect a clustered launch and trade it with tighter
-            # rules (lower TP, tighter SL, and a 15-min time-exit in the monitor).
-            from bot.agents.entry_filter import detect_bundle, bundle_trade_params
+            # Bundle-aware: classify the launch (real launch-bundle, else
+            # high-concentration) and trade it with tighter rules.
+            from bot.agents.entry_filter import classify_launch, bundle_trade_params
             tg_tp_x, tg_sl_pct = 8.0, 20.0
             tg_pattern = "tg_signal"
-            tg_is_bundle, tg_top10 = False, None
+            tg_cls = {"kind": None, "label": "", "wallets": []}
             try:
-                tg_is_bundle, tg_top10 = await detect_bundle(mint)
-                if tg_is_bundle:
+                tg_cls = await classify_launch(mint)
+                if tg_cls["kind"]:
                     tg_tp_x, tg_sl_pct = bundle_trade_params(tg_tp_x, tg_sl_pct)
                     tg_pattern = "tg_signal_bundle"
-                    logger.info("Scanner: TG %s is BUNDLE (top10=%.0f%%) — tp=%.1fx sl=%.0f%%",
-                                token_name[:16], tg_top10 or 0, tg_tp_x, tg_sl_pct)
-                    asyncio.create_task(_record_bundle_wallets(mint, entry_mc))
+                    logger.info("Scanner: TG %s %s — tp=%.1fx sl=%.0f%%",
+                                token_name[:16], tg_cls["label"], tg_tp_x, tg_sl_pct)
+                    asyncio.create_task(
+                        _record_bundle_wallets(mint, entry_mc, tg_cls.get("wallets")))
             except Exception as _be:
-                logger.debug("Scanner: bundle detect failed %s: %s", mint[:12], _be)
+                logger.debug("Scanner: bundle classify failed %s: %s", mint[:12], _be)
 
             pt = await open_paper_trade(
                 token_address=mint,
@@ -1361,13 +1371,13 @@ async def run_once() -> tuple[int, int]:
             )
 
             # Entry card — source, size, reason, in/out strategy (free: uses
-            # data we already have). Bundles say so + show the cluster %.
+            # data we already have). Bundles/concentration say so honestly.
             await _broadcast_entry(
-                source="bundle" if tg_is_bundle else "4am",
+                source=(tg_cls["kind"] or "4am"),
                 name=token_name, mint=mint, size_sol=tg_paper_sol, entry_mc=entry_mc,
                 tp_x=tg_tp_x, sl_pct=tg_sl_pct,
                 reason=f"4am channel call [{tg.get('tg_channel', '?')}] — trusted source",
-                is_bundle=tg_is_bundle, bundle_pct=tg_top10,
+                cls_label=tg_cls.get("label"),
             )
 
             # Relay to subscribers
@@ -1799,24 +1809,25 @@ async def run_once() -> tuple[int, int]:
                 # tighter SL, 15-min time-exit applied in the monitor). Tag the
                 # pattern so the monitor and reports can see it's a bundle.
                 _scan_pattern = scored.get("profile_tag") or scored.get("source") or ""
-                _is_b, _t10 = False, None
+                _cls = {"kind": None, "label": "", "wallets": []}
                 try:
-                    from bot.agents.entry_filter import detect_bundle, bundle_trade_params
-                    _is_b, _t10 = await detect_bundle(scored.get("mint", ""))
-                    if _is_b:
+                    from bot.agents.entry_filter import classify_launch, bundle_trade_params
+                    _cls = await classify_launch(scored.get("mint", ""))
+                    if _cls["kind"]:  # bundle OR high concentration → tighter rules
                         tp_for_open, sl_for_open = bundle_trade_params(tp_for_open, sl_for_open)
                         _scan_pattern = (_scan_pattern + ",bundle").lstrip(",")
                         logger.info(
-                            "Scanner: %s is BUNDLE (top10=%.0f%%) — tp=%.1fx sl=%.0f%%",
-                            (scored.get("name") or "?")[:16], _t10 or 0, tp_for_open, sl_for_open,
+                            "Scanner: %s %s — tp=%.1fx sl=%.0f%%",
+                            (scored.get("name") or "?")[:16], _cls["label"], tp_for_open, sl_for_open,
                         )
-                        # Record the bundle's participant wallets (off the hot
-                        # path) for the /bundlers leaderboard + future copy-follow.
+                        # Record participant wallets (real launch-bundle wallets
+                        # when we have them; else resolve top holders) off-path.
                         asyncio.create_task(
-                            _record_bundle_wallets(scored.get("mint", ""), fresh_mc)
+                            _record_bundle_wallets(
+                                scored.get("mint", ""), fresh_mc, _cls.get("wallets"))
                         )
                 except Exception as _be:
-                    logger.debug("Scanner: bundle detect failed: %s", _be)
+                    logger.debug("Scanner: bundle classify failed: %s", _be)
 
                 pt = await open_paper_trade(
                     token_address=scored.get("mint", ""),
@@ -1838,13 +1849,13 @@ async def run_once() -> tuple[int, int]:
                 # Entry card — source, size, reason, in/out strategy. The reason
                 # is the confidence engine's own trade_reasoning (already computed).
                 await _broadcast_entry(
-                    source="bundle" if _is_b else "scanner",
+                    source=(_cls["kind"] or "scanner"),
                     name=scored.get("name") or "?", mint=scored.get("mint", ""),
                     size_sol=paper_sol, entry_mc=fresh_mc,
                     tp_x=tp_for_open, sl_pct=sl_for_open,
                     reason=(scored.get("trade_reasoning")
                             or f"confidence {scored.get('confidence_score', 0):.0f}/100"),
-                    is_bundle=_is_b, bundle_pct=_t10,
+                    cls_label=_cls.get("label"),
                 )
 
                 # Relay trade to subscribers (runs in background; delay=RELAY_DELAY)
