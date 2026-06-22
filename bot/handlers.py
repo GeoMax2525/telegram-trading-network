@@ -2184,6 +2184,46 @@ async def cmd_forcecheck(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
+# ── /bundlers — top bundle wallets by avg peak X ──────────────────────────
+@router.message(Command("bundlers"))
+async def cmd_bundlers(message: Message):
+    """Leaderboard of bundle participant wallets ranked by the avg peak X their
+    bundled tokens reached. The data that reveals which bundlers are worth
+    copy-following (high avg X over multiple bundles) vs the dumpers."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from database.models import top_bundle_wallets, AsyncSessionLocal, select, func, BundleSighting
+    try:
+        board = await top_bundle_wallets(limit=20, min_bundles=2)
+        async with AsyncSessionLocal() as s:
+            total_sightings = (await s.execute(select(func.count(BundleSighting.id)))).scalar() or 0
+            scored = (await s.execute(
+                select(func.count(BundleSighting.id)).where(BundleSighting.scored.is_(True)))).scalar() or 0
+    except Exception as exc:
+        await message.reply(f"❌ bundlers error: {exc}", parse_mode=None)
+        return
+
+    lines = [
+        "📦 TOP BUNDLE WALLETS",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        "Ranked by avg peak X across their bundled tokens",
+        f"(min 2 resolved bundles · {scored}/{total_sightings} sightings scored)",
+        "",
+    ]
+    if board:
+        for i, w in enumerate(board, 1):
+            lines.append(
+                f"{i}. {w['wallet'][:6]}…{w['wallet'][-4:]} — "
+                f"avg {w['avg_x']:.2f}x · best {w['best_x']:.1f}x · {w['bundles']} bundles"
+            )
+        lines += ["", "High avg X over many bundles = candidate to copy-follow.",
+                  "Low avg X = a dumper; don't follow."]
+    else:
+        lines.append("No scored bundle wallets yet — need bundled trades to")
+        lines.append("resolve first. Check back after a day of bundle entries.")
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /scannerwhy — Diagnose why scanner isn't opening paper trades ─────────
 
 @router.message(Command("scannerwhy"))

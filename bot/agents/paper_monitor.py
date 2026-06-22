@@ -153,6 +153,17 @@ async def _close_and_track(trade_id, reason, pnl, peak_mc, peak_mult, is_admin: 
     if not closed:
         logger.info("paper close skipped — trade %s already closed (race)", trade_id)
         return False
+    # Bundle wallet scoring — if this was a bundle trade, attribute its final
+    # peak multiple to every wallet we recorded for it, so the /bundlers board
+    # ranks bundlers by the avg peak their tokens reach. Best-effort, off-path.
+    try:
+        from database.models import AsyncSessionLocal as _ASL, PaperTrade as _PT, score_bundle_sightings
+        async with _ASL() as _s:
+            _t = await _s.get(_PT, trade_id)
+        if _t and "bundle" in (_t.pattern_type or "").lower() and _t.token_address:
+            await score_bundle_sightings(_t.token_address, float(peak_mult or 1.0))
+    except Exception as _bse:
+        logger.debug("bundle sighting score failed for %s: %s", trade_id, _bse)
     if not is_admin:
         return True
     if reason in ("tp_hit", "trail_hit", "profit_trail"):

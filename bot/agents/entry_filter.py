@@ -178,6 +178,56 @@ async def detect_bundle(mint: str) -> tuple[bool, float | None]:
     return is_bundle, top10_pct
 
 
+async def fetch_bundle_wallets(mint: str, top_n: int = 8) -> list[str]:
+    """Resolve the top-N holder TOKEN accounts to their OWNER wallet addresses
+    (the actual wallets behind the bundle). getTokenLargestAccounts returns
+    token accounts; one getAccountInfo each resolves the owner. Capped + gated
+    so the Helius cost stays bounded. Returns [] on any failure."""
+    cfg = await get_params("bundle_track_wallets_enabled")
+    if float(cfg.get("bundle_track_wallets_enabled") or 1.0) < 0.5:
+        return []
+    # 1. Top holder token accounts
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
+    try:
+        timeout = aiohttp.ClientTimeout(total=_HELIUS_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(HELIUS_RPC_URL, json=payload) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json(content_type=None)
+    except Exception as exc:
+        logger.debug("fetch_bundle_wallets: largest accounts %s failed: %s", mint[:12], exc)
+        return []
+    accts = [(a or {}).get("address") for a in
+             ((data or {}).get("result", {}).get("value") or [])[:top_n]]
+    accts = [a for a in accts if a]
+    if not accts:
+        return []
+
+    # 2. Resolve each token account → owner wallet (parallel, bounded)
+    async def _owner(tok_acct: str) -> str | None:
+        p = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+             "params": [tok_acct, {"encoding": "jsonParsed"}]}
+        try:
+            timeout = aiohttp.ClientTimeout(total=_HELIUS_TIMEOUT)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(HELIUS_RPC_URL, json=p) as resp:
+                    if resp.status != 200:
+                        return None
+                    d = await resp.json(content_type=None)
+            return (d or {}).get("result", {}).get("value", {}).get("data", {}) \
+                .get("parsed", {}).get("info", {}).get("owner")
+        except Exception:
+            return None
+
+    owners = await asyncio.gather(*[_owner(a) for a in accts], return_exceptions=True)
+    out = []
+    for o in owners:
+        if isinstance(o, str) and o and o not in out:
+            out.append(o)
+    return out
+
+
 def bundle_trade_params(clean_tp: float, clean_sl: float) -> tuple[float, float]:
     """Tighter exits for a bundle: lower TP (take the fast pop), tighter SL
     (the dump is sudden). Research consensus: 2x TP / 35% SL for bundles vs

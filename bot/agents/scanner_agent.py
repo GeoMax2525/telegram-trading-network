@@ -129,6 +129,25 @@ async def _broadcast_entry(
         logger.debug("entry broadcast failed %s: %s", mint[:12] if mint else "?", exc)
 
 
+async def _record_bundle_wallets(mint: str, entry_mc: float | None) -> None:
+    """Resolve a bundle's top holder wallets and record a sighting per wallet,
+    so the /bundlers leaderboard can rank them by the avg peak X their tokens
+    reach. Fully off the hot path — never blocks or fails a trade."""
+    try:
+        from bot.agents.entry_filter import fetch_bundle_wallets
+        from database.models import record_bundle_sighting
+        wallets = await fetch_bundle_wallets(mint)
+        for w in wallets:
+            try:
+                await record_bundle_sighting(mint, w, entry_mc)
+            except Exception:
+                pass
+        if wallets:
+            logger.info("Bundle: recorded %d wallets for %s", len(wallets), mint[:12])
+    except Exception as exc:
+        logger.debug("Bundle: record wallets failed %s: %s", mint[:12], exc)
+
+
 PROFILES_URL    = "https://api.dexscreener.com/token-profiles/latest/v1"
 RUGCHECK_URL    = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
@@ -1318,6 +1337,7 @@ async def run_once() -> tuple[int, int]:
                     tg_pattern = "tg_signal_bundle"
                     logger.info("Scanner: TG %s is BUNDLE (top10=%.0f%%) — tp=%.1fx sl=%.0f%%",
                                 token_name[:16], tg_top10 or 0, tg_tp_x, tg_sl_pct)
+                    asyncio.create_task(_record_bundle_wallets(mint, entry_mc))
             except Exception as _be:
                 logger.debug("Scanner: bundle detect failed %s: %s", mint[:12], _be)
 
@@ -1789,6 +1809,11 @@ async def run_once() -> tuple[int, int]:
                         logger.info(
                             "Scanner: %s is BUNDLE (top10=%.0f%%) — tp=%.1fx sl=%.0f%%",
                             (scored.get("name") or "?")[:16], _t10 or 0, tp_for_open, sl_for_open,
+                        )
+                        # Record the bundle's participant wallets (off the hot
+                        # path) for the /bundlers leaderboard + future copy-follow.
+                        asyncio.create_task(
+                            _record_bundle_wallets(scored.get("mint", ""), fresh_mc)
                         )
                 except Exception as _be:
                     logger.debug("Scanner: bundle detect failed: %s", _be)

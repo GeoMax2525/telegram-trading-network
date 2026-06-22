@@ -198,6 +198,82 @@ class WalletCluster(Base):
     created_at        = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
 
+# ── Bundle wallet tracking ──────────────────────────────────────────────────
+# One row per (bundled token, participating wallet) sighting. peak_x is filled
+# when the token resolves, so we can rank bundle wallets by the avg peak their
+# tokens reach — the data that reveals which bundlers are worth copy-following.
+
+class BundleSighting(Base):
+    __tablename__ = "bundle_sightings"
+
+    id             = Column(Integer,    primary_key=True, autoincrement=True)
+    mint           = Column(String(64), nullable=False, index=True)
+    wallet_address = Column(String(64), nullable=False, index=True)
+    entry_mc       = Column(Float,      nullable=True)
+    peak_x         = Column(Float,      nullable=True)   # filled at token resolution
+    scored         = Column(Boolean,    default=False)   # peak_x written?
+    recorded_at    = Column(DateTime,   default=datetime.utcnow, nullable=False)
+
+
+async def record_bundle_sighting(mint: str, wallet_address: str, entry_mc: float | None) -> None:
+    """Record that `wallet_address` was a top holder of bundled token `mint`.
+    Deduped per (mint, wallet) so re-detection doesn't double-count."""
+    async with AsyncSessionLocal() as s:
+        existing = (await s.execute(
+            select(BundleSighting.id).where(
+                BundleSighting.mint == mint,
+                BundleSighting.wallet_address == wallet_address,
+            )
+        )).scalar()
+        if existing is not None:
+            return
+        s.add(BundleSighting(mint=mint, wallet_address=wallet_address, entry_mc=entry_mc))
+        await s.commit()
+
+
+async def score_bundle_sightings(mint: str, peak_x: float) -> int:
+    """When a bundled token resolves, write its peak multiple to every
+    unscored sighting for that mint. Returns how many wallets were scored."""
+    async with AsyncSessionLocal() as s:
+        rows = (await s.execute(
+            select(BundleSighting).where(
+                BundleSighting.mint == mint,
+                BundleSighting.scored.is_(False),
+            )
+        )).scalars().all()
+        for r in rows:
+            r.peak_x = float(peak_x)
+            r.scored = True
+        if rows:
+            await s.commit()
+        return len(rows)
+
+
+async def top_bundle_wallets(limit: int = 20, min_bundles: int = 2) -> list[dict]:
+    """Leaderboard of bundle wallets ranked by avg peak X of their scored
+    tokens. Only wallets seen in >= min_bundles resolved bundles qualify —
+    a single lucky bundle doesn't make a wallet worth following."""
+    async with AsyncSessionLocal() as s:
+        rows = (await s.execute(
+            select(
+                BundleSighting.wallet_address,
+                func.count(BundleSighting.id).label("n"),
+                func.avg(BundleSighting.peak_x).label("avg_x"),
+                func.max(BundleSighting.peak_x).label("best_x"),
+            )
+            .where(BundleSighting.scored.is_(True))
+            .group_by(BundleSighting.wallet_address)
+            .having(func.count(BundleSighting.id) >= min_bundles)
+            .order_by(func.avg(BundleSighting.peak_x).desc())
+            .limit(limit)
+        )).all()
+    return [
+        {"wallet": r.wallet_address, "bundles": int(r.n or 0),
+         "avg_x": round(float(r.avg_x or 0), 2), "best_x": round(float(r.best_x or 0), 2)}
+        for r in rows
+    ]
+
+
 # ── TG Signals table (Telegram channel scraper) ─────────────────────────────
 
 class TgSignal(Base):
@@ -3500,6 +3576,7 @@ AGENT_PARAM_DEFAULTS = {
     "bundle_top10_pct_threshold":  60.0,  # top-10 concentration >= this = bundle
     "bundle_time_exit_min":        15.0,  # bundle un-pumped after this = exit (dump window)
     "bundle_time_exit_mult":       1.30,  # ...unless it's already above this mult
+    "bundle_track_wallets_enabled": 1.0,  # record bundle participant wallets for the /bundlers board
     "entry_min_m5_buys":           0.0,   # min m5 buy count (0 = ratio gate only)
     # Reject backside entries: skip if m5 price already falling harder than
     # this % at signal time ("caught the backside of the dump"). -25 = skip if
