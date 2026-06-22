@@ -2689,6 +2689,61 @@ class LiveMirror(Base):
     closed_at       = Column(DateTime, nullable=True)
 
 
+class DailyRiskLedger(Base):
+    """Persistent daily live-risk state — survives restarts/redeploys so the
+    spend cap, count cap and LOSS circuit breaker actually hold (the in-memory
+    version reset on every deploy, defeating the breaker). One row per UTC date."""
+    __tablename__ = "daily_risk_ledger"
+    date_utc      = Column(String(10), primary_key=True)   # "YYYY-MM-DD"
+    spent_sol     = Column(Float, default=0.0)
+    realized_pnl  = Column(Float, default=0.0)
+    buys          = Column(Integer, default=0)
+    updated_at    = Column(DateTime, default=datetime.utcnow)
+
+
+async def _today_str() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+async def ledger_today() -> dict:
+    """Get-or-create today's risk ledger row, returned as a plain dict."""
+    d = await _today_str()
+    async with AsyncSessionLocal() as s:
+        row = await s.get(DailyRiskLedger, d)
+        if row is None:
+            row = DailyRiskLedger(date_utc=d, spent_sol=0.0, realized_pnl=0.0, buys=0)
+            s.add(row)
+            await s.commit()
+            await s.refresh(row)
+        return {"date": row.date_utc, "spent_sol": row.spent_sol or 0.0,
+                "realized_pnl": row.realized_pnl or 0.0, "buys": row.buys or 0}
+
+
+async def ledger_record_buy(amount_sol: float) -> None:
+    d = await _today_str()
+    async with AsyncSessionLocal() as s:
+        row = await s.get(DailyRiskLedger, d)
+        if row is None:
+            row = DailyRiskLedger(date_utc=d)
+            s.add(row)
+        row.spent_sol = round((row.spent_sol or 0.0) + float(amount_sol or 0), 6)
+        row.buys = (row.buys or 0) + 1
+        row.updated_at = datetime.utcnow()
+        await s.commit()
+
+
+async def ledger_record_close(pnl_sol: float) -> None:
+    d = await _today_str()
+    async with AsyncSessionLocal() as s:
+        row = await s.get(DailyRiskLedger, d)
+        if row is None:
+            row = DailyRiskLedger(date_utc=d)
+            s.add(row)
+        row.realized_pnl = round((row.realized_pnl or 0.0) + float(pnl_sol or 0), 6)
+        row.updated_at = datetime.utcnow()
+        await s.commit()
+
+
 # ── Echo (Trojan Horse signal/intelligence bot) Data Hub ────────────────────
 # Separate bot identity, shared database. Echo monitors many external alpha
 # groups, silently records every CA sighting, scores groups + callers, and

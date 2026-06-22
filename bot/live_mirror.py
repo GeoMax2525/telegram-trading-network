@@ -79,7 +79,7 @@ async def mirror_open(paper_trade_id: int, mint: str, subscriber_id, paper_sol: 
                         (mint or "?")[:8], impact, max_impact)
             return
         sig = await execute_ultra_order(order, keypair)
-        record_live_buy(size)
+        await record_live_buy(size)
         async with AsyncSessionLocal() as session:
             session.add(LiveMirror(
                 paper_trade_id=paper_trade_id, mint=mint, sol_spent=size,
@@ -190,7 +190,7 @@ async def mirror_close(paper_trade_id: int, mint: str, pnl_frac: float = 0.0) ->
         # Feed the daily-loss circuit breaker with the realized live PnL.
         try:
             from bot.live_guard import record_live_close
-            record_live_close(float(lm.sol_spent or 0) * float(pnl_frac or 0))
+            await record_live_close(float(lm.sol_spent or 0) * float(pnl_frac or 0))
         except Exception:
             pass
         logger.info("live_mirror: LIVE SELL %s done  sig=%s", (mint or "?")[:8], (sig or "none")[:10])
