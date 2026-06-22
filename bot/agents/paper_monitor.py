@@ -18,6 +18,27 @@ import logging
 _close_commentary_tasks: set = set()
 
 
+def _close_card(emoji: str, title: str, name: str, mult: float, pnl: float,
+                entry_mc: float, current_mc: float, note: str | None = None) -> list:
+    """Build a clean, consistent HTML close card. Pass parse_mode='HTML' to
+    _finalize_paper_close when using this. {bal:.2f} is filled there."""
+    from html import escape as _esc
+    icon = "🟢" if (pnl or 0) > 0 else "🔴"
+    e_mc = f"${entry_mc/1000:.0f}K" if entry_mc else "?"
+    c_mc = f"${current_mc/1000:.0f}K" if current_mc else "?"
+    lines = [
+        f"{emoji} <b>{title}</b>",
+        "",
+        f"🪙 {_esc(str(name)[:24])}",
+        f"<b>Result:</b> {mult:.2f}x → <b>{pnl:+.4f} SOL</b> {icon}",
+        f"MC: {e_mc} → {c_mc}",
+    ]
+    if note:
+        lines.append(note)
+    lines.append("💰 <b>Balance:</b> {bal:.2f} SOL")
+    return lines
+
+
 def _spawn_close_commentary(bot, pt, pnl: float, peak_mult: float, close_reason: str) -> None:
     """Spawn an async Claude commentary task that doesn't block the close
     broadcast. Posts a follow-up message with Claude's read of why this
@@ -204,6 +225,7 @@ async def _refund_subscriber_balance(sub_id: int, locked_sol: float, pnl: float)
 
 async def _finalize_paper_close(
     bot, pt, reason, pnl, peak_mc, peak_mult, lines, only_admin_session: bool = True,
+    parse_mode: str | None = None,
 ):
     """
     Close trade, refresh balance for the right party, route notification.
@@ -261,6 +283,7 @@ async def _finalize_paper_close(
             await bot.send_message(
                 CALLER_GROUP_ID, text,
                 message_thread_id=SCAN_TOPIC_ID,
+                parse_mode=parse_mode,
             )
         except Exception:
             pass
@@ -269,7 +292,7 @@ async def _finalize_paper_close(
         # Silent no-op if COMMUNITY_CHANNEL_ID not configured.
         try:
             from bot.community_feed import post_to_community
-            await post_to_community(bot, text)
+            await post_to_community(bot, text, parse_mode=parse_mode)
         except Exception as exc:
             logger.debug("community_feed close mirror failed: %s", exc)
 
@@ -633,12 +656,11 @@ async def _check_open_trades(bot) -> None:
                     name, age_hours * 60, peak_mult, current_mult, pnl,
                 )
                 await _finalize_paper_close(
-                    bot, pt, "no_momentum", pnl, peak_mc, peak_mult, [
-                        f"⏬ PAPER TRADE — NO MOMENTUM (ejected)",
-                        f"🪙 {name} | {current_mult:.2f}x | {pnl:+.4f} SOL",
-                        f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                        "Balance: {bal:.2f} SOL",
-                    ],
+                    bot, pt, "no_momentum", pnl, peak_mc, peak_mult,
+                    _close_card("⏬", "NO MOMENTUM — ejected", name, current_mult,
+                                pnl, entry_mc, current_mc,
+                                note="Momentum died early — no follow-through."),
+                    parse_mode="HTML",
                 )
                 continue
 
@@ -661,15 +683,12 @@ async def _check_open_trades(bot) -> None:
                         "Paper: BUNDLE TIME-EXIT %s — age=%.1fm peak=%.2fx now=%.2fx pnl=%+.4f",
                         name, age_hours * 60, peak_mult, current_mult, pnl,
                     )
-                    _icon = "✅" if pnl > 0 else "❌"
                     await _finalize_paper_close(
-                        bot, pt, "bundle_time_exit", pnl, peak_mc, peak_mult, [
-                            f"📦 BUNDLE EXIT — dump-window cut",
-                            f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
-                            f"Flat after {age_hours*60:.0f}m — cut before the dump {_icon}",
-                            f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                            "Balance: {bal:.2f} SOL",
-                        ],
+                        bot, pt, "bundle_time_exit", pnl, peak_mc, peak_mult,
+                        _close_card("📦", "BUNDLE EXIT — dump-window cut", name,
+                                    current_mult, pnl, entry_mc, current_mc,
+                                    note=f"Flat after {age_hours*60:.0f}m — cut before the dump."),
+                        parse_mode="HTML",
                     )
                     continue
 
@@ -692,14 +711,11 @@ async def _check_open_trades(bot) -> None:
                 # entry card has a matching exit). Normal scanner time-stops stay
                 # silent — they fire often and would spam the feed.
                 if is_bundle_trade:
-                    _icon = "✅" if pnl > 0 else "❌"
                     await _finalize_paper_close(
-                        bot, pt, "time_stop", pnl, peak_mc, peak_mult, [
-                            f"📦 BUNDLE EXIT — flat, cut early {_icon}",
-                            f"🪙 {name} | peak {peak_mult:.1f}x → {current_mult:.1f}x | {pnl:+.4f} SOL",
-                            f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                            "Balance: {bal:.2f} SOL",
-                        ],
+                        bot, pt, "time_stop", pnl, peak_mc, peak_mult,
+                        _close_card("📦", "BUNDLE EXIT — flat, cut early", name,
+                                    current_mult, pnl, entry_mc, current_mc),
+                        parse_mode="HTML",
                     )
                 else:
                     await _finalize_silent_close(
@@ -719,12 +735,11 @@ async def _check_open_trades(bot) -> None:
                     name, peak_mult, current_mult, pnl, ",".join(tags) or "-",
                 )
                 await _finalize_paper_close(
-                    bot, pt, "breakeven_stop", pnl, peak_mc, peak_mult, [
-                        f"🛡️ PAPER TRADE — BREAK EVEN STOP",
-                        f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
-                        f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                        "Balance: {bal:.2f} SOL",
-                    ],
+                    bot, pt, "breakeven_stop", pnl, peak_mc, peak_mult,
+                    _close_card("🛡️", "BREAK-EVEN STOP", name, current_mult, pnl,
+                                entry_mc, current_mc,
+                                note=f"Peak {peak_mult:.1f}x — protected the entry."),
+                    parse_mode="HTML",
                 )
                 continue
 
@@ -747,12 +762,11 @@ async def _check_open_trades(bot) -> None:
                         name, peak_mult, current_mult, pnl, ",".join(tags) or "-",
                     )
                     await _finalize_paper_close(
-                        bot, pt, "profit_trail", pnl, peak_mc, peak_mult, [
-                            f"💰 PAPER TRADE — PROFIT TRAIL",
-                            f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
-                            f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                            "Balance: {bal:.2f} SOL",
-                        ],
+                        bot, pt, "profit_trail", pnl, peak_mc, peak_mult,
+                        _close_card("💰", "PROFIT TRAIL", name, current_mult, pnl,
+                                    entry_mc, current_mc,
+                                    note=f"Peak {peak_mult:.1f}x — trailed the runner."),
+                        parse_mode="HTML",
                     )
                     continue
 
@@ -887,12 +901,10 @@ async def _check_open_trades(bot) -> None:
                     name, current_mult, pnl, ",".join(tags) or "-",
                 )
                 await _finalize_paper_close(
-                    bot, pt, "tp_hit", pnl, peak_mc, peak_mult, [
-                        f"✅ PAPER TRADE WIN",
-                        f"🪙 {name} | {current_mult:.1f}x | +{pnl:.4f} SOL",
-                        f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                        "Balance: {bal:.2f} SOL",
-                    ],
+                    bot, pt, "tp_hit", pnl, peak_mc, peak_mult,
+                    _close_card("✅", "WIN — take-profit hit", name, current_mult,
+                                pnl, entry_mc, current_mc, note="🎯 Target reached."),
+                    parse_mode="HTML",
                 )
                 continue
 
@@ -914,14 +926,12 @@ async def _check_open_trades(bot) -> None:
                             "Paper: TRAIL hit %s — peak=%.2fx now=%.2fx pnl=%+.4f tags=%s",
                             name, peak_mult, current_mult, pnl, ",".join(tags) or "-",
                         )
-                        msg_icon = "✅" if pnl > 0 else "❌"
                         await _finalize_paper_close(
-                            bot, pt, "trail_hit", pnl, peak_mc, peak_mult, [
-                                f"{msg_icon} PAPER TRADE — TRAIL STOP",
-                                f"🪙 {name} | peak {peak_mult:.1f}x → now {current_mult:.1f}x | {pnl:+.4f} SOL",
-                                f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                                "Balance: {bal:.2f} SOL",
-                            ],
+                            bot, pt, "trail_hit", pnl, peak_mc, peak_mult,
+                            _close_card("📉", "TRAIL STOP", name, current_mult, pnl,
+                                        entry_mc, current_mc,
+                                        note=f"Peak {peak_mult:.1f}x — locked the trail."),
+                            parse_mode="HTML",
                         )
                         continue
 
@@ -959,12 +969,10 @@ async def _check_open_trades(bot) -> None:
                     name, current_mult, pnl, ",".join(tags) or "-",
                 )
                 await _finalize_paper_close(
-                    bot, pt, "sl_hit", pnl, peak_mc, peak_mult, [
-                        f"❌ PAPER TRADE LOSS",
-                        f"🪙 {name} | SL hit | {pnl:.4f} SOL",
-                        f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
-                        "Balance: {bal:.2f} SOL",
-                    ],
+                    bot, pt, "sl_hit", pnl, peak_mc, peak_mult,
+                    _close_card("❌", "LOSS — stop-loss hit", name, current_mult,
+                                pnl, entry_mc, current_mc, note="🛑 SL triggered."),
+                    parse_mode="HTML",
                 )
 
         except Exception as exc:

@@ -87,45 +87,57 @@ async def _broadcast_entry(
         from bot.community_feed import post_to_community
         import bot.state as _st
 
+        from html import escape as _esc
         bot_ref = getattr(_st, "bot", None)
         mc_str = f"${entry_mc/1000:.0f}K" if entry_mc else "?"
+        nm = _esc(name[:24])
 
-        # Compact 3-line card: header · facts · strategy. No name repeat, short
-        # exit note. The full "why" trails on its own line only when present.
         if source == "bundle":
-            head = f"📦 BUNDLE — {name[:20]}"
-            tag = cls_label or "bundled launch"
-            strat = f"⚡ TP {tp_x:.1f}x · SL {sl_pct:.0f}% · flat-cut 15m"
+            head = f"📦 <b>BUNDLED ENTRY</b> — {nm}"
+            tag_line = f"🔗 {_esc(cls_label)}" if cls_label else "🔗 Bundled launch"
+            strat_head = "⚡ <b>Strategy:</b> Quick flip"
+            strat_body = f"TP <b>{tp_x:.1f}x</b> | SL <b>{sl_pct:.0f}%</b> | Cut if flat 15m"
         elif source == "concentration":
-            head = f"🎯 CONCENTRATED — {name[:20]}"
-            tag = cls_label or "high concentration"
-            strat = f"⚡ TP {tp_x:.1f}x · SL {sl_pct:.0f}% · flat-cut 15m"
+            head = f"🎯 <b>HIGH-CONCENTRATION ENTRY</b> — {nm}"
+            tag_line = f"🔗 {_esc(cls_label)}" if cls_label else "🔗 High concentration"
+            strat_head = "⚡ <b>Strategy:</b> Tight (fast-dump risk)"
+            strat_body = f"TP <b>{tp_x:.1f}x</b> | SL <b>{sl_pct:.0f}%</b> | Cut if flat 15m"
         elif source == "4am":
-            head = f"⚡ 4AM — {name[:20]}"
-            tag = "trusted 4am call"
-            strat = f"🎯 TP {tp_x:.1f}x · SL {sl_pct:.0f}% · trail >1.5x"
+            head = f"⚡ <b>4AM ENTRY</b> — {nm}"
+            tag_line = "🔗 Trusted 4am call"
+            strat_head = "⚡ <b>Strategy:</b> Ride the runner"
+            strat_body = f"TP <b>{tp_x:.1f}x</b> | SL <b>{sl_pct:.0f}%</b> | Trail above 1.5x"
         else:
-            head = f"🔍 SCANNER — {name[:20]}"
-            tag = None
-            strat = f"🎯 TP {tp_x:.1f}x · SL {sl_pct:.0f}% · trail >2x"
+            head = f"🔍 <b>SCANNER ENTRY</b> — {nm}"
+            tag_line = None
+            strat_head = "⚡ <b>Strategy:</b> Scanner signal"
+            strat_body = f"TP <b>{tp_x:.1f}x</b> | SL <b>{sl_pct:.0f}%</b> | Trail above 2x"
 
-        facts = f"Entry {mc_str} · Size {size_sol:.2f} SOL"
-        if tag:
-            facts += f" · {tag}"
-        lines = [head, facts, strat]
+        lines = [
+            head,
+            "",
+            f"🪙 <b>Entry MC:</b> {mc_str} | <b>Size:</b> {size_sol:.2f} SOL",
+        ]
+        if tag_line:
+            lines.append(tag_line)
         if reason:
-            lines.append(f"📝 {reason[:140]}")
+            # Split the pipe-delimited reason into bullets for readability.
+            bullets = [b.strip() for b in str(reason).split("|") if b.strip()]
+            lines += ["", "📝 <b>Why:</b>"]
+            lines += [f"• {_esc(b[:80])}" for b in bullets[:6]]
+        lines += ["", strat_head, strat_body]
         text = "\n".join(lines)
 
         if bot_ref is not None:
             try:
                 await bot_ref.send_message(
                     CALLER_GROUP_ID, text, message_thread_id=SCAN_TOPIC_ID,
+                    parse_mode="HTML",
                 )
             except Exception:
                 pass
             try:
-                await post_to_community(bot_ref, text)
+                await post_to_community(bot_ref, text, parse_mode="HTML")
             except Exception:
                 pass
     except Exception as exc:
