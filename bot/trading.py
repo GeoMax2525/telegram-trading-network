@@ -162,5 +162,43 @@ async def execute_ultra_order(order: dict, keypair) -> str:
             details += f", code={code}"
         raise RuntimeError(f"Swap failed — {details}")
 
-    logger.info("Ultra execute success: %s", signature)
+    # Jupiter says "Success" — but that's its API view, not on-chain finality.
+    # Under congestion a tx can be reported success yet fail to confirm. For
+    # REAL money we verify it actually landed before trusting the position.
+    confirmed = await confirm_signature(signature)
+    if not confirmed:
+        raise RuntimeError(
+            f"Swap submitted but NOT confirmed on-chain within timeout — sig={signature}. "
+            f"Treat as failed (do not record the position)."
+        )
+
+    logger.info("Ultra execute confirmed on-chain: %s", signature)
     return signature
+
+
+async def confirm_signature(signature: str, timeout_s: float = 30.0,
+                            poll_s: float = 2.0) -> bool:
+    """Poll getSignatureStatuses until the tx is confirmed/finalized (True) or
+    its on-chain err is set (False) or we time out (False). This is the
+    difference between trusting Jupiter's API and trusting the chain."""
+    import asyncio
+    import time
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            resp = await rpc_call("getSignatureStatuses",
+                                  [[signature], {"searchTransactionHistory": True}])
+            val = ((resp or {}).get("result", {}).get("value") or [None])[0]
+            if val is not None:
+                if val.get("err") is not None:
+                    logger.error("confirm_signature: tx %s has on-chain err: %s",
+                                 signature[:12], val.get("err"))
+                    return False
+                conf = val.get("confirmationStatus")
+                if conf in ("confirmed", "finalized"):
+                    return True
+        except Exception as exc:
+            logger.debug("confirm_signature: poll error %s: %s", signature[:12], exc)
+        await asyncio.sleep(poll_s)
+    logger.warning("confirm_signature: %s not confirmed within %.0fs", signature[:12], timeout_s)
+    return False
