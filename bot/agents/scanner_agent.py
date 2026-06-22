@@ -90,34 +90,31 @@ async def _broadcast_entry(
         bot_ref = getattr(_st, "bot", None)
         mc_str = f"${entry_mc/1000:.0f}K" if entry_mc else "?"
 
+        # Compact 3-line card: header · facts · strategy. No name repeat, short
+        # exit note. The full "why" trails on its own line only when present.
         if source == "bundle":
-            head = f"📦 BUNDLED ENTRY — {name[:20]}"
-            strat = (f"⚡ Bundle strategy: quick flip — TP {tp_x:.1f}x, SL {sl_pct:.0f}%, "
-                     f"cut if flat 15m (dump-window exit)")
-            extra = f"🔗 {cls_label}" if cls_label else ""
+            head = f"📦 BUNDLE — {name[:20]}"
+            tag = cls_label or "bundled launch"
+            strat = f"⚡ TP {tp_x:.1f}x · SL {sl_pct:.0f}% · flat-cut 15m"
         elif source == "concentration":
-            head = f"🎯 HIGH-CONCENTRATION ENTRY — {name[:20]}"
-            strat = (f"⚡ Tight strategy: TP {tp_x:.1f}x, SL {sl_pct:.0f}%, "
-                     f"cut if flat 15m (concentrated = fast dump risk)")
-            extra = f"🔗 {cls_label}" if cls_label else ""
+            head = f"🎯 CONCENTRATED — {name[:20]}"
+            tag = cls_label or "high concentration"
+            strat = f"⚡ TP {tp_x:.1f}x · SL {sl_pct:.0f}% · flat-cut 15m"
         elif source == "4am":
-            head = f"⚡ 4AM ENTRY — {name[:20]}"
-            strat = f"🎯 Strategy: ride runner — TP {tp_x:.1f}x, SL {sl_pct:.0f}%, trail above 1.5x"
-            extra = ""
+            head = f"⚡ 4AM — {name[:20]}"
+            tag = "trusted 4am call"
+            strat = f"🎯 TP {tp_x:.1f}x · SL {sl_pct:.0f}% · trail >1.5x"
         else:
-            head = f"🔍 SCANNER ENTRY — {name[:20]}"
-            strat = f"🎯 Strategy: TP {tp_x:.1f}x, SL {sl_pct:.0f}%, trail above 2x"
-            extra = ""
+            head = f"🔍 SCANNER — {name[:20]}"
+            tag = None
+            strat = f"🎯 TP {tp_x:.1f}x · SL {sl_pct:.0f}% · trail >2x"
 
-        lines = [
-            head,
-            f"🪙 {name[:24]} | Entry MC: {mc_str} | Size: {size_sol:.2f} SOL",
-        ]
-        if extra:
-            lines.append(extra)
+        facts = f"Entry {mc_str} · Size {size_sol:.2f} SOL"
+        if tag:
+            facts += f" · {tag}"
+        lines = [head, facts, strat]
         if reason:
-            lines.append(f"📝 Why: {reason[:160]}")
-        lines.append(strat)
+            lines.append(f"📝 {reason[:140]}")
         text = "\n".join(lines)
 
         if bot_ref is not None:

@@ -26,6 +26,13 @@ def _spawn_close_commentary(bot, pt, pnl: float, peak_mult: float, close_reason:
         from bot.agents.claude_reasoning import claude_available
         if not claude_available():
             return
+        # Skip the essay on trivial churn — fast ejects and tiny PnL don't need a
+        # paragraph. Only comment on meaningful closes (real wins/losses, rugs,
+        # trails). Keeps the feed clean instead of an essay per micro-trade.
+        if close_reason in ("no_momentum", "time_stop", "bundle_time_exit"):
+            return
+        if abs(float(pnl or 0)) < 0.03:
+            return
         task = asyncio.create_task(
             _send_close_commentary(bot, pt, pnl, peak_mult, close_reason)
         )
@@ -681,11 +688,23 @@ async def _check_open_trades(bot) -> None:
                     name, age_hours * 60, peak_mult, current_mult, pnl,
                     ",".join(tags) or "-",
                 )
-                # Silent close — too many alerts would spam, and time
-                # stops aren't wins or losses worth celebrating
-                await _finalize_silent_close(
-                    pt, "time_stop", pnl, peak_mc, peak_mult,
-                )
+                # Bundle/concentration trades ALWAYS announce their close (so the
+                # entry card has a matching exit). Normal scanner time-stops stay
+                # silent — they fire often and would spam the feed.
+                if is_bundle_trade:
+                    _icon = "✅" if pnl > 0 else "❌"
+                    await _finalize_paper_close(
+                        bot, pt, "time_stop", pnl, peak_mc, peak_mult, [
+                            f"📦 BUNDLE EXIT — flat, cut early {_icon}",
+                            f"🪙 {name} | peak {peak_mult:.1f}x → {current_mult:.1f}x | {pnl:+.4f} SOL",
+                            f"MC: ${entry_mc/1000:.0f}K → ${current_mc/1000:.0f}K",
+                            "Balance: {bal:.2f} SOL",
+                        ],
+                    )
+                else:
+                    await _finalize_silent_close(
+                        pt, "time_stop", pnl, peak_mc, peak_mult,
+                    )
                 continue
 
             # ── Profit protection ────────────────────────────────────────
