@@ -289,8 +289,9 @@ async def detect_launch_bundle(mint: str) -> dict:
                    if 0 < int(s.get("slot") or 0) <= launch_slot + WINDOW_SLOTS]
     launch_sigs = launch_sigs[:MAX_PARSE]
 
-    # 3. Parse each launch tx; collect distinct wallets that RECEIVED the mint.
-    buyers: set[str] = set()
+    # 3. Parse each launch tx; collect each wallet's launch-block token balance
+    #    (max post-balance seen) so we can compute the % of supply they sniped.
+    holdings: dict[str, float] = {}
     async def _buyers_in(sig: str):
         try:
             d = await _rpc("getTransaction",
@@ -298,7 +299,11 @@ async def detect_launch_bundle(mint: str) -> dict:
             meta = (d or {}).get("result", {}).get("meta", {}) or {}
             for tb in (meta.get("postTokenBalances") or []):
                 if tb.get("mint") == mint and tb.get("owner"):
-                    buyers.add(tb["owner"])
+                    amt = ((tb.get("uiTokenAmount") or {}).get("uiAmount")) or 0
+                    owner = tb["owner"]
+                    if amt and amt > holdings.get(owner, 0):
+                        holdings[owner] = float(amt)
+                    holdings.setdefault(owner, 0.0)
         except Exception:
             pass
     try:
@@ -308,14 +313,26 @@ async def detect_launch_bundle(mint: str) -> dict:
         logger.debug("detect_launch_bundle: tx parse %s failed: %s", mint[:12], exc)
         return {"determinable": False}
 
-    wallets = list(buyers)
+    wallets = list(holdings.keys())
     is_bundle = len(wallets) >= min_wallets
+
+    # % of supply sniped = sum of bundle-wallet launch holdings / total supply.
+    sniped_pct = None
+    try:
+        sup = await _rpc("getTokenSupply", [mint])
+        total = float(((sup or {}).get("result", {}).get("value", {}) or {}).get("uiAmount") or 0)
+        if total > 0:
+            sniped_pct = round(sum(holdings.values()) / total * 100.0, 1)
+    except Exception:
+        pass
+
     if is_bundle:
-        logger.info("detect_launch_bundle: BUNDLE %s — %d wallets bought in launch slot %d",
-                    mint[:12], len(wallets), launch_slot)
+        logger.info("detect_launch_bundle: BUNDLE %s — %d wallets sniped %.1f%% in launch slot %d",
+                    mint[:12], len(wallets), sniped_pct or 0, launch_slot)
     return {
         "determinable": True, "is_bundle": is_bundle,
-        "wallet_count": len(wallets), "wallets": wallets, "launch_slot": launch_slot,
+        "wallet_count": len(wallets), "wallets": wallets,
+        "sniped_pct": sniped_pct, "launch_slot": launch_slot,
     }
 
 
@@ -329,11 +346,14 @@ async def classify_launch(mint: str) -> dict:
     try:
         lb = await detect_launch_bundle(mint)
         if lb.get("determinable") and lb.get("is_bundle"):
+            pct = lb.get("sniped_pct")
+            pct_txt = f" sniped {pct:.0f}% of supply" if pct else ""
             return {
                 "kind": "bundle",
-                "label": f"BUNDLED — {lb['wallet_count']} wallets sniped at launch",
+                "label": f"BUNDLED — {lb['wallet_count']} wallets{pct_txt} at launch",
                 "wallets": lb.get("wallets") or [],
-                "detail": f"{lb['wallet_count']} wallets bought in the launch block",
+                "detail": f"{lb['wallet_count']} wallets bought in the launch block{pct_txt}",
+                "sniped_pct": pct,
             }
     except Exception as exc:
         logger.debug("classify_launch: launch-bundle %s err: %s", mint[:12], exc)
