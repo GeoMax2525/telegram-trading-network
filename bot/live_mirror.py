@@ -30,6 +30,24 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+async def _alert_admins(text: str) -> None:
+    """Push a live-trading alert to every admin. Best-effort, never raises —
+    real money means failures must SCREAM, not just log."""
+    try:
+        from bot.config import ADMIN_IDS
+        import bot.state as _st
+        bot_ref = getattr(_st, "bot", None)
+        if bot_ref is None:
+            return
+        for uid in ADMIN_IDS:
+            try:
+                await bot_ref.send_message(uid, f"🚨 LIVE: {text}")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 async def _armed_cfg() -> dict | None:
     """Return live config if armed, else None."""
     from database.models import get_params
@@ -60,11 +78,20 @@ async def mirror_open(paper_trade_id: int, mint: str, subscriber_id, paper_sol: 
     ok, why = await live_preflight(size)
     if not ok:
         logger.info("live_mirror: skip BUY %s — %s", (mint or "?")[:8], why)
+        # Alert once when the LOSS breaker trips — that's a real "today is over"
+        # event, not a routine skip. Throttled by an in-memory daily flag.
+        if "circuit breaker" in why.lower():
+            from datetime import datetime as _dt
+            _day = _dt.utcnow().strftime("%Y-%m-%d")
+            if getattr(mirror_open, "_breaker_alerted", None) != _day:
+                mirror_open._breaker_alerted = _day
+                await _alert_admins(why)
         return
 
     keypair = get_keypair()
     if keypair is None:
         logger.error("live_mirror: ARMED but WALLET_PRIVATE_KEY not set — cannot buy %s", (mint or "?")[:8])
+        await _alert_admins("ARMED but WALLET_PRIVATE_KEY not set — live buys cannot fire. Set the key or disarm.")
         return
 
     try:
@@ -88,8 +115,10 @@ async def mirror_open(paper_trade_id: int, mint: str, subscriber_id, paper_sol: 
             ))
             await session.commit()
         logger.info("live_mirror: LIVE BUY %s — %.3f SOL  sig=%s", (mint or "?")[:8], size, (sig or "")[:10])
+        await _alert_admins(f"✅ BUY {(mint or '?')[:8]} — {size:.3f} SOL  sig={(sig or '')[:12]}")
     except Exception as exc:
         logger.error("live_mirror: LIVE BUY FAILED %s: %s", (mint or "?")[:8], exc)
+        await _alert_admins(f"❌ BUY FAILED {(mint or '?')[:8]} ({size:.3f} SOL): {exc}")
 
 
 async def mirror_partial(paper_trade_id: int, mint: str, frac_of_current: float) -> None:
@@ -182,6 +211,7 @@ async def mirror_close(paper_trade_id: int, mint: str, pnl_frac: float = 0.0) ->
     if keypair is None:
         logger.error("live_mirror: CLOSE but no wallet — %s LEFT HOLDING, reconcile will retry", (mint or "?")[:8])
         await _mark(lm.id, "failed")
+        await _alert_admins(f"⚠️ SELL blocked — no wallet. {(mint or '?')[:8]} LEFT HOLDING real tokens, reconcile will retry.")
         return
 
     try:
@@ -197,6 +227,7 @@ async def mirror_close(paper_trade_id: int, mint: str, pnl_frac: float = 0.0) ->
     except Exception as exc:
         logger.error("live_mirror: LIVE SELL FAILED %s: %s — marked failed, reconcile will retry", (mint or "?")[:8], exc)
         await _mark(lm.id, "failed")
+        await _alert_admins(f"❌ SELL FAILED {(mint or '?')[:8]}: {exc} — position HELD, reconcile retrying.")
 
 
 async def _mark(lm_id: int, status: str, sell_sig: str | None = None) -> None:
@@ -212,10 +243,16 @@ async def _mark(lm_id: int, status: str, sell_sig: str | None = None) -> None:
             await session.commit()
 
 
+# lm.id -> consecutive reconcile-retry failures, for escalation alerting.
+_reconcile_fails: dict = {}
+_escalated: set = set()
+
+
 async def live_mirror_reconcile_loop() -> None:
     """Safety net: retry any live position whose sell failed (status='failed').
     Without this a network blip on the exit would leave real tokens held with
-    no auto-exit — the one failure mode that can ride a live bag to zero."""
+    no auto-exit — the one failure mode that can ride a live bag to zero.
+    Escalates to a Telegram alert once a position fails to sell repeatedly."""
     import asyncio
     await asyncio.sleep(120)
     while True:
@@ -233,9 +270,22 @@ async def live_mirror_reconcile_loop() -> None:
                         try:
                             sig = await _execute_sell(lm.mint, keypair)
                             await _mark(lm.id, "closed", sell_sig=sig)
+                            _reconcile_fails.pop(lm.id, None)
+                            _escalated.discard(lm.id)
                             logger.info("live_mirror: RECONCILE sold %s", (lm.mint or "?")[:8])
                         except Exception as exc:
-                            logger.warning("live_mirror: reconcile retry failed %s: %s", (lm.mint or "?")[:8], exc)
+                            n = _reconcile_fails.get(lm.id, 0) + 1
+                            _reconcile_fails[lm.id] = n
+                            logger.warning("live_mirror: reconcile retry #%d failed %s: %s",
+                                           n, (lm.mint or "?")[:8], exc)
+                            # Escalate ONCE after 3 consecutive failures — a real
+                            # position is stuck holding and needs a human.
+                            if n >= 3 and lm.id not in _escalated:
+                                _escalated.add(lm.id)
+                                await _alert_admins(
+                                    f"🆘 STUCK POSITION — {(lm.mint or '?')[:8]} failed to "
+                                    f"sell {n}× ({lm.sol_spent:.3f} SOL in). MANUAL SELL NEEDED."
+                                )
         except Exception as exc:
             logger.debug("live_mirror: reconcile loop error: %s", exc)
         await asyncio.sleep(90)
