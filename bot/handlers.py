@@ -4413,6 +4413,10 @@ async def cmd_commands(message: Message):
     admin_control = [
         "⚙️ CONTROLS & TOGGLES",
         "/autotrade <on|off|live|paper>  — switch trade mode",
+        "/4amonly        — only 4am trades (scanner off)",
+        "/scanneronly    — only scanner trades (4am off)",
+        "/alltrades      — enable both sources",
+        "/tradesoff      — disable all trading",
         "/aimode         — AI controls TP/SL/size (default)",
         "/manualmode     — KeyBot static values override AI",
         "/sharetoggle    — toggle external CA broadcast (Phanes)",
@@ -4420,6 +4424,37 @@ async def cmd_commands(message: Message):
         "/settradeparam <pat> <field> <v> — per-pattern ai_trade_params",
         "/params         — list all current agent_params",
         "/tradeparams    — list ai_trade_params per pattern",
+    ]
+
+    admin_claude = [
+        "🧠 CLAUDE ANALYST",
+        "/claude_report   — full Claude analyst report (7d)",
+        "/claude_actions  — recent Claude trade decisions",
+        "/claude_log      — Claude reasoning log",
+        "/claude_active_on  — Claude actively manages trades",
+        "/claude_active_off — Claude passive (advisory only)",
+        "/claude_spend    — Claude API spend tracker",
+    ]
+
+    admin_bundle = [
+        "📦 BUNDLES & SMART MONEY",
+        "/bundlers        — top bundle wallets by avg peak X",
+        "/wallets         — top wallet leaderboard",
+        "/scannerwhy <ca> — why scanner skipped a token",
+    ]
+
+    admin_ecco = [
+        "🐬 ECCO (signal bot — HQ controls)",
+        "/ecco            — intelligence dashboard",
+        "/echo_check <ca> — sightings + score for a CA",
+        "/echo_health     — per-group health check",
+        "/echo_groups     — all groups + chat ids",
+        "/echo_stats      — top groups + callers",
+        "/echo_signals    — recent consensus signals",
+        "/echo_referrals  — referral leaderboard",
+        "/echo_set_referrer <chat> <user> — credit a referral",
+        "/echo_reset_scores — wipe ECCO scores",
+        "/echo_rescore    — recompute scores (no wipe)",
     ]
 
     admin_subs = [
@@ -4476,6 +4511,9 @@ async def cmd_commands(message: Message):
     sections = [
         admin_dashboard,
         admin_control,
+        admin_claude,
+        admin_bundle,
+        admin_ecco,
         admin_subs,
         admin_callers,
         admin_diag,

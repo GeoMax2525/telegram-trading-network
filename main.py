@@ -260,25 +260,56 @@ async def main() -> None:
     try:
         from aiogram.types import BotCommand
         await bot.set_my_commands([
+            # ── Core ──
+            BotCommand(command="commands", description="📋 Full command list"),
             BotCommand(command="hub", description="Control panel"),
             BotCommand(command="status", description="Bot status snapshot"),
             BotCommand(command="dashboard", description="Command center"),
+            BotCommand(command="weeklyreport", description="Last 7 days performance"),
+            # ── Trade mode toggles ──
+            BotCommand(command="autotrade", description="Switch trade mode on/off/paper/live"),
+            BotCommand(command="4amonly", description="Only 4am trades (scanner off)"),
+            BotCommand(command="scanneronly", description="Only scanner trades (4am off)"),
+            BotCommand(command="alltrades", description="Enable both sources"),
+            BotCommand(command="tradesoff", description="Disable all trading"),
+            BotCommand(command="aimode", description="AI controls TP/SL/size"),
+            BotCommand(command="manualmode", description="KeyBot static values override AI"),
+            # ── Params ──
             BotCommand(command="params", description="All tunable params"),
             BotCommand(command="setparam", description="Set a param"),
             BotCommand(command="getparam", description="Read a param"),
+            BotCommand(command="tradeparams", description="Per-pattern trade params"),
+            # ── Reports & analysis ──
+            BotCommand(command="claude_report", description="Full Claude analyst report"),
+            BotCommand(command="claude_actions", description="Recent Claude decisions"),
+            BotCommand(command="4amreport", description="4am call hit rates"),
+            BotCommand(command="report", description="All-time learning report"),
+            BotCommand(command="papertrades", description="Recent paper trades"),
             BotCommand(command="audit", description="Pre-live GO/NO-GO audit"),
+            # ── Bundles & wallets ──
+            BotCommand(command="bundlers", description="Top bundle wallets by avg X"),
+            BotCommand(command="wallets", description="Top wallet leaderboard"),
+            # ── Token tools ──
+            BotCommand(command="scan", description="Scan a token"),
+            BotCommand(command="analyze", description="Deep token analysis"),
             BotCommand(command="pnl", description="PnL for a contract"),
             BotCommand(command="sl", description="Signal leaders"),
             BotCommand(command="lb", description="Top calls"),
             BotCommand(command="regime", description="Market regime"),
-            BotCommand(command="claude_report", description="Full Claude analyst report"),
-            BotCommand(command="weeklyreport", description="Weekly performance"),
-            BotCommand(command="ecco", description="ECCO intelligence dashboard"),
+            # ── Diagnostics ──
+            BotCommand(command="healthcheck", description="Agents + DB + wallet status"),
+            BotCommand(command="forcecheck", description="Force paper-monitor tick now"),
+            BotCommand(command="scannerwhy", description="Why scanner skipped a token"),
+            # ── ECCO signal bot ──
+            BotCommand(command="ecco", description="🐬 ECCO intelligence dashboard"),
+            BotCommand(command="echo_check", description="ECCO sightings + score for a CA"),
+            BotCommand(command="echo_health", description="ECCO per-group health"),
+            BotCommand(command="echo_groups", description="ECCO groups + chat ids"),
             BotCommand(command="echo_stats", description="ECCO top groups + callers"),
             BotCommand(command="echo_signals", description="ECCO recent signals"),
             BotCommand(command="echo_referrals", description="ECCO referral leaderboard"),
-            BotCommand(command="echo_reset_scores", description="Wipe ECCO scores (clean slate)"),
-            BotCommand(command="echo_help", description="ECCO command help"),
+            BotCommand(command="echo_rescore", description="ECCO recompute scores"),
+            BotCommand(command="echo_reset_scores", description="ECCO wipe scores"),
         ])
         logger.info("Main bot: command menu registered")
     except Exception as exc:
