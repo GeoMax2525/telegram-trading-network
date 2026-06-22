@@ -62,6 +62,7 @@ META_CLOSE_REASONS = frozenset({
     "dead_api",    # 5 consecutive fetch_live_data failures — pair delisted or API down
     "dead_token",  # MC collapsed below $5K — backup SL when grace/gap missed primary SL
     "no_momentum", # post-entry eject: DOA token never moved, cut at ~90s
+    "bundle_time_exit",  # bundled launch didn't pop in the dump window — cut early
 })
 
 
@@ -3493,6 +3494,12 @@ AGENT_PARAM_DEFAULTS = {
     "entry_momentum_gate_enabled": 1.0,   # 0 = off
     "entry_min_buy_sell_ratio":    1.3,   # require m5 buys/sells >= this ratio
     "scanner_confirm_delay_sec":   30.0,  # wait this long then re-check before entry (0=off)
+    # Bundle-aware trading: a bundled launch (top-10 wallets clustered) pumps AND
+    # dumps fast, so we trade it with TIGHTER rules instead of skipping it.
+    "bundle_detect_enabled":       1.0,   # 0 = off (trade everything as clean)
+    "bundle_top10_pct_threshold":  60.0,  # top-10 concentration >= this = bundle
+    "bundle_time_exit_min":        15.0,  # bundle un-pumped after this = exit (dump window)
+    "bundle_time_exit_mult":       1.30,  # ...unless it's already above this mult
     "entry_min_m5_buys":           0.0,   # min m5 buy count (0 = ratio gate only)
     # Reject backside entries: skip if m5 price already falling harder than
     # this % at signal time ("caught the backside of the dump"). -25 = skip if

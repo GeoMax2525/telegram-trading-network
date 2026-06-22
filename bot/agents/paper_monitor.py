@@ -387,6 +387,7 @@ async def _check_open_trades(bot) -> None:
         "tg_signal_trail_pct", "dead_token_threshold_usd",
         "paper_stop_slippage_pct",
         "time_stop_minutes", "entry_eject_after_sec", "entry_eject_peak_mult",
+        "bundle_time_exit_min", "bundle_time_exit_mult",
     )
 
     for pt in trades:
@@ -622,6 +623,30 @@ async def _check_open_trades(bot) -> None:
                     ],
                 )
                 continue
+
+            # ── BUNDLE TIME-EXIT ─────────────────────────────────────────
+            # A bundled launch pumps AND dumps fast (research: 73% collapse
+            # below 40% within 20 min). If a bundle hasn't popped past the
+            # exit mult within the dump window, cut it BEFORE the coordinated
+            # dump rather than riding the normal (slower) time stop. Tagged at
+            # entry via pattern_type containing "bundle".
+            is_bundle_trade = "bundle" in (pt.pattern_type or "").lower()
+            if is_bundle_trade:
+                b_exit_min = float(cfg.get("bundle_time_exit_min", 15.0) or 15.0)
+                b_exit_mult = float(cfg.get("bundle_time_exit_mult", 1.30) or 1.30)
+                if (age_hours >= (b_exit_min / 60.0)
+                        and peak_mult < b_exit_mult
+                        and current_mult < b_exit_mult):
+                    remaining_sol = sol * (remaining / 100.0)
+                    pnl = round(realized + remaining_sol * (current_mult - 1), 4)
+                    logger.info(
+                        "Paper: BUNDLE TIME-EXIT %s — age=%.1fm peak=%.2fx now=%.2fx pnl=%+.4f",
+                        name, age_hours * 60, peak_mult, current_mult, pnl,
+                    )
+                    await _finalize_silent_close(
+                        pt, "bundle_time_exit", pnl, peak_mc, peak_mult,
+                    )
+                    continue
 
             # ── PHASE 2: TIME STOP (no movement after the time-stop window) ──
             # If trade hasn't moved meaningfully in time, exit. Memecoins die

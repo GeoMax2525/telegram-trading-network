@@ -152,6 +152,41 @@ async def _fetch_mint_authority_active(mint: str) -> bool | None:
     return bool(mint_auth)
 
 
+async def detect_bundle(mint: str) -> tuple[bool, float | None]:
+    """Detect a bundled launch via top-holder concentration (Helius).
+
+    Bundles (many wallets buying in coordination at launch) DO pump but dump
+    fast — research: 73% collapse below 40% within 20 min. So we don't skip
+    them, we trade them with tighter rules (faster TP, tighter SL, 15-min
+    time-exit). Concentration is the cheap proxy: a clean launch spreads supply,
+    a bundle clusters it in the top holders.
+
+    Returns (is_bundle, top10_concentration_pct). top10 is None on API failure
+    (treated as NOT a bundle — fail open, trade normally).
+    """
+    cfg = await get_params("bundle_detect_enabled", "bundle_top10_pct_threshold")
+    if float(cfg.get("bundle_detect_enabled") or 1.0) < 0.5:
+        return False, None
+    threshold = float(cfg.get("bundle_top10_pct_threshold") or 60.0)
+    top10_pct, _amounts = await _fetch_top_holders(mint)
+    if top10_pct is None:
+        return False, None  # fail open — no data, trade as normal
+    is_bundle = top10_pct >= threshold
+    if is_bundle:
+        logger.info("entry_filter: BUNDLE detected %s — top10=%.0f%% >= %.0f%%",
+                    mint[:12], top10_pct, threshold)
+    return is_bundle, top10_pct
+
+
+def bundle_trade_params(clean_tp: float, clean_sl: float) -> tuple[float, float]:
+    """Tighter exits for a bundle: lower TP (take the fast pop), tighter SL
+    (the dump is sudden). Research consensus: 2x TP / 35% SL for bundles vs
+    the wider clean-launch targets. Caps so we never widen a clean trade."""
+    bundle_tp = min(clean_tp, 2.0)    # cap TP at 2x — grab the pop before the dump
+    bundle_sl = min(clean_sl, 35.0)   # tighter stop — dumps are fast & deep
+    return bundle_tp, bundle_sl
+
+
 async def check_entry_filters(
     mint: str,
     token_data: dict,

@@ -1248,6 +1248,21 @@ async def run_once() -> tuple[int, int]:
             if state.paper_balance < tg_paper_sol + 0.05:
                 continue
 
+            # Bundle-aware: detect a clustered launch and trade it with tighter
+            # rules (lower TP, tighter SL, and a 15-min time-exit in the monitor).
+            from bot.agents.entry_filter import detect_bundle, bundle_trade_params
+            tg_tp_x, tg_sl_pct = 8.0, 20.0
+            tg_pattern = "tg_signal"
+            try:
+                is_bundle, top10 = await detect_bundle(mint)
+                if is_bundle:
+                    tg_tp_x, tg_sl_pct = bundle_trade_params(tg_tp_x, tg_sl_pct)
+                    tg_pattern = "tg_signal_bundle"
+                    logger.info("Scanner: TG %s is BUNDLE (top10=%.0f%%) — tp=%.1fx sl=%.0f%%",
+                                token_name[:16], top10 or 0, tg_tp_x, tg_sl_pct)
+            except Exception as _be:
+                logger.debug("Scanner: bundle detect failed %s: %s", mint[:12], _be)
+
             pt = await open_paper_trade(
                 token_address=mint,
                 token_name=token_name,
@@ -1255,9 +1270,9 @@ async def run_once() -> tuple[int, int]:
                 entry_price=entry_mc,
                 paper_sol=tg_paper_sol,
                 confidence=80.0,  # high confidence — trusted signal
-                pattern_type="tg_signal",
-                tp_x=8.0,   # let runners run
-                sl_pct=20.0,
+                pattern_type=tg_pattern,
+                tp_x=tg_tp_x,
+                sl_pct=tg_sl_pct,
                 trade_reasoning=f"AUTO-BUY from 4am channel [{tg.get('tg_channel', '?')}]",
             )
             state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
@@ -1692,6 +1707,23 @@ async def run_once() -> tuple[int, int]:
                         scored.get("name", "?")[:20], _ce_exc,
                     )
 
+                # Bundle-aware: tighten exits on a clustered launch (lower TP,
+                # tighter SL, 15-min time-exit applied in the monitor). Tag the
+                # pattern so the monitor and reports can see it's a bundle.
+                _scan_pattern = scored.get("profile_tag") or scored.get("source") or ""
+                try:
+                    from bot.agents.entry_filter import detect_bundle, bundle_trade_params
+                    _is_b, _t10 = await detect_bundle(scored.get("mint", ""))
+                    if _is_b:
+                        tp_for_open, sl_for_open = bundle_trade_params(tp_for_open, sl_for_open)
+                        _scan_pattern = (_scan_pattern + ",bundle").lstrip(",")
+                        logger.info(
+                            "Scanner: %s is BUNDLE (top10=%.0f%%) — tp=%.1fx sl=%.0f%%",
+                            (scored.get("name") or "?")[:16], _t10 or 0, tp_for_open, sl_for_open,
+                        )
+                except Exception as _be:
+                    logger.debug("Scanner: bundle detect failed: %s", _be)
+
                 pt = await open_paper_trade(
                     token_address=scored.get("mint", ""),
                     token_name=scored.get("name"),
@@ -1699,7 +1731,7 @@ async def run_once() -> tuple[int, int]:
                     entry_price=fresh_mc,
                     paper_sol=paper_sol,
                     confidence=scored.get("confidence_score", 0),
-                    pattern_type=scored.get("profile_tag") or scored.get("source"),
+                    pattern_type=_scan_pattern,
                     tp_x=tp_for_open,
                     sl_pct=sl_for_open,
                     trade_reasoning=scored.get("trade_reasoning"),
