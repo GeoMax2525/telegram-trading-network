@@ -2260,13 +2260,15 @@ async def cmd_sourcestats(message: Message):
 
     def _bucket(t) -> str:
         p = (t.pattern_type or "").lower()
+        if "migration_dip" in p:
+            return "migration"
         if "bundle" in p:
             return "bundle"
         if "tg_signal" in p:
             return "4am"
         return "scanner"
 
-    groups: dict = {"4am": [], "scanner": [], "bundle": []}
+    groups: dict = {"4am": [], "scanner": [], "bundle": [], "migration": []}
     for t in trades:
         groups[_bucket(t)].append(t)
 
@@ -2278,14 +2280,15 @@ async def cmd_sourcestats(message: Message):
         wr = (wins / n * 100) if n else 0
         return {"n": n, "pnl": pnl, "wins": wins, "losses": losses, "wr": wr}
 
-    labels = {"4am": "⚡ 4AM", "scanner": "🔍 SCANNER", "bundle": "📦 BUNDLE"}
+    labels = {"4am": "⚡ 4AM", "scanner": "🔍 SCANNER", "bundle": "📦 BUNDLE",
+              "migration": "🎓 MIGRATION DIP"}
     lines = [
         f"📊 SOURCE BREAKDOWN ({window_label})",
         "━━━━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
     tot = _stats(trades)
-    for key in ("4am", "scanner", "bundle"):
+    for key in ("4am", "scanner", "bundle", "migration"):
         st = _stats(groups[key])
         if st["n"] == 0:
             lines.append(f"{labels[key]}: no trades")
@@ -6548,6 +6551,36 @@ async def cmd_alltrades(message: Message):
         "Run /status to verify.",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("migration"))
+async def cmd_migration(message: Message):
+    """Toggle the Migration Dip Buyer source on/off. /migration on | off."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    arg = (message.text or "").split()
+    want = arg[1].lower() if len(arg) > 1 else "status"
+    if want in ("on", "1", "enable"):
+        await set_param("migration_sniper_enabled", 1.0, f"/migration on by {message.from_user.id}")
+        await message.reply(
+            "🎓 <b>MIGRATION DIP BUYER enabled</b>\n\n"
+            "Watching pump.fun → Raydium graduations. Buys the post-migration "
+            "dip (≥20% drop, ≥$15K liq) with TP +80% / SL -35%.\n"
+            "Tune: /setparam migration_dip_pct, migration_size_sol, etc.",
+            parse_mode="HTML",
+        )
+    elif want in ("off", "0", "disable"):
+        await set_param("migration_sniper_enabled", 0.0, f"/migration off by {message.from_user.id}")
+        await message.reply("🎓 Migration Dip Buyer <b>disabled</b>.", parse_mode="HTML")
+    else:
+        from database.models import get_param
+        v = await get_param("migration_sniper_enabled")
+        on = bool(v and v >= 0.5)
+        await message.reply(
+            f"🎓 Migration Dip Buyer: <b>{'ON' if on else 'OFF'}</b>\n"
+            f"Use /migration on or /migration off.",
+            parse_mode="HTML",
+        )
 
 
 @router.message(Command("tradesoff"))

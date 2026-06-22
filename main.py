@@ -186,6 +186,10 @@ async def main() -> None:
     asyncio.create_task(learning_loop(bot))
     asyncio.create_task(paper_monitor_loop(bot))
     asyncio.create_task(gmgn_agent_loop())
+    # Migration Dip Buyer — own source, gated off by migration_sniper_enabled.
+    from bot.agents.migration_sniper import migration_sniper_loop
+    asyncio.create_task(migration_sniper_loop())
+    logger.info("Migration sniper: queued (gated by migration_sniper_enabled)")
     # mc_repair_loop REMOVED — was burning Helius credits on 66K+ old tokens.
     # MC is fetched fresh when needed: harvester discovery, scanner eval, paper monitor.
 
@@ -271,6 +275,7 @@ async def main() -> None:
             BotCommand(command="4amonly", description="Only 4am trades (scanner off)"),
             BotCommand(command="scanneronly", description="Only scanner trades (4am off)"),
             BotCommand(command="alltrades", description="Enable both sources"),
+            BotCommand(command="migration", description="Migration dip buyer on/off"),
             BotCommand(command="tradesoff", description="Disable all trading"),
             BotCommand(command="aimode", description="AI controls TP/SL/size"),
             BotCommand(command="manualmode", description="KeyBot static values override AI"),

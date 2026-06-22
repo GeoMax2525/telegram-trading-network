@@ -3543,6 +3543,16 @@ AGENT_PARAM_DEFAULTS = {
     # skip the fast-cut killers and ALWAYS keep an un-stoppable moonbag so a
     # token that dumps-then-moons is never fully missed. EV is hugely positive
     # given the peak distribution. Toggle off with tg_let_runners_run 0.
+    # ── Migration Dip Buyer (its own alert + buy source) ─────────────────────
+    # Buy the post-graduation dip on pump.fun → Raydium migrations. Gated off.
+    "migration_sniper_enabled": 0.0,    # 1 = on (subscribe to migrations + buy dips)
+    "migration_dip_pct":       20.0,    # % drop from migration MC to trigger a buy
+    "migration_min_liq_usd": 15000.0,   # liquidity floor at entry
+    "migration_size_sol":      0.25,    # position size
+    "migration_tp_x":          1.8,     # take-profit (+80%)
+    "migration_sl_pct":       35.0,     # stop-loss
+    "migration_watch_min":    30.0,     # watch a migrated token this long for the dip
+
     "tg_let_runners_run":   1.0,    # 1 = skip no_momentum + time_stop for 4am
     "tg_moonbag_pct":      25.0,    # % of a 4am position that NEVER stop-losses
                                     # (rides for the moon; the rest still SLs)

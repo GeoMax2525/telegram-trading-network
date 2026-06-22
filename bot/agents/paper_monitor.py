@@ -18,6 +18,15 @@ import logging
 _close_commentary_tasks: set = set()
 
 
+def _source_tag(pattern_type: str | None) -> str:
+    p = (pattern_type or "")
+    if "migration_dip" in p:
+        return "🎓 Migration"
+    if "tg_signal" in p:
+        return "⚡ 4AM"
+    return "🔍 Scanner"
+
+
 def _close_card(emoji: str, title: str, name: str, mult: float, pnl: float,
                 entry_mc: float, current_mc: float, note: str | None = None) -> list:
     """Build a clean, consistent HTML close card. Pass parse_mode='HTML' to
@@ -261,7 +270,7 @@ async def _finalize_paper_close(
     # can tell pre-toggle from post-toggle: a 🔍 Scanner trade opened
     # 12h ago is a pre-toggle leftover, while one opened 30s ago is a
     # real bypass bug.
-    source_tag = "⚡ 4AM" if "tg_signal" in (pt.pattern_type or "") else "🔍 Scanner"
+    source_tag = _source_tag(pt.pattern_type)
     age_str = ""
     if pt.opened_at:
         age_secs = (datetime.utcnow() - pt.opened_at).total_seconds()
@@ -475,7 +484,7 @@ async def _check_open_trades(bot) -> None:
                 mult = current_mc / (pt.entry_mc or 1)
                 pnl = round(realized + remaining_sol * (mult - 1), 4)
                 name = (pt.token_name or "?")[:18]
-                source_tag = "⚡ 4AM" if "tg_signal" in (pt.pattern_type or "") else "🔍 Scanner"
+                source_tag = _source_tag(pt.pattern_type)
                 logger.info("Paper: DEAD TOKEN %s — MC=$%.0f, source=%s, closing to free slot | pnl=%+.4f",
                             name, current_mc, source_tag, pnl)
                 await _finalize_paper_close(
