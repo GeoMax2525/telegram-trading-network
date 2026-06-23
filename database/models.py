@@ -2706,6 +2706,103 @@ class LiveMirror(Base):
     closed_at       = Column(DateTime, nullable=True)
 
 
+class AlgoConfig(Base):
+    """A custom scanner algo = a named filter set. Each row is one algo
+    (X-FILES, ZANZIBAR, …) with its thresholds + mode (off/manual/auto). The
+    algo engine runs every new token through each ENABLED algo's filters; matches
+    are tagged pattern_type='algo:<name>' so performance is tracked per algo."""
+    __tablename__ = "algo_configs"
+    name             = Column(String(32), primary_key=True)
+    enabled          = Column(Boolean, default=False)
+    mode             = Column(String(8), default="off")   # off | manual | auto
+    min_mc           = Column(Float, nullable=True)
+    max_mc           = Column(Float, nullable=True)
+    min_viewers      = Column(Integer, nullable=True)
+    min_age_min      = Column(Float, nullable=True)
+    max_age_min      = Column(Float, nullable=True)
+    min_growth_pct   = Column(Float, nullable=True)
+    min_desc_len     = Column(Integer, nullable=True)
+    require_twitter  = Column(Boolean, default=False)
+    require_telegram = Column(Boolean, default=False)
+    nsfw_filter      = Column(Boolean, default=False)
+    note             = Column(String(128), nullable=True)
+    created_at       = Column(DateTime, default=datetime.utcnow)
+
+
+_DEFAULT_ALGOS = [
+    dict(name="X-FILES", min_mc=20_000, max_mc=200_000, min_viewers=40,
+         min_age_min=10, max_age_min=120, min_growth_pct=30, min_desc_len=50,
+         require_twitter=True, nsfw_filter=True, note="Highest win rate (37%)"),
+    dict(name="ZANZIBAR", min_mc=5_000, max_mc=100_000, min_viewers=10,
+         max_age_min=30, require_twitter=True, nsfw_filter=True,
+         note="Highest volume (179 sig)"),
+    dict(name="BLOWJOB", min_mc=50_000, max_mc=200_000, min_viewers=80,
+         min_age_min=10, max_age_min=120, min_growth_pct=50, min_desc_len=100,
+         require_twitter=True, note="Too few signals"),
+    dict(name="OUT OF CONTROL", min_mc=50_000, max_mc=200_000, min_viewers=40,
+         max_age_min=120, min_growth_pct=20, require_twitter=True, nsfw_filter=True,
+         note="Weak win rate (17%)"),
+    dict(name="GELATO", min_mc=20_000, max_mc=200_000, min_viewers=20,
+         min_age_min=5, max_age_min=60, min_desc_len=50, require_twitter=True,
+         require_telegram=True, nsfw_filter=True, note="Low volume"),
+]
+
+
+async def seed_default_algos() -> int:
+    """Insert the 5 default algos with their exact thresholds (idempotent —
+    only adds ones that don't exist; never overwrites operator edits)."""
+    added = 0
+    async with AsyncSessionLocal() as s:
+        for spec in _DEFAULT_ALGOS:
+            if await s.get(AlgoConfig, spec["name"]) is None:
+                s.add(AlgoConfig(**spec))
+                added += 1
+        if added:
+            await s.commit()
+    return added
+
+
+async def get_all_algos() -> list["AlgoConfig"]:
+    async with AsyncSessionLocal() as s:
+        return list((await s.execute(
+            select(AlgoConfig).order_by(AlgoConfig.name))).scalars().all())
+
+
+async def set_algo_mode(name: str, mode: str) -> bool:
+    """Set an algo's mode (off/manual/auto). Returns False if the algo is unknown."""
+    mode = mode.lower()
+    if mode not in ("off", "manual", "auto"):
+        return False
+    async with AsyncSessionLocal() as s:
+        a = await s.get(AlgoConfig, name)
+        if a is None:
+            return False
+        a.mode = mode
+        a.enabled = mode != "off"
+        await s.commit()
+        return True
+
+
+async def algo_stats(name: str, days: float = 7.0) -> dict:
+    """Bot-tracked performance for an algo's own trades (pattern_type='algo:name')."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    async with AsyncSessionLocal() as s:
+        trades = list((await s.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.closed_at >= cutoff,
+                PaperTrade.pattern_type.like(f"%algo:{name}%"),
+            )
+        )).scalars().all())
+    n = len(trades)
+    wins = sum(1 for t in trades if (t.peak_multiple or 0) >= 2)
+    pnl = sum((t.paper_pnl_sol or 0) for t in trades)
+    best = max((t.peak_multiple or 0 for t in trades), default=0)
+    return {"signals": n, "win_rate": (wins / n * 100 if n else 0),
+            "best": best, "pnl": pnl}
+
+
 class DailyRiskLedger(Base):
     """Persistent daily live-risk state — survives restarts/redeploys so the
     spend cap, count cap and LOSS circuit breaker actually hold (the in-memory

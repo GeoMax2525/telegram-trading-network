@@ -471,7 +471,7 @@ async def _hub_keyboard(autotrade: bool) -> InlineKeyboardMarkup:
 
     # Row 4: Tools
     builder.row(
-        InlineKeyboardButton(text="🔍 Analyze Token", callback_data="hub:analyze"),
+        InlineKeyboardButton(text="🧪 Algos",          callback_data="hub:algos"),
         InlineKeyboardButton(text="📋 Paper Trades",  callback_data="hub:papertrades"),
         InlineKeyboardButton(text="⚙️ Settings",      callback_data="hub:settings"),
     )
@@ -1392,6 +1392,30 @@ async def cb_hub(callback: CallbackQuery):
             )
         except Exception:
             pass
+
+    elif action == "algos":
+        # Algo registry — stats + per-algo mode toggle buttons.
+        from database.models import get_all_algos, algo_stats
+        algos = await get_all_algos()
+        lines = ["<b>Custom Algos</b>", ""]
+        kb_rows = []
+        for a in algos:
+            st = await algo_stats(a.name, days=7)
+            lines.append(f"{_algo_mode_icon(a.mode)}  <b>{_esc(a.name)}</b>  "
+                         f"<i>{st['signals']} sig · {st['win_rate']:.0f}% WR · {st['best']:.1f}x</i>")
+            # Cycle button: off → manual → auto → off
+            nxt = {"off": "manual", "manual": "auto", "auto": "off"}.get(a.mode, "manual")
+            kb_rows.append([InlineKeyboardButton(
+                text=f"{a.name}: {a.mode} → {nxt}",
+                callback_data=f"algo:{a.name}:{nxt}")])
+        lines.append("")
+        lines.append("<i>Tap a button to cycle Off → Manual → Auto.</i>")
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None
+        try:
+            await callback.message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+            await callback.answer()
+        except Exception:
+            await callback.answer("Algos unavailable.", show_alert=True)
 
     elif action == "agents":
         # Advanced view — the full agent + health detail moved off the main hub.
@@ -2408,6 +2432,74 @@ async def cmd_updatewallets(message: Message):
         lines.append("  (none yet — need more ≥5x winners to populate)")
     lines += ["", "These feed the insider gate + 4am confluence boost."]
     await message.reply("\n".join(lines), parse_mode=None)
+
+
+# ── /algos — custom algo registry: stats + mode ──────────────────────────
+def _algo_mode_icon(mode: str) -> str:
+    return {"auto": "🟢 AUTO", "manual": "🟡 MANUAL", "off": "⚪ OFF"}.get(mode, "⚪ OFF")
+
+
+@router.message(Command("algos"))
+async def cmd_algos(message: Message):
+    """List all custom algos with their mode + bot-tracked stats. Toggle with
+    /algo <name> on|off|auto|manual."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from database.models import get_all_algos, algo_stats
+    algos = await get_all_algos()
+    if not algos:
+        await message.reply("No algos configured yet (seeding on next restart).", parse_mode=None)
+        return
+    lines = ["🧪 CUSTOM ALGOS", "━━━━━━━━━━━━━━━━━━━━━━━", ""]
+    for a in algos:
+        st = await algo_stats(a.name, days=7)
+        lines.append(f"{_algo_mode_icon(a.mode)}  <b>{_esc(a.name)}</b>")
+        lines.append(
+            f"   7d: {st['signals']} sig · {st['win_rate']:.0f}% WR · "
+            f"best {st['best']:.1f}x · {st['pnl']:+.2f} SOL")
+        filt = []
+        if a.min_mc or a.max_mc:
+            filt.append(f"MC {int((a.min_mc or 0)/1000)}-{int((a.max_mc or 0)/1000)}K")
+        if a.min_viewers:
+            filt.append(f"{a.min_viewers}+ view")
+        if a.min_age_min or a.max_age_min:
+            filt.append(f"age {int(a.min_age_min or 0)}-{int(a.max_age_min or 999)}m")
+        if a.min_growth_pct:
+            filt.append(f"+{int(a.min_growth_pct)}%")
+        soc = []
+        if a.require_twitter: soc.append("🐦")
+        if a.require_telegram: soc.append("✈️")
+        lines.append(f"   {' · '.join(filt)}{('  ' + ''.join(soc)) if soc else ''}")
+        if a.note:
+            lines.append(f"   <i>{_esc(a.note)}</i>")
+        lines.append("")
+    lines.append("Toggle: /algo &lt;name&gt; on|off|auto|manual")
+    lines.append("(stats are the BOT's own algo trades; populate as they trade)")
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("algo"))
+async def cmd_algo(message: Message):
+    """Toggle an algo's mode. /algo X-FILES auto  ·  /algo ZANZIBAR off
+    auto = trades independently (alongside 4am), manual = alerts only, off = idle."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.reply("Usage: /algo <name> on|off|auto|manual\n"
+                            "e.g. /algo X-FILES auto", parse_mode=None)
+        return
+    mode = parts[-1].lower()
+    name = " ".join(parts[1:-1]).upper()
+    if mode == "on":
+        mode = "manual"   # 'on' defaults to manual (alert-only) for safety
+    from database.models import set_algo_mode, get_all_algos
+    ok = await set_algo_mode(name, mode)
+    if not ok:
+        names = ", ".join(a.name for a in await get_all_algos())
+        await message.reply(f"Unknown algo '{name}' or bad mode.\nAlgos: {names}", parse_mode=None)
+        return
+    await message.reply(f"✅ {name} → {_algo_mode_icon(mode)}", parse_mode="HTML")
 
 
 # ── /scannerstats — scanner edge by sub-source (find what works) ──────────
@@ -7748,6 +7840,41 @@ async def cb_flag_risky(callback: CallbackQuery):
 
 
 # ── Callback: Refresh Trade Card ─────────────────────────────────────────────
+
+@router.callback_query(lambda c: c.data and c.data.startswith("algo:"))
+async def cb_algo_toggle(callback: CallbackQuery):
+    """Cycle an algo's mode from the hub Algos panel button."""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer()
+        return
+    try:
+        _, name, mode = callback.data.split(":", 2)
+    except ValueError:
+        await callback.answer()
+        return
+    from database.models import set_algo_mode
+    ok = await set_algo_mode(name, mode)
+    await callback.answer(f"{name} → {mode}" if ok else "Failed", show_alert=False)
+    # Re-render the algos panel in place.
+    try:
+        from database.models import get_all_algos, algo_stats
+        algos = await get_all_algos()
+        lines = ["<b>Custom Algos</b>", ""]
+        kb_rows = []
+        for a in algos:
+            st = await algo_stats(a.name, days=7)
+            lines.append(f"{_algo_mode_icon(a.mode)}  <b>{_esc(a.name)}</b>  "
+                         f"<i>{st['signals']} sig · {st['win_rate']:.0f}% WR · {st['best']:.1f}x</i>")
+            nxt = {"off": "manual", "manual": "auto", "auto": "off"}.get(a.mode, "manual")
+            kb_rows.append([InlineKeyboardButton(
+                text=f"{a.name}: {a.mode} → {nxt}", callback_data=f"algo:{a.name}:{nxt}")])
+        lines += ["", "<i>Tap a button to cycle Off → Manual → Auto.</i>"]
+        await callback.message.edit_text(
+            "\n".join(lines), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    except Exception:
+        pass
+
 
 @router.callback_query(lambda c: c.data and c.data.startswith("refresh:"))
 async def cb_refresh_trade_card(callback: CallbackQuery):

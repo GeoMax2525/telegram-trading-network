@@ -147,6 +147,11 @@ async def main() -> None:
     if seeded:
         logger.info("Seeded %d ai_trade_params rows", seeded)
 
+    from database.models import seed_default_algos
+    algos_added = await seed_default_algos()
+    if algos_added:
+        logger.info("Seeded %d custom algos (X-FILES, ZANZIBAR, …)", algos_added)
+
     # Restore trade mode from DB (survives restarts)
     from bot import state as _state
     mode_val = await get_param("trade_mode")
@@ -296,6 +301,8 @@ async def main() -> None:
             BotCommand(command="claude_actions", description="Recent Claude decisions"),
             BotCommand(command="4amreport", description="4am call hit rates"),
             BotCommand(command="migrationreport", description="Migration dip source stats"),
+            BotCommand(command="algos", description="Custom algos: stats + mode"),
+            BotCommand(command="algo", description="Toggle an algo on/off/auto/manual"),
             BotCommand(command="scannerstats", description="Scanner edge by sub-source"),
             BotCommand(command="updatewallets", description="Promote smart-money wallets"),
             BotCommand(command="report", description="All-time learning report"),
