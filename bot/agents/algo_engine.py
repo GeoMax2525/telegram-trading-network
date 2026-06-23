@@ -71,6 +71,9 @@ async def fetch_pumpfun_coin(mint: str) -> dict | None:
         "website": bool(d.get("website")),
         "nsfw": bool(d.get("nsfw")),
         "reply_count": int(d.get("reply_count") or 0),
+        # Livestream viewers — pump.fun's num_participants on the live coin object.
+        "viewers": int(d.get("num_participants") or 0),
+        "is_live": bool(d.get("is_currently_live")),
     }
 
 
@@ -96,7 +99,11 @@ def _matches(algo, data: dict, growth_pct: float | None) -> bool:
         return False
     if algo.min_growth_pct and growth_pct is not None and growth_pct < algo.min_growth_pct:
         return False
-    # min_viewers: Photon-only — skipped until a viewer feed is wired.
+    # VIEWERS — pump.fun livestream num_participants. These algos target tokens
+    # with active streams, so a non-live token = 0 viewers = fails the gate.
+    if algo.min_viewers:
+        if not data.get("is_live") or data.get("viewers", 0) < algo.min_viewers:
+            return False
     return True
 
 
@@ -159,7 +166,14 @@ async def _discovery_loop() -> None:
         for path, params in _DISCOVERY:
             for coin in await _fetch_coin_list(path, params):
                 mint = coin.get("mint")
-                if not mint or mint in _watch:
+                if not mint:
+                    continue
+                # Refresh the live viewer count on tokens we're already watching
+                # (it changes over time; the currently-live feed is authoritative).
+                if mint in _watch:
+                    if coin.get("num_participants") is not None:
+                        _watch[mint]["viewers"] = int(coin.get("num_participants") or 0)
+                        _watch[mint]["is_live"] = bool(coin.get("is_currently_live"))
                     continue
                 if coin.get("complete"):   # already graduated — algos want pre-grad
                     continue
@@ -182,7 +196,9 @@ def _handle_new_token(d: dict) -> None:
         oldest = min(_watch, key=lambda m: _watch[m]["first_seen"])
         _watch.pop(oldest, None)
     _watch[mint] = {"first_mc": None, "first_seen": _time.time(),
-                    "name": d.get("name") or d.get("symbol"), "matched": set()}
+                    "name": d.get("name") or d.get("symbol"), "matched": set(),
+                    "viewers": int(d.get("num_participants") or 0),
+                    "is_live": bool(d.get("is_currently_live"))}
 
 
 async def _poll_loop() -> None:
@@ -218,6 +234,11 @@ async def _poll_loop() -> None:
                     w["first_mc"] = data["mc"]
                 growth = ((data["mc"] - w["first_mc"]) / w["first_mc"] * 100
                           if w["first_mc"] else None)
+                # Prefer the freshest viewer count from the currently-live feed
+                # (refreshed each discovery cycle) over the detail snapshot.
+                if w.get("viewers"):
+                    data["viewers"] = w["viewers"]
+                    data["is_live"] = w.get("is_live", data.get("is_live"))
 
                 for algo in algos:
                     if algo.name in w["matched"]:
@@ -267,9 +288,10 @@ async def _alert(algo, data, growth, bought=False) -> None:
                 else f"🧪 <b>{_esc(algo.name)} — SIGNAL</b> (manual)")
         soc = " ".join(s for s, ok in [("🐦", data["twitter"]), ("✈️", data["telegram"]),
                                        ("🌐", data["website"])] if ok)
+        live_str = f"👁 {data.get('viewers', 0)} viewers · " if data.get("is_live") else ""
         text = (f"{head}\n\n"
                 f"🪙 {_esc(str(data['name'])[:22])}\n"
-                f"MC ${data['mc']/1000:.0f}K · age {data['age_min']:.0f}m · "
+                f"{live_str}MC ${data['mc']/1000:.0f}K · age {data['age_min']:.0f}m · "
                 f"growth {growth or 0:.0f}%\n"
                 f"{data['desc_len']} char desc · {data['reply_count']} replies {soc}\n"
                 f"<code>{_esc(data['mint'])}</code>")
