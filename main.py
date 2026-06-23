@@ -190,6 +190,9 @@ async def main() -> None:
     asyncio.create_task(scanner_agent_loop())
     from bot.agents.scanner_agent import fouram_loop
     asyncio.create_task(fouram_loop())   # 4am buys — decoupled from the scanner
+    from bot.agents.algo_engine import algo_engine_loop
+    asyncio.create_task(algo_engine_loop())  # custom algos (gated by algo_engine_enabled)
+    logger.info("Algo engine: queued (gated by algo_engine_enabled)")
     asyncio.create_task(learning_loop(bot))
     asyncio.create_task(paper_monitor_loop(bot))
     asyncio.create_task(gmgn_agent_loop())

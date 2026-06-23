@@ -2756,6 +2756,8 @@ async def cmd_sourcestats(message: Message):
 
     def _bucket(t) -> str:
         p = (t.pattern_type or "").lower()
+        if "algo:" in p:
+            return "algo"
         if "migration_dip" in p:
             return "migration"
         if "bundle" in p:
@@ -2764,7 +2766,7 @@ async def cmd_sourcestats(message: Message):
             return "4am"
         return "scanner"
 
-    groups: dict = {"4am": [], "scanner": [], "bundle": [], "migration": []}
+    groups: dict = {"4am": [], "scanner": [], "bundle": [], "migration": [], "algo": []}
     for t in trades:
         groups[_bucket(t)].append(t)
 
@@ -2777,14 +2779,14 @@ async def cmd_sourcestats(message: Message):
         return {"n": n, "pnl": pnl, "wins": wins, "losses": losses, "wr": wr}
 
     labels = {"4am": "⚡ 4AM", "scanner": "🔍 SCANNER", "bundle": "📦 BUNDLE",
-              "migration": "🎓 MIGRATION DIP"}
+              "migration": "🎓 MIGRATION DIP", "algo": "🧪 ALGOS"}
     lines = [
         f"📊 SOURCE BREAKDOWN ({window_label})",
         "━━━━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
     tot = _stats(trades)
-    for key in ("4am", "scanner", "bundle", "migration"):
+    for key in ("4am", "scanner", "bundle", "migration", "algo"):
         st = _stats(groups[key])
         if st["n"] == 0:
             lines.append(f"{labels[key]}: no trades")

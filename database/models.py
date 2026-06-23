@@ -3823,6 +3823,13 @@ AGENT_PARAM_DEFAULTS = {
     "conviction_max_mult":         3.0,   # cap upside sizing
     "conviction_min_mult":         0.5,   # floor downside sizing
 
+    # ── Custom algo engine ───────────────────────────────────────────────────
+    "algo_engine_enabled":   0.0,   # 1 = run new tokens through the custom algos
+    "algo_size_sol":         0.2,   # auto-trade size per algo signal
+    "algo_watch_min":       30.0,   # watch a new token this long for an algo match
+    "algo_tp_x":             5.0,   # algo trade take-profit
+    "algo_sl_pct":          25.0,   # algo trade stop-loss
+
     "tg_respect_cold":      0.0,    # 1 = 4am pauses in COLD regime (default: 4am ignores cold)
     "tg_let_runners_run":   1.0,    # 1 = skip no_momentum + time_stop for 4am
     "tg_moonbag_pct":      25.0,    # % of a 4am position that NEVER stop-losses
