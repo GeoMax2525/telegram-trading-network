@@ -3696,6 +3696,11 @@ AGENT_PARAM_DEFAULTS = {
     "migration_sl_pct":       35.0,     # stop-loss
     "migration_watch_min":     8.0,     # ONLY catch the immediate post-migration dip
     "migration_max_buy_min":   8.0,     # never buy a token this long after migration
+    # Quality gates — select STRONG candidates, don't catch falling knives.
+    "migration_require_recovery":   1.0,  # dip must bounce off its low before buying
+    "migration_recovery_pct":       3.0,  # how far off the low = "recovered"
+    "migration_min_buy_sell_ratio": 1.2,  # buyers must be stepping in on the dip
+    "migration_require_smart_money":0.0,  # 1 = ONLY buy if a tier wallet is buying
 
     # ── Self-improving wallet list (Option C) ────────────────────────────────
     "wallet_promote_min_peak":     5.0,   # only promote early buyers of >=5x winners

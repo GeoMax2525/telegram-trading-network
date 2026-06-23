@@ -92,7 +92,9 @@ async def _poll_loop() -> None:
         cfg = await get_params(
             "migration_dip_pct", "migration_min_liq_usd", "migration_size_sol",
             "migration_tp_x", "migration_sl_pct", "migration_watch_min",
-            "max_open_paper_trades",
+            "max_open_paper_trades", "migration_max_buy_min",
+            "migration_require_recovery", "migration_recovery_pct",
+            "migration_min_buy_sell_ratio", "migration_require_smart_money",
         )
         dip_pct = float(cfg.get("migration_dip_pct") or 20.0)
         min_liq = float(cfg.get("migration_min_liq_usd") or 15000.0)
@@ -141,11 +143,47 @@ async def _poll_loop() -> None:
                 if drop < dip_pct:
                     continue  # not dipped enough yet
 
-                # Gates
+                # ── QUALITY GATES — don't catch a falling knife ──────────────
+                # 1. Liquidity floor.
                 if liq < min_liq:
                     logger.info("migration_sniper: %s dipped %.0f%% but liq $%.0f < $%.0f",
                                 mint[:12], drop, liq, min_liq)
                     continue
+
+                # 2. RECOVERY confirmation — the dip must have STOPPED falling
+                #    and bounced off its low. Buying while still dropping is the
+                #    #1 way these lose. Require current MC a bit above the low.
+                low = w.get("low_mc") or mc
+                rec_pct = float(cfg.get("migration_recovery_pct") or 3.0)
+                if float(cfg.get("migration_require_recovery") or 1.0) >= 0.5:
+                    if mc <= low * (1.0 + rec_pct / 100.0):
+                        logger.info("migration_sniper: %s still falling (mc=%.0fK low=%.0fK) — wait",
+                                    mint[:12], mc / 1000, low / 1000)
+                        continue
+
+                # 3. BUY PRESSURE — buyers must be stepping in on the dip.
+                buys = float(m.get("buys_m5") or 0)
+                sells = float(m.get("sells_m5") or 0)
+                min_ratio = float(cfg.get("migration_min_buy_sell_ratio") or 1.2)
+                if sells > 0 and (buys / sells) < min_ratio:
+                    logger.info("migration_sniper: %s weak flow %.0fB/%.0fS (<%.1f) — skip",
+                                mint[:12], buys, sells, min_ratio)
+                    continue
+
+                # 4. SMART-MONEY signal — a migrated token a tier-1/2 wallet is
+                #    buying the dip on is a STRONG candidate vs a random dip.
+                #    Optional: require it, or just log it as conviction.
+                strong = False
+                try:
+                    from database.models import insider_confluence_mult
+                    if await insider_confluence_mult(mint) > 1.0:
+                        strong = True
+                except Exception:
+                    pass
+                if float(cfg.get("migration_require_smart_money") or 0) >= 0.5 and not strong:
+                    logger.info("migration_sniper: %s no smart-money — skip (require on)", mint[:12])
+                    continue
+
                 if await has_open_paper_trade(mint):
                     w["bought"] = True
                     continue
