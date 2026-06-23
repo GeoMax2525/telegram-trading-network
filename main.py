@@ -304,6 +304,7 @@ async def main() -> None:
             BotCommand(command="4amattribution", description="Per-channel 4am edge"),
             BotCommand(command="dumpmoon", description="Moonbag validation (round-trips)"),
             BotCommand(command="livestatus", description="Live risk ledger + caps today"),
+            BotCommand(command="livevspaper", description="Live fills vs paper (slippage)"),
             BotCommand(command="health", description="Loop heartbeats / watchdog"),
             BotCommand(command="shadowstats", description="Exit-engine shadow match rate"),
             BotCommand(command="bundlers", description="Top bundle wallets by avg X"),

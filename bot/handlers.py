@@ -2142,6 +2142,77 @@ async def cmd_health(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
+# ── /livevspaper — measure the real slippage gap during live testing ──────
+@router.message(Command("livevspaper"))
+async def cmd_livevspaper(message: Message):
+    """The live-testing truth meter: for every closed LIVE trade, compare its
+    realized PnL to the PAPER trade it mirrored. The gap IS your real-world
+    slippage + execution drag — the number that decides if the edge survives
+    live. Empty until live trades close."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from database.models import AsyncSessionLocal, select, LiveMirror, PaperTrade
+    async with AsyncSessionLocal() as s:
+        mirrors = list((await s.execute(
+            select(LiveMirror).where(
+                LiveMirror.status == "closed",
+                LiveMirror.realized_pnl.isnot(None),
+            ).order_by(LiveMirror.closed_at.desc()).limit(40)
+        )).scalars().all())
+        rows = []
+        for m in mirrors:
+            pt = await s.get(PaperTrade, m.paper_trade_id) if m.paper_trade_id else None
+            paper_pnl = (pt.paper_pnl_sol or 0) if pt else None
+            rows.append((m, pt, paper_pnl))
+
+    if not rows:
+        await message.reply(
+            "📊 LIVE vs PAPER\nNo closed live trades yet.\n"
+            "(Arm live + run trades; this fills as they close.)", parse_mode=None)
+        return
+
+    # Compare RETURN FRACTION (size-independent): live = realized/sol_spent,
+    # paper = paper_pnl/paper_size. The gap is execution drag.
+    live_rets, paper_rets, gaps = [], [], []
+    for m, pt, paper_pnl in rows:
+        live_ret = (m.realized_pnl or 0) / (m.sol_spent or 1)
+        paper_ret = (m.paper_return if m.paper_return is not None
+                     else ((paper_pnl or 0) / (pt.paper_sol_spent or 1) if pt else 0))
+        live_rets.append(live_ret)
+        paper_rets.append(paper_ret)
+        gaps.append(live_ret - paper_ret)
+
+    n = len(rows)
+    avg_live = sum(live_rets) / n * 100
+    avg_paper = sum(paper_rets) / n * 100
+    avg_gap = sum(gaps) / n * 100
+    live_pnl_total = sum((m.realized_pnl or 0) for m, _, _ in rows)
+
+    lines = [
+        "📊 LIVE vs PAPER",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Closed live trades: {n}",
+        f"Live total PnL: {live_pnl_total:+.3f} SOL",
+        "",
+        f"Avg live return:  {avg_live:+.1f}%",
+        f"Avg paper return: {avg_paper:+.1f}%",
+        f"Execution drag:   {avg_gap:+.1f}%  ← slippage + timing",
+        "",
+    ]
+    if avg_gap < -10:
+        lines.append("🔴 Heavy drag — slippage is eating the edge. Size down / tighten entries.")
+    elif avg_gap < -3:
+        lines.append("🟡 Moderate drag — watch it; the thin 4am edge can't absorb much.")
+    else:
+        lines.append("🟢 Low drag — live is tracking paper well.")
+    lines += ["", "Last 8:"]
+    for m, pt, _ in rows[:8]:
+        nm = ((pt.token_name if pt else None) or m.mint[:6])[:12]
+        lines.append(f"  {nm:<12} live {(m.realized_pnl or 0):+.3f}  "
+                     f"paper×{(m.paper_return or 0)+1:.2f}")
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /livestatus — today's persistent live-risk ledger ─────────────────────
 @router.message(Command("livestatus"))
 async def cmd_livestatus(message: Message):

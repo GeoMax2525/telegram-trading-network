@@ -216,11 +216,13 @@ async def mirror_close(paper_trade_id: int, mint: str, pnl_frac: float = 0.0) ->
 
     try:
         sig = await _execute_sell(mint, keypair)
-        await _mark(lm.id, "closed", sell_sig=sig)
+        live_pnl = round(float(lm.sol_spent or 0) * float(pnl_frac or 0), 4)
+        await _mark(lm.id, "closed", sell_sig=sig,
+                    realized_pnl=live_pnl, paper_return=float(pnl_frac or 0))
         # Feed the daily-loss circuit breaker with the realized live PnL.
         try:
             from bot.live_guard import record_live_close
-            await record_live_close(float(lm.sol_spent or 0) * float(pnl_frac or 0))
+            await record_live_close(live_pnl)
         except Exception:
             pass
         logger.info("live_mirror: LIVE SELL %s done  sig=%s", (mint or "?")[:8], (sig or "none")[:10])
@@ -230,7 +232,8 @@ async def mirror_close(paper_trade_id: int, mint: str, pnl_frac: float = 0.0) ->
         await _alert_admins(f"❌ SELL FAILED {(mint or '?')[:8]}: {exc} — position HELD, reconcile retrying.")
 
 
-async def _mark(lm_id: int, status: str, sell_sig: str | None = None) -> None:
+async def _mark(lm_id: int, status: str, sell_sig: str | None = None,
+                realized_pnl: float | None = None, paper_return: float | None = None) -> None:
     from database.models import AsyncSessionLocal, LiveMirror
     async with AsyncSessionLocal() as session:
         lm = await session.get(LiveMirror, lm_id)
@@ -240,6 +243,10 @@ async def _mark(lm_id: int, status: str, sell_sig: str | None = None) -> None:
                 lm.closed_at = datetime.utcnow()
                 if sell_sig:
                     lm.sell_sig = sell_sig
+                if realized_pnl is not None:
+                    lm.realized_pnl = realized_pnl
+                if paper_return is not None:
+                    lm.paper_return = paper_return
             await session.commit()
 
 

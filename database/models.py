@@ -828,6 +828,21 @@ async def init_db() -> None:
                 except Exception:
                     pass
 
+        # live_mirrors — realized_pnl + paper_return for the /livevspaper report.
+        for col, pg_def, lite_def in [
+            ("realized_pnl", "DOUBLE PRECISION", "REAL"),
+            ("paper_return", "DOUBLE PRECISION", "REAL"),
+        ]:
+            if is_postgres:
+                await conn.execute(text(
+                    f"ALTER TABLE live_mirrors ADD COLUMN IF NOT EXISTS {col} {pg_def}"))
+            else:
+                try:
+                    await conn.execute(text(
+                        f"ALTER TABLE live_mirrors ADD COLUMN {col} {lite_def}"))
+                except Exception:
+                    pass
+
         for col_name, col_def in _NEW_CANDIDATE_COLS:
             if is_postgres:
                 await conn.execute(
@@ -2685,6 +2700,8 @@ class LiveMirror(Base):
     buy_sig         = Column(String, nullable=True)
     sell_sig        = Column(String, nullable=True)
     status          = Column(String, default="open")
+    realized_pnl    = Column(Float, nullable=True)    # live realized PnL at close
+    paper_return    = Column(Float, nullable=True)    # the paper trade's return fraction
     opened_at       = Column(DateTime, default=datetime.utcnow)
     closed_at       = Column(DateTime, nullable=True)
 
