@@ -711,32 +711,50 @@ async def _build_hub_text(autotrade: bool) -> str:
     else:
         status_dot, status_word = "🔴", "DRAWDOWN"
 
-    def _money(v: float) -> str:
-        return f"{v:+.2f} SOL"
+    # ── Phantom-style card helpers (rounded box-drawing, monospace) ──────
+    CW = 30  # inner card width
 
-    # ── Build (bold headers + monospace data blocks for clean columns) ──
+    def _card(rows: list[str]) -> str:
+        """A single rounded card wrapped in <pre> for monospace alignment."""
+        top = "╭" + "─" * CW + "╮"
+        bot = "╰" + "─" * CW + "╯"
+        body = "\n".join(f"│ {r:<{CW-2}} │" for r in rows)
+        return "<pre>" + "\n".join([top, body, bot]) + "</pre>"
+
+    def _mini2(lt, lv, rt, rv) -> str:
+        """Two small side-by-side metric cards."""
+        w = 13
+        t = "╭" + "─" * w + "╮  ╭" + "─" * w + "╮"
+        b = "╰" + "─" * w + "╯  ╰" + "─" * w + "╯"
+        r1 = f"│ {lt:<{w-2}} │  │ {rt:<{w-2}} │"
+        r2 = f"│ {lv:<{w-2}} │  │ {rv:<{w-2}} │"
+        return "<pre>" + "\n".join([t, r1, r2, b]) + "</pre>"
+
+    pnl_sign = "+" if pnl_val >= 0 else ""
+
     out: list[str] = []
-    out.append("<b>REVOLT TERMINAL</b>")
-    out.append(
-        "<pre>"
-        f"{mode_word} · {dec_badge.split(' ')[-1]:<8}{status_dot} {status_word}\n"
-        f"Balance   {real_balance:>8.2f} SOL\n"
-        f"P&amp;L       {pnl_val:>+8.2f} SOL  ({pnl_pct:+.1f}%)"
-        "</pre>"
-    )
 
-    # Performance
-    out.append("<b>PERFORMANCE</b>")
-    out.append(
-        "<pre>"
-        f"Today P&amp;L      {_money(perf_today_pnl):>11}\n"
-        f"All-Time P&amp;L   {_money(real_alltime_pnl):>11}\n"
-        f"Win Rate       {perf_wr:>8}%\n"
-        f"Closed         {perf_closed:>9}"
-        "</pre>"
-    )
+    # Header — app name + mode/status, then the prominent balance card.
+    out.append("<b>Revolt Trading</b>")
+    out.append(f"<i>{mode_word} · {dec_badge.split(' ')[-1]}</i>   {status_dot} {status_word}")
+    out.append("")
+    out.append(_card([
+        "",
+        f"{real_balance:.2f} SOL",
+        f"{pnl_sign}{pnl_val:.2f} SOL   ({pnl_pct:+.1f}%)",
+        "",
+    ]))
+    out.append("")
 
-    # Open positions (compact)
+    # Performance — 2×2 metric cards.
+    out.append("<b>Performance</b>")
+    out.append(_mini2("Today", f"{perf_today_pnl:+.2f}",
+                      "All-Time", f"{real_alltime_pnl:+.2f}"))
+    out.append(_mini2("Win Rate", f"{perf_wr}%",
+                      "Closed", f"{perf_closed}"))
+    out.append("")
+
+    # Open positions — clean rows.
     open_trades = await get_open_paper_trades()
     if open_trades:
         live_mcs = await asyncio.gather(
@@ -744,7 +762,7 @@ async def _build_hub_text(autotrade: bool) -> str:
             return_exceptions=True,
         )
         unrealized = 0.0
-        pos_rows = []
+        rows = []
         for pt, live_mc in zip(open_trades, live_mcs):
             entry_mc = pt.entry_mc or 0
             current_mc = live_mc if isinstance(live_mc, (int, float)) and live_mc else 0
@@ -752,54 +770,55 @@ async def _build_hub_text(autotrade: bool) -> str:
             if entry_mc > 0 and current_mc > 0:
                 unrealized += (pt.paper_sol_spent or 0) * (mult - 1)
             dot = "🟢" if mult >= 1.3 else ("🟡" if mult >= 1.0 else "🔴")
-            nm = _esc((pt.token_name or "?").replace("_", " ")[:12])
-            pos_rows.append(f"{nm:<12} {mult:>5.2f}x  {dot}")
-        out.append(f"<b>OPEN POSITIONS · {len(open_trades)}</b>  ({_money(unrealized)} unrealized)")
-        out.append("<pre>" + "\n".join(pos_rows) + "</pre>")
+            nm = _esc((pt.token_name or "?").replace("_", " ")[:14])
+            rows.append(f"{dot}  {nm:<14} {mult:>5.2f}x")
+        out.append(f"<b>Open Positions</b>   <i>{unrealized:+.2f} SOL unrealized</i>")
+        out.append("<pre>" + "\n".join(rows) + "</pre>")
+        out.append("")
 
-    # Recent trades (clean, last 7)
+    # Recent trades — modern rows, green/red mark.
     reason_map = {
-        "tp_hit": "win", "sl_hit": "SL", "trail_hit": "trail",
-        "breakeven_stop": "B/E", "profit_trail": "trail", "stale": "stale",
+        "tp_hit": "win", "sl_hit": "stop", "trail_hit": "trail",
+        "breakeven_stop": "break-even", "profit_trail": "trail", "stale": "stale",
         "expired": "expired", "manual_close": "manual", "dead_token": "dead",
-        "no_momentum": "no mom", "bundle_time_exit": "bundle",
+        "no_momentum": "no momentum", "bundle_time_exit": "bundle",
     }
     recent = paper_stats.get("recent") or []
-    out.append("<b>RECENT TRADES</b>")
+    out.append("<b>Recent Trades</b>")
     if recent:
         rows = []
         for pt in recent[:7]:
-            nm = _esc((pt.token_name or "?").replace("_", " ")[:12])
+            nm = _esc((pt.token_name or "?").replace("_", " ")[:13])
             if pt.status == "open":
-                rows.append(f"{nm:<12}   —     —      open")
+                rows.append(f"🟡  {nm:<13} open")
                 continue
             pnl = pt.paper_pnl_sol or 0
             win = pnl > 0
-            mult = f"{(pt.peak_multiple or 0):.1f}x" if win else "—"
-            reason = "win" if win else reason_map.get(pt.close_reason or "", pt.close_reason or "?")
+            tag = f"{(pt.peak_multiple or 0):.1f}x" if win else reason_map.get(
+                pt.close_reason or "", pt.close_reason or "?")
             mark = "🟢" if win else "🔴"
-            rows.append(f"{nm:<12} {mult:>5} {pnl:>+7.2f}  {mark} {reason}")
+            rows.append(f"{mark}  {nm:<13} {tag:<11} {pnl:>+6.2f}")
         out.append("<pre>" + "\n".join(rows) + "</pre>")
     else:
         out.append("<pre>No trades yet</pre>")
+    out.append("")
 
-    # Top wallets (5, simplified)
-    out.append("<b>TOP WALLETS</b>")
+    # Top wallets — polished list.
+    out.append("<b>Top Wallets</b>")
     top_wallets = await get_top_wallets(limit=5)
     if top_wallets:
         rows = []
         for i, w in enumerate(top_wallets, 1):
             short = f"{w.address[:4]}…{w.address[-4:]}"
             wr = int((w.win_rate or 0) * 100)
-            wtype = (getattr(w, "wallet_type", None) or "—").replace("_", " ")[:10]
-            rows.append(f"{i}  {short:<11} {w.score:>3.0f}  {wr:>3}%  {wtype}")
+            rows.append(f"{i}.  {short:<12} {w.score:>3.0f} · {wr:>3}%")
         out.append("<pre>" + "\n".join(rows) + "</pre>")
     else:
         out.append("<pre>Building list…</pre>")
+    out.append("")
 
-    # System (minimal — detail lives behind the Agent Details button)
-    out.append(f"<b>SYSTEM</b>  {status_dot} {status_word}")
-    out.append("<i>Tap “Agent Details” for full agent + health view.</i>")
+    # System — minimal one-liner; detail behind the Agent Details button.
+    out.append(f"<b>System</b>   {status_dot} {status_word}")
 
     return "\n".join(out)
 
