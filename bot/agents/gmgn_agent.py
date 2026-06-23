@@ -377,6 +377,79 @@ def _extract_wallet_addrs(wallets: list) -> set[str]:
     return out
 
 
+async def _import_one_wallet(address: str, source: str = "gmgn") -> bool:
+    """Fetch a wallet's GMGN portfolio stats, apply the quality filter (55%+ WR,
+    30+ trades), score + tier it, and upsert. Shared by the generic smart-money
+    import and the winner-top-trader seeding. Returns True if saved."""
+    stats = await gmgn_wallet_stats(address)
+    if not stats:
+        return False
+    pnl = stats.get("pnl_stat") or {}
+    wr = float(pnl.get("winrate") or stats.get("win_rate") or 0)
+    total_trades = int(stats.get("buy") or pnl.get("token_num") or 0)
+    if total_trades < 30 or wr < 0.55:
+        return False
+    wins_2x = int(pnl.get("pnl_2x_5x_num") or 0)
+    wins_5x = int(pnl.get("pnl_gt_5x_num") or 0)
+    wins_0x = int(pnl.get("pnl_0x_2x_num") or 0)
+    wins = wins_0x + wins_2x + wins_5x
+    losses = total_trades - wins
+    avg_mult = ((wins_0x * 1.5 + wins_2x * 3.5 + wins_5x * 7.0) / wins) if wins > 0 else 1.0
+    score, tier = await _score_wallet(
+        wins=max(wins, 1), losses=losses, total_trades=total_trades,
+        avg_multiple=avg_mult, early_entry_rate=0.5,
+    )
+    await upsert_wallet(
+        address=address, score=score, tier=tier,
+        win_rate=round(wr, 4), avg_multiple=round(avg_mult, 2),
+        wins=wins, losses=losses, total_trades=total_trades,
+        avg_entry_mcap=None, source=source, wallet_type="gmgn_smart",
+    )
+    return True
+
+
+async def seed_winner_top_traders() -> int:
+    """HIGHEST-SIGNAL wallet seeding: for the tokens WE actually won on (5x+),
+    pull GMGN's TOP TRADERS (wallets that profited most on THAT token) and seed
+    them into the tier list. This beats generic smart-money lists — these are
+    wallets proven to make money on the exact kind of tokens our edge finds.
+    Bounded to control GMGN cost. Returns count seeded."""
+    from database.models import get_winning_scans, get_params
+    from datetime import datetime, timedelta
+    cfg = await get_params("wallet_seed_winners_enabled", "wallet_promote_min_peak")
+    if float(cfg.get("wallet_seed_winners_enabled") or 1.0) < 0.5:
+        return 0
+    min_peak = float(cfg.get("wallet_promote_min_peak") or 5.0)
+    since = datetime.utcnow() - timedelta(days=14)
+    winners = await get_winning_scans(since=since, min_peak=min_peak)
+    if not winners:
+        return 0
+    seeded = 0
+    seen: set[str] = set()
+    for w in winners[:15]:   # cap winners per run
+        mint = getattr(w, "contract_address", None)
+        if not mint:
+            continue
+        try:
+            traders = await gmgn_top_traders(mint)
+        except Exception:
+            continue
+        addrs = _extract_wallet_addrs(traders)
+        for a in list(addrs)[:10]:   # cap traders per token
+            if a in seen:
+                continue
+            seen.add(a)
+            try:
+                if await _import_one_wallet(a, source="gmgn_winner_trader"):
+                    seeded += 1
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+    logger.info("seed_winner_top_traders: seeded %d wallets from %d winners",
+                seeded, len(winners[:15]))
+    return seeded
+
+
 async def _fetch_smart_wallets_fallback() -> tuple[set[str], str]:
     """
     Try every known path for discovering smart-money wallets. Returns

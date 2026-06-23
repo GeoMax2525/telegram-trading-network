@@ -3680,6 +3680,7 @@ AGENT_PARAM_DEFAULTS = {
     "wallet_min_meaningful_wins":  2.0,   # min wins before a wallet is trusted
     "wallet_demote_enabled":       1.0,   # 1 = re-tier cold wallets down (demotion sweep)
     "wallet_demote_sweep_days":    7.0,   # how often the demotion sweep runs
+    "wallet_seed_winners_enabled": 1.0,   # 1 = seed GMGN top-traders of OUR winners
 
     # ── Scanner insider gate — only trade when smart money is buying ─────────
     "scanner_insider_gate":        0.0,   # 1 = no scanner trade without insider buys

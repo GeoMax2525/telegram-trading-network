@@ -2405,10 +2405,16 @@ async def cmd_updatewallets(message: Message):
     await message.reply("⏳ Running wallet analyst — promoting early buyers of recent winners…",
                         parse_mode=None)
     sweep = None
+    seeded = None
     try:
         from bot.agents.wallet_analyst import run_once as _run_wallets, demote_sweep
         found, saved = await _run_wallets()   # promote early buyers of new winners
         sweep = await demote_sweep()          # re-tier cold wallets down
+        try:
+            from bot.agents.gmgn_agent import seed_winner_top_traders
+            seeded = await seed_winner_top_traders()  # GMGN top traders of our winners
+        except Exception as _se:
+            logger.debug("winner seed failed: %s", _se)
     except Exception as exc:
         await message.reply(f"⚠️ Run error: {exc}", parse_mode=None)
         found = saved = None
@@ -2428,6 +2434,8 @@ async def cmd_updatewallets(message: Message):
     if sweep is not None:
         lines.append(f"Demote sweep: {sweep['checked']} re-checked, "
                      f"{sweep['demoted']} demoted, {sweep['promoted']} promoted")
+    if seeded is not None:
+        lines.append(f"Winner top-traders seeded (GMGN): {seeded}")
     lines += [
         "",
         f"Tier 1: {tiers[1]}   Tier 2: {tiers[2]}   Tier 3: {tiers[3]}",
