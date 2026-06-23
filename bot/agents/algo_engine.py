@@ -221,13 +221,19 @@ async def _poll_loop() -> None:
         max_open = int(float(cfg.get("max_open_paper_trades") or 5))
         now = _time.time()
 
-        for mint in list(_watch.keys()):
-            w = _watch[mint]
+        # Throttle: cap detail fetches per cycle + space them out so we never
+        # blow Cloudflare's rate limit (~4 req/s). Oldest-first so nothing starves.
+        candidates = sorted(_watch.keys(), key=lambda m: _watch[m]["first_seen"])[:40]
+        for mint in candidates:
+            w = _watch.get(mint)
+            if w is None:
+                continue
             try:
                 if (now - w["first_seen"]) > watch_min * 60:
                     _watch.pop(mint, None)
                     continue
                 data = await fetch_pumpfun_coin(mint)
+                await asyncio.sleep(0.25)   # ~4 req/s ceiling
                 if data is None or data["mc"] <= 0:
                     continue
                 if w["first_mc"] is None:
