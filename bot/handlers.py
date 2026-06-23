@@ -2393,6 +2393,51 @@ async def cmd_4amattribution(message: Message):
         await message.reply(text[i:i+3800], parse_mode=None)
 
 
+# ── /updatewallets — trigger wallet promotion + show tier summary ─────────
+@router.message(Command("updatewallets"))
+async def cmd_updatewallets(message: Message):
+    """Manually run the self-improving wallet list (Option C): finds our recent
+    meaningful winners (≥5x), promotes their early buyers, and shows the current
+    tier breakdown that feeds the insider gate + confluence boost."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from database.models import AsyncSessionLocal, select, func, Wallet
+    await message.reply("⏳ Running wallet analyst — promoting early buyers of recent winners…",
+                        parse_mode=None)
+    try:
+        from bot.agents.wallet_analyst import run_once as _run_wallets
+        found, saved = await _run_wallets()
+    except Exception as exc:
+        await message.reply(f"⚠️ Run error: {exc}", parse_mode=None)
+        found = saved = None
+
+    async with AsyncSessionLocal() as s:
+        tiers = {}
+        for t in (1, 2, 3):
+            tiers[t] = (await s.execute(
+                select(func.count(Wallet.address)).where(Wallet.tier == t))).scalar() or 0
+        top = list((await s.execute(
+            select(Wallet).where(Wallet.tier.in_((1, 2)))
+            .order_by(Wallet.avg_multiple.desc()).limit(10))).scalars().all())
+
+    lines = ["👛 SMART-MONEY WALLET LIST", "━━━━━━━━━━━━━━━━━━━━━━━"]
+    if found is not None:
+        lines.append(f"Run: {found} winners scanned, {saved} wallets updated")
+    lines += [
+        "",
+        f"Tier 1: {tiers[1]}   Tier 2: {tiers[2]}   Tier 3: {tiers[3]}",
+        "",
+        "Top tier-1/2 by avg multiple:",
+    ]
+    for w in top:
+        lines.append(f"  T{w.tier} {w.address[:4]}…{w.address[-4:]} — "
+                     f"{w.avg_multiple:.1f}x · {w.win_rate*100:.0f}% WR · {w.total_trades} tr")
+    if not top:
+        lines.append("  (none yet — need more ≥5x winners to populate)")
+    lines += ["", "These feed the insider gate + 4am confluence boost."]
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /scannerstats — scanner edge by sub-source (find what works) ──────────
 @router.message(Command("scannerstats"))
 async def cmd_scannerstats(message: Message):

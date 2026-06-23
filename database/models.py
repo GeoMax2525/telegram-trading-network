@@ -1895,17 +1895,19 @@ class _WinningScanProxy:
         self.peak_multiplier = peak_multiplier
 
 
-async def get_winning_scans(since: "datetime | None" = None) -> list:
-    """Returns winning tokens (peak >= 2x) from BOTH the Scan table (caller
-    submissions) AND the PaperTrade table (autonomous trades). This feeds
-    Agent 2 wallet analyst so it can discover early buyers on proven winners."""
+async def get_winning_scans(since: "datetime | None" = None, min_peak: float = 2.0) -> list:
+    """Returns MEANINGFUL winning tokens (peak >= min_peak) from the Scan and
+    PaperTrade tables. This feeds Agent 2 wallet analyst so it can discover the
+    early buyers on proven winners and tier them. Raising min_peak (e.g. to 5x)
+    promotes only wallets that were early on real runners — a 2x is too noisy
+    (lots of tokens 2x by chance; 5x+ shows actual skill)."""
     results = []
     seen_mints: set[str] = set()
 
     async with AsyncSessionLocal() as session:
-        # Source 1: Caller scans with peak >= 2x
+        # Source 1: Caller scans with peak >= min_peak
         q = select(Scan).where(
-            Scan.peak_multiplier >= 2,
+            Scan.peak_multiplier >= min_peak,
             Scan.entry_price.is_not(None),
         )
         if since is not None:
@@ -1915,11 +1917,9 @@ async def get_winning_scans(since: "datetime | None" = None) -> list:
             results.append(s)
             seen_mints.add(s.contract_address)
 
-        # Source 2: Paper trade winners with peak >= 2x (admin/HQ only —
-        # subscriber relay rows are duplicates of HQ trades and would
-        # double-count winners in the learning corpus)
+        # Source 2: Paper trade winners with peak >= min_peak (HQ only).
         pq = select(PaperTrade).where(
-            PaperTrade.peak_multiple >= 2,
+            PaperTrade.peak_multiple >= min_peak,
             PaperTrade.entry_mc.is_not(None),
             PaperTrade.token_address.is_not(None),
             PaperTrade.subscriber_id.is_(None),
@@ -3673,6 +3673,11 @@ AGENT_PARAM_DEFAULTS = {
     "migration_sl_pct":       35.0,     # stop-loss
     "migration_watch_min":     8.0,     # ONLY catch the immediate post-migration dip
     "migration_max_buy_min":   8.0,     # never buy a token this long after migration
+
+    # ── Self-improving wallet list (Option C) ────────────────────────────────
+    "wallet_promote_min_peak":     5.0,   # only promote early buyers of >=5x winners
+    "wallet_bot_max_trades":     800.0,   # reject spray-bots above this trade count
+    "wallet_min_meaningful_wins":  2.0,   # min wins before a wallet is trusted
 
     # ── Scanner insider gate — only trade when smart money is buying ─────────
     "scanner_insider_gate":        0.0,   # 1 = no scanner trade without insider buys

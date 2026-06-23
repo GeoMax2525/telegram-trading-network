@@ -759,7 +759,10 @@ async def run_once() -> tuple[int, int]:
     last_log = await get_last_agent_run("wallet_analyst")
     since = last_log.run_at if last_log else None
 
-    winning_scans = await get_winning_scans(since=since)
+    # MEANINGFUL winners only — a 2x is noise; 5x+ shows real skill. Tunable.
+    _wp = await get_params("wallet_promote_min_peak")
+    _min_peak = float(_wp.get("wallet_promote_min_peak") or 5.0)
+    winning_scans = await get_winning_scans(since=since, min_peak=_min_peak)
     if not winning_scans:
         await log_agent_run(
             "wallet_analyst", tokens_found=0, tokens_saved=0,
@@ -823,6 +826,24 @@ async def run_once() -> tuple[int, int]:
             total = stats["total_trades"]
             if total < 1:
                 return False
+
+            # BOT FILTER — spray-bots trade hundreds of tokens; real alpha wallets
+            # are selective. Reject implausibly high trade counts so we don't copy
+            # a bot that lucked into decent stats. Tunable via wallet_bot_max_trades.
+            try:
+                _bf = await get_params("wallet_bot_max_trades", "wallet_min_meaningful_wins")
+                _bot_max = int(float(_bf.get("wallet_bot_max_trades") or 800))
+                if total > _bot_max:
+                    logger.info("Wallet Analyst: BOT-FILTER skip %s — %d trades > %d",
+                                address[:8], total, _bot_max)
+                    return False
+                # Require a minimum number of WINS (not just trades) before we
+                # trust a wallet — one lucky early buy isn't skill.
+                _min_wins = int(float(_bf.get("wallet_min_meaningful_wins") or 2))
+                if stats["wins"] < _min_wins:
+                    return False
+            except Exception:
+                pass
 
             wins = stats["wins"]
             losses = stats["losses"]
