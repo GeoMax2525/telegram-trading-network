@@ -689,284 +689,119 @@ async def _build_hub_text(autotrade: bool) -> str:
     except Exception:
         dec_badge = "🤖 AI"
 
-    lines = [
-        DIVIDER,
-        "🔑 REVOLT AGENT HUB",
-        f"Trade Mode: {mode_word}  |  Decision: {dec_badge}",
-        f"Balance: {real_balance:.2f} / {starting:.2f} SOL  |  P&amp;L: {pnl_val:+.2f} SOL ({pnl_pct:+.1f}%)",
-        DIVIDER,
-        "",
-        "⚙️ AGENTS",
-    ]
-
-    # ── Agents block (column-aligned best-effort) ───────────────────
-    def _fmt_age(dt_or_secs, already_seconds: bool = False) -> str:
-        if dt_or_secs is None:
-            return "—"
-        if already_seconds:
-            secs = int(dt_or_secs)
-        else:
-            secs = int((datetime.utcnow() - dt_or_secs).total_seconds())
-        if secs < 60:
-            return f"{secs}s ago"
-        mins = secs // 60
-        if mins < 60:
-            return f"{mins}min ago"
-        hours = mins // 60
-        if hours < 24:
-            return f"{hours}h ago"
-        return f"{hours // 24}d ago"
-
-    def _fmt_agent(name: str, icon: str, detail: str, age: str) -> str:
-        return f"{name:<11} {icon}  {detail:<22} {age}"
-
-    scanner_age = _fmt_age(state.scanner_last_run)
-    lines.append(_fmt_agent(
-        "Scanner", "✅",
-        f"{state.scanner_candidates_today} today",
-        scanner_age,
-    ))
-
-    harvest_age = _fmt_age(last_harvest.run_at if last_harvest else None)
-    lines.append(_fmt_agent(
-        "Harvester", "✅",
-        f"{token_count:,} tokens",
-        harvest_age,
-    ))
-
-    analyst_age = _fmt_age(last_analyst.run_at if last_analyst else None)
-    lines.append(_fmt_agent(
-        "Wallets", "✅",
-        f"{wallet_total} total ({wallet_tier1}T1/{wallet_tier2}T2/{wallet_tier3}T3)",
-        analyst_age,
-    ))
-
-    try:
-        gmgn = await get_gmgn_stats()
-        gmgn_detail = (
-            f"{gmgn['wallets']} wallets "
-            f"({gmgn.get('tier1', 0)}T1/{gmgn.get('tier2', 0)}T2/{gmgn.get('tier3', 0)}T3) "
-            f"{gmgn.get('trending', 0):,} trending"
-        )
-    except Exception:
-        gmgn_detail = "starting..."
-    lines.append(_fmt_agent("GMGN", "✅", gmgn_detail, "—"))
-
-    pattern_age = _fmt_age(last_pattern_engine.run_at if last_pattern_engine else None)
-    lines.append(_fmt_agent(
-        "Patterns", "✅",
-        f"{pattern_total} active",
-        pattern_age,
-    ))
-
-    ce_icon = "✅" if autotrade else "⚙️"
-    lines.append(_fmt_agent(
-        "Confidence", ce_icon,
-        f"{ce_stats.get('scored_today', 0)} scored",
-        "—",
-    ))
-
-    regime = getattr(state, "market_regime", "NEUTRAL")
-    ll_icon = "⚠️" if regime == "BAD" else "✅"
-    ll_age = _fmt_age(state.learning_loop_last_run)
-    lines.append(_fmt_agent(
-        "Learning", ll_icon,
-        f"{regime} regime",
-        ll_age,
-    ))
-
-    try:
-        cs = await get_chart_pattern_stats_today()
-        chart_detail = f"{cs['detected']} detected"
-    except Exception:
-        chart_detail = "—"
-    lines.append(_fmt_agent("Charts", "✅", chart_detail, "—"))
-
-    # ── Performance (strategy-only, meta excluded) ──────────────────
-    candidates_today = ce_stats.get("scored_today", 0) or state.scanner_candidates_today
-    # "All Time" should reflect REAL profit (balance change since start),
-    # not strategy_pnl which excludes dead_token + other meta losses.
-    # User saw +17.67 strategy_pnl but real balance change was +2.46 —
-    # the gap is the dead_token bleed strategy_pnl hides.
+    # ── Derived values ──────────────────────────────────────────────
     real_alltime_pnl = real_balance - starting
-    perf_today_pnl = paper_stats.get("today_pnl", 0.0)  # total today incl. meta
-    perf_wr = paper_stats.get("strategy_win_rate", 0)
-    perf_closed = paper_stats.get("strategy_closed", 0)
-    lines += [
-        "",
-        DIVIDER,
-        "📊 PERFORMANCE",
-        f"Today: {perf_today_pnl:+.2f} SOL  |  All Time: {real_alltime_pnl:+.2f} SOL",
-        f"Win Rate: {perf_wr}%  |  Closed: {perf_closed} bot  |  Candidates: {candidates_today}",
-    ]
+    perf_today_pnl   = paper_stats.get("today_pnl", 0.0)
+    perf_wr          = paper_stats.get("strategy_win_rate", 0)
+    perf_closed      = paper_stats.get("strategy_closed", 0)
+    p_open           = paper_stats.get("open_count", 0)
 
-    # ── Paper trading breakdown (strategy-only, meta excluded) ──────
-    p_open            = paper_stats.get("open_count", 0)
-    p_today_n         = paper_stats.get("today_count", 0)
-    p_today_pnl       = paper_stats.get("today_pnl", 0.0)
-    p_today_wr        = paper_stats.get("today_strategy_win_rate", 0)
-    p_strat_wr        = paper_stats.get("strategy_win_rate", 0)
-    p_strat_n         = paper_stats.get("strategy_closed", 0)
-    p_strat_pnl       = paper_stats.get("strategy_pnl", 0.0)
-    p_meta_pnl        = paper_stats.get("meta_pnl", 0.0)
+    # Overall status — green if today is green AND no critical loop stale.
+    try:
+        from bot.health import health_snapshot
+        any_stale = any(r["stale"] for r in health_snapshot())
+    except Exception:
+        any_stale = False
+    if any_stale:
+        status_dot, status_word = "🔴", "DEGRADED"
+    elif perf_today_pnl >= 0:
+        status_dot, status_word = "🟢", "HEALTHY"
+    elif perf_today_pnl > -0.3:
+        status_dot, status_word = "🟡", "CAUTION"
+    else:
+        status_dot, status_word = "🔴", "DRAWDOWN"
 
-    lines += [
-        "",
-        DIVIDER,
-        f"📋 PAPER TRADING ({p_open} open)",
-        f"Today: {p_today_n} trades  |  Win Rate: {p_today_wr}%  |  {p_today_pnl:+.2f} SOL",
-        f"Bot-closed: {p_strat_n} trades  |  {p_strat_wr}% WR  |  Strategy: {p_strat_pnl:+.2f} SOL",
-        f"Meta (dead/stale/etc): {p_meta_pnl:+.2f} SOL",
-        f"All Time Profit (real): {real_alltime_pnl:+.2f} SOL",
-    ]
+    def _money(v: float) -> str:
+        return f"{v:+.2f} SOL"
 
-    # ── Open trades ─────────────────────────────────────────────────
+    # ── Build (bold headers + monospace data blocks for clean columns) ──
+    out: list[str] = []
+    out.append("<b>REVOLT TERMINAL</b>")
+    out.append(
+        "<pre>"
+        f"{mode_word} · {dec_badge.split(' ')[-1]:<8}{status_dot} {status_word}\n"
+        f"Balance   {real_balance:>8.2f} SOL\n"
+        f"P&amp;L       {pnl_val:>+8.2f} SOL  ({pnl_pct:+.1f}%)"
+        "</pre>"
+    )
+
+    # Performance
+    out.append("<b>PERFORMANCE</b>")
+    out.append(
+        "<pre>"
+        f"Today P&amp;L      {_money(perf_today_pnl):>11}\n"
+        f"All-Time P&amp;L   {_money(real_alltime_pnl):>11}\n"
+        f"Win Rate       {perf_wr:>8}%\n"
+        f"Closed         {perf_closed:>9}"
+        "</pre>"
+    )
+
+    # Open positions (compact)
     open_trades = await get_open_paper_trades()
     if open_trades:
         live_mcs = await asyncio.gather(
             *[fetch_current_market_cap(pt.token_address) for pt in open_trades],
             return_exceptions=True,
         )
-
-        # Total unrealized P&L across all open positions
         unrealized = 0.0
+        pos_rows = []
         for pt, live_mc in zip(open_trades, live_mcs):
             entry_mc = pt.entry_mc or 0
             current_mc = live_mc if isinstance(live_mc, (int, float)) and live_mc else 0
+            mult = (current_mc / entry_mc) if (entry_mc > 0 and current_mc > 0) else 0
             if entry_mc > 0 and current_mc > 0:
-                mult = current_mc / entry_mc
                 unrealized += (pt.paper_sol_spent or 0) * (mult - 1)
+            dot = "🟢" if mult >= 1.3 else ("🟡" if mult >= 1.0 else "🔴")
+            nm = _esc((pt.token_name or "?").replace("_", " ")[:12])
+            pos_rows.append(f"{nm:<12} {mult:>5.2f}x  {dot}")
+        out.append(f"<b>OPEN POSITIONS · {len(open_trades)}</b>  ({_money(unrealized)} unrealized)")
+        out.append("<pre>" + "\n".join(pos_rows) + "</pre>")
 
-        lines += [
-            "",
-            DIVIDER,
-            f"📂 OPEN TRADES ({len(open_trades)})  |  Unrealized: {unrealized:+.2f} SOL",
-        ]
-
-        now = datetime.utcnow()
-        for idx, (pt, live_mc) in enumerate(zip(open_trades, live_mcs), 1):
-            raw_name = (pt.token_name or "?").replace("_", " ")
-            entry_mc = pt.entry_mc or 0
-            current_mc = live_mc if isinstance(live_mc, (int, float)) and live_mc else 0
-            multiplier = (current_mc / entry_mc) if (entry_mc > 0 and current_mc > 0) else 0
-
-            if multiplier >= 1.3:
-                color = "🟢"
-            elif multiplier >= 1.0:
-                color = "🟡"
-            else:
-                color = "🔴"
-
-            tp_mc = entry_mc * (pt.take_profit_x or 0) if entry_mc > 0 else 0
-            sl_mc = entry_mc * (1 - (pt.stop_loss_pct or 0) / 100) if entry_mc > 0 else 0
-
-            elapsed = now - pt.opened_at if pt.opened_at else None
-            if elapsed is None:
-                age = "—"
-            else:
-                mins = int(elapsed.total_seconds() // 60)
-                if mins < 1:
-                    age = "just now"
-                elif mins < 60:
-                    age = f"{mins}min ago"
-                elif mins < 1440:
-                    age = f"{mins // 60}h ago"
-                else:
-                    age = f"{mins // 1440}d ago"
-
-            mult_str = f"{multiplier:.2f}x" if multiplier else "?"
-            ca = pt.token_address or "?"
-
-            lines.append("")
-            lines.append(f"{idx}. ${_esc(raw_name)}  {mult_str} {color}")
-            lines.append(f"   MC: {_format_usd(entry_mc)} → {_format_usd(current_mc)}")
-            lines.append(
-                f"   TP: {(pt.take_profit_x or 0):.1f}x ({_format_usd(tp_mc)})  "
-                f"SL: {(pt.stop_loss_pct or 0):.0f}% ({_format_usd(sl_mc)})"
-            )
-            lines.append(f"   CA: <code>{_esc(ca)}</code>")
-            lines.append(f"   Opened: {age}")
-
-    # ── Top wallets ─────────────────────────────────────────────────
-    lines += ["", DIVIDER, "🧠 TOP WALLETS"]
-    top_wallets = await get_top_wallets(limit=5)
-    if not top_wallets:
-        lines.append("No wallets scored yet — Agent 2 is analyzing...")
-    else:
-        for i, w in enumerate(top_wallets, 1):
-            short = f"{w.address[:4]}...{w.address[-4:]}"
-            wr = int((w.win_rate or 0) * 100)
-            wl_col = f"{w.wins}W-{w.losses}L"
-            wtype = getattr(w, "wallet_type", None) or ""
-            lines.append(
-                f"#{i}  {_esc(short)}  Score:{w.score:.0f}  "
-                f"{wl_col:<8} {wr}%  T{w.tier}  {_esc(wtype)}".rstrip()
-            )
-
-    # Summary footer — counts by wallet_type + clusters
-    try:
-        from database.models import (
-            AsyncSessionLocal as _ASL, select as _select, func as _func,
-            Wallet as _Wallet, get_all_wallet_clusters as _gacs,
-        )
-        async with _ASL() as _session:
-            summary_total = (await _session.execute(
-                _select(_func.count(_Wallet.address))
-            )).scalar() or 0
-            early_insider_count = (await _session.execute(
-                _select(_func.count(_Wallet.address)).where(
-                    _Wallet.wallet_type == "early_insider"
-                )
-            )).scalar() or 0
-            coordinated_count = (await _session.execute(
-                _select(_func.count(_Wallet.address)).where(
-                    _Wallet.wallet_type == "coordinated_group"
-                )
-            )).scalar() or 0
-        cluster_rows = await _gacs()
-        cluster_total = len(cluster_rows)
-    except Exception:
-        summary_total = early_insider_count = coordinated_count = cluster_total = 0
-
-    lines.append(
-        f"👛 {summary_total} total  |  "
-        f"{early_insider_count} early_insider  |  "
-        f"{coordinated_count} coordinated  |  "
-        f"{cluster_total} clusters"
-    )
-
-    # ── Recent trades ───────────────────────────────────────────────
-    lines += ["", DIVIDER, "📋 RECENT TRADES"]
+    # Recent trades (clean, last 7)
     reason_map = {
-        "tp_hit":         "TP hit",
-        "sl_hit":         "SL hit",
-        "trail_hit":      "trail",
-        "breakeven_stop": "BE stop",
-        "profit_trail":   "prof trl",
-        "stale":          "stale",
-        "expired":        "expired",
-        "manual_close":   "manual",
-        "dead_token":     "dead",
+        "tp_hit": "win", "sl_hit": "SL", "trail_hit": "trail",
+        "breakeven_stop": "B/E", "profit_trail": "trail", "stale": "stale",
+        "expired": "expired", "manual_close": "manual", "dead_token": "dead",
+        "no_momentum": "no mom", "bundle_time_exit": "bundle",
     }
     recent = paper_stats.get("recent") or []
+    out.append("<b>RECENT TRADES</b>")
     if recent:
-        for pt in recent[:5]:
-            raw_name = (pt.token_name or "?").replace("_", " ")
-            name_col = _esc(raw_name[:15])
+        rows = []
+        for pt in recent[:7]:
+            nm = _esc((pt.token_name or "?").replace("_", " ")[:12])
             if pt.status == "open":
-                lines.append(f"🟡 {name_col:<15}  open")
-            elif pt.paper_pnl_sol and pt.paper_pnl_sol > 0:
-                mult = f"{(pt.peak_multiple or 0):.1f}x"
-                lines.append(f"✅ {name_col:<15}  {mult:<8} {pt.paper_pnl_sol:+.2f} SOL")
-            else:
-                reason = reason_map.get(pt.close_reason or "", pt.close_reason or "?")
-                pnl = pt.paper_pnl_sol or 0
-                lines.append(f"❌ {name_col:<15}  {reason:<8} {pnl:+.2f} SOL")
+                rows.append(f"{nm:<12}   —     —      open")
+                continue
+            pnl = pt.paper_pnl_sol or 0
+            win = pnl > 0
+            mult = f"{(pt.peak_multiple or 0):.1f}x" if win else "—"
+            reason = "win" if win else reason_map.get(pt.close_reason or "", pt.close_reason or "?")
+            mark = "🟢" if win else "🔴"
+            rows.append(f"{nm:<12} {mult:>5} {pnl:>+7.2f}  {mark} {reason}")
+        out.append("<pre>" + "\n".join(rows) + "</pre>")
     else:
-        lines.append("No recent trades yet")
+        out.append("<pre>No trades yet</pre>")
 
-    lines.append(DIVIDER)
-    return "\n".join(lines)
+    # Top wallets (5, simplified)
+    out.append("<b>TOP WALLETS</b>")
+    top_wallets = await get_top_wallets(limit=5)
+    if top_wallets:
+        rows = []
+        for i, w in enumerate(top_wallets, 1):
+            short = f"{w.address[:4]}…{w.address[-4:]}"
+            wr = int((w.win_rate or 0) * 100)
+            wtype = (getattr(w, "wallet_type", None) or "—").replace("_", " ")[:10]
+            rows.append(f"{i}  {short:<11} {w.score:>3.0f}  {wr:>3}%  {wtype}")
+        out.append("<pre>" + "\n".join(rows) + "</pre>")
+    else:
+        out.append("<pre>Building list…</pre>")
+
+    # System (minimal — detail lives behind the Agent Details button)
+    out.append(f"<b>SYSTEM</b>  {status_dot} {status_word}")
+    out.append("<i>Tap “Agent Details” for full agent + health view.</i>")
+
+    return "\n".join(out)
 
 
 # ── Subscriber-scoped /hub view ─────────────────────────────────────────────
@@ -1540,9 +1375,43 @@ async def cb_hub(callback: CallbackQuery):
             pass
 
     elif action == "agents":
-        await callback.answer(
-            "🔧 Agent Details: most agents are still being built.", show_alert=True
-        )
+        # Advanced view — the full agent + health detail moved off the main hub.
+        def _age(dt):
+            if dt is None:
+                return "—"
+            secs = int((datetime.utcnow() - dt).total_seconds())
+            if secs < 60:
+                return f"{secs}s"
+            if secs < 3600:
+                return f"{secs//60}m"
+            if secs < 86400:
+                return f"{secs//3600}h"
+            return f"{secs//86400}d"
+        rows = []
+        try:
+            st = await get_hub_stats()
+            rows.append(f"Scanner     {state.scanner_candidates_today:>5} today   {_age(state.scanner_last_run)}")
+            rows.append(f"Harvester   {st.get('token_count', 0):>5} tok     {_age((st.get('last_harvest') or type('x',(),{'run_at':None})).run_at if st.get('last_harvest') else None)}")
+            rows.append(f"Wallets     T1:{st.get('wallet_tier1',0)} T2:{st.get('wallet_tier2',0)} T3:{st.get('wallet_tier3',0)}")
+            rows.append(f"Patterns    {st.get('pattern_total', 0):>5} active")
+            rows.append(f"Regime      {getattr(state, 'market_regime', 'NEUTRAL')}")
+        except Exception:
+            pass
+        try:
+            from bot.health import health_snapshot
+            rows.append("")
+            rows.append("Loop heartbeats:")
+            for r in health_snapshot():
+                flag = "⚠️ STALE" if r["stale"] else "ok"
+                rows.append(f"  {r['name']:<16}{r['age_s']:>5.0f}s  {flag}")
+        except Exception:
+            pass
+        text = "<b>AGENT DETAIL</b>\n<pre>" + ("\n".join(rows) or "starting…") + "</pre>"
+        try:
+            await callback.message.answer(text, parse_mode="HTML")
+            await callback.answer()
+        except Exception:
+            await callback.answer("Agent detail unavailable.", show_alert=True)
 
     elif action == "wallets":
         wallets = await get_top_wallets(limit=10)
