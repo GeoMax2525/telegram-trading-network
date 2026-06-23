@@ -127,18 +127,20 @@ def decide_exit(pos: PositionState, p: dict) -> ExitDecision:
             and peak < eject_peak and cur < 1.0):
         return _close("no_momentum", note="Momentum died early — no follow-through.")
 
-    # 4. bundle time-exit (bundle flat in the dump window).
+    # 4. bundle time-exit — cut a FLAT/RED bundle before the dump, but let a
+    #    GREEN one ride (a bundle up 13% and climbing is working, not flat).
+    #    Bundles use ONLY this time-cut (excluded from the generic time_stop).
     if pos.is_bundle:
         b_min = float(p.get("bundle_time_exit_min", 15.0) or 15.0)
-        b_mult = float(p.get("bundle_time_exit_mult", 1.30) or 1.30)
-        if age >= (b_min / 60.0) and peak < b_mult and cur < b_mult:
-            return _close("bundle_time_exit", note="Flat in the dump window — cut early.")
+        b_flat = float(p.get("bundle_flat_mult", 1.05) or 1.05)
+        if age >= (b_min / 60.0) and cur < b_flat:
+            return _close("bundle_time_exit", note="Flat/red in the dump window — cut early.")
 
-    # 5. time stop (5min flat) — 4am skips.
+    # 5. time stop (5min flat) — scanner only (bundles handled above, 4am skips).
     ts_thr = float(p.get("time_stop_threshold", 1.50) or 1.50)
-    if (not skip_fast and age >= (ts_min / 60.0) and peak < ts_thr and cur < ts_thr):
-        # Bundle time-stops are visible; scanner ones are silent.
-        return _close("time_stop", silent=not pos.is_bundle)
+    if (not skip_fast and not pos.is_bundle
+            and age >= (ts_min / 60.0) and peak < ts_thr and cur < ts_thr):
+        return _close("time_stop", silent=True)
 
     # 6. breakeven stop.
     be_trigger = float(p.get("breakeven_trigger", 2.0) or 2.0)

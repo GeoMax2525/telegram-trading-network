@@ -99,18 +99,24 @@ async def _poll_loop() -> None:
         size = float(cfg.get("migration_size_sol") or 0.25)
         tp_x = float(cfg.get("migration_tp_x") or 1.8)
         sl_pct = float(cfg.get("migration_sl_pct") or 35.0)
-        watch_min = float(cfg.get("migration_watch_min") or 30.0)
+        watch_min = float(cfg.get("migration_watch_min") or 8.0)
+        max_buy_min = float(cfg.get("migration_max_buy_min") or watch_min)
         max_open = int(float(cfg.get("max_open_paper_trades") or 5))
         now = _now()
 
         for mint in list(_watch.keys()):
             w = _watch[mint]
             try:
+                age_min = (now - w["first_seen"]) / 60.0
                 # Evict tokens we've watched past the window without a dip-buy.
-                if (now - w["first_seen"]) > watch_min * 60.0:
+                if age_min > watch_min:
                     _watch.pop(mint, None)
                     continue
                 if w["bought"]:
+                    continue
+                # Hard guard: only the IMMEDIATE post-migration dip. Never buy a
+                # token this long after it migrated (was catching stale coins).
+                if age_min > max_buy_min:
                     continue
 
                 pair = await fetch_token_data(mint, allow_any_dex=True)

@@ -761,13 +761,14 @@ async def _check_open_trades(bot) -> None:
             # exit mult within the dump window, cut it BEFORE the coordinated
             # dump rather than riding the normal (slower) time stop. Tagged at
             # entry via pattern_type containing "bundle".
+            # Cut a FLAT/RED bundle before the dump, but let a GREEN one ride
+            # (a bundle up 13% and climbing is working — don't cut it as 'flat').
+            # Bundles use ONLY this time-cut (excluded from the generic time_stop).
             is_bundle_trade = "bundle" in (pt.pattern_type or "").lower()
             if is_bundle_trade:
                 b_exit_min = float(cfg.get("bundle_time_exit_min", 15.0) or 15.0)
-                b_exit_mult = float(cfg.get("bundle_time_exit_mult", 1.30) or 1.30)
-                if (age_hours >= (b_exit_min / 60.0)
-                        and peak_mult < b_exit_mult
-                        and current_mult < b_exit_mult):
+                b_flat = float(cfg.get("bundle_flat_mult", 1.05) or 1.05)
+                if age_hours >= (b_exit_min / 60.0) and current_mult < b_flat:
                     remaining_sol = sol * (remaining / 100.0)
                     pnl = round(realized + remaining_sol * (current_mult - 1), 4)
                     logger.info(
@@ -776,9 +777,9 @@ async def _check_open_trades(bot) -> None:
                     )
                     await _finalize_paper_close(
                         bot, pt, "bundle_time_exit", pnl, peak_mc, peak_mult,
-                        _close_card("📦", "BUNDLE EXIT — dump-window cut", name,
+                        _close_card("📦", "BUNDLE EXIT — flat/red, cut early", name,
                                     current_mult, pnl, entry_mc, current_mc,
-                                    note=f"Flat after {age_hours*60:.0f}m — cut before the dump."),
+                                    note=f"Flat/red after {age_hours*60:.0f}m — cut before the dump."),
                         parse_mode="HTML",
                     )
                     continue
@@ -788,7 +789,7 @@ async def _check_open_trades(bot) -> None:
             # fast; stale capital is dead capital. Cut from 8→5 min per report.
             time_stop_min = float(cfg.get("time_stop_minutes", 5.0) or 5.0)
             time_stop_thr = float(cfg.get("time_stop_threshold", 1.50) or 1.50)
-            if (not _skip_fast
+            if (not _skip_fast and not is_bundle_trade
                     and age_hours >= (time_stop_min / 60.0)
                     and peak_mult < time_stop_thr
                     and current_mult < time_stop_thr):
@@ -799,20 +800,10 @@ async def _check_open_trades(bot) -> None:
                     name, age_hours * 60, peak_mult, current_mult, pnl,
                     ",".join(tags) or "-",
                 )
-                # Bundle/concentration trades ALWAYS announce their close (so the
-                # entry card has a matching exit). Normal scanner time-stops stay
-                # silent — they fire often and would spam the feed.
-                if is_bundle_trade:
-                    await _finalize_paper_close(
-                        bot, pt, "time_stop", pnl, peak_mc, peak_mult,
-                        _close_card("📦", "BUNDLE EXIT — flat, cut early", name,
-                                    current_mult, pnl, entry_mc, current_mc),
-                        parse_mode="HTML",
-                    )
-                else:
-                    await _finalize_silent_close(
-                        pt, "time_stop", pnl, peak_mc, peak_mult,
-                    )
+                # Silent — scanner time-stops fire often and would spam the feed.
+                await _finalize_silent_close(
+                    pt, "time_stop", pnl, peak_mc, peak_mult,
+                )
                 continue
 
             # ── Profit protection ────────────────────────────────────────

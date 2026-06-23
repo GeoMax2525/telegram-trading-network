@@ -3606,7 +3606,8 @@ AGENT_PARAM_DEFAULTS = {
     "migration_size_sol":      0.25,    # position size
     "migration_tp_x":          1.8,     # take-profit (+80%)
     "migration_sl_pct":       35.0,     # stop-loss
-    "migration_watch_min":    30.0,     # watch a migrated token this long for the dip
+    "migration_watch_min":     8.0,     # ONLY catch the immediate post-migration dip
+    "migration_max_buy_min":   8.0,     # never buy a token this long after migration
 
     "tg_let_runners_run":   1.0,    # 1 = skip no_momentum + time_stop for 4am
     "tg_moonbag_pct":      25.0,    # % of a 4am position that NEVER stop-losses
@@ -3651,8 +3652,9 @@ AGENT_PARAM_DEFAULTS = {
     # dumps fast, so we trade it with TIGHTER rules instead of skipping it.
     "bundle_detect_enabled":       1.0,   # 0 = off (trade everything as clean)
     "bundle_top10_pct_threshold":  60.0,  # top-10 concentration >= this = bundle
-    "bundle_time_exit_min":        15.0,  # bundle un-pumped after this = exit (dump window)
-    "bundle_time_exit_mult":       1.30,  # ...unless it's already above this mult
+    "bundle_time_exit_min":        15.0,  # bundle FLAT/RED after this = exit (dump window)
+    "bundle_flat_mult":            1.05,  # cut only if cur < this (green climbers ride)
+    "bundle_time_exit_mult":       1.30,  # (legacy; superseded by bundle_flat_mult)
     "bundle_track_wallets_enabled": 1.0,  # record bundle participant wallets for the /bundlers board
     "bundle_min_launch_wallets":    4.0,  # >= this many wallets buying in the launch block = real bundle
     "entry_min_m5_buys":           0.0,   # min m5 buy count (0 = ratio gate only)

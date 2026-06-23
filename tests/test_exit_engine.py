@@ -24,7 +24,7 @@ P = {
     "hard_timeout_hours": 4.0,
     "entry_eject_after_sec": 90.0, "entry_eject_peak_mult": 1.10,
     "time_stop_minutes": 5.0, "time_stop_threshold": 1.50,
-    "bundle_time_exit_min": 15.0, "bundle_time_exit_mult": 1.30,
+    "bundle_time_exit_min": 15.0, "bundle_flat_mult": 1.05,
     "breakeven_trigger": 2.0,
     "profit_trail_trigger": 2.0, "tg_signal_trail_trigger": 1.5,
     "tg_moonbag_pct": 25.0, "tg_moonbag_trail_pct": 0.60,
@@ -65,6 +65,28 @@ def test_time_stop_silent_for_scanner():
 def test_expired_scanner():
     d = decide_exit(mk(current_mult=1.1, peak_mult=1.3, age_hours=4.5), P)
     assert d.action == "close" and d.reason == "expired"
+
+
+# ── Bundle: cut flat/red, let green climbers ride (Lukes fix) ────────────
+def test_bundle_flat_cut_after_window():
+    # 16min old, flat/red → cut before the dump.
+    d = decide_exit(mk(is_bundle=True, current_mult=0.98, peak_mult=1.1,
+                       age_hours=16/60), P)
+    assert d.action == "close" and d.reason == "bundle_time_exit"
+
+
+def test_bundle_green_climber_rides():
+    # The Lukes case: bundle up 13% and climbing at 16min → NOT cut.
+    d = decide_exit(mk(is_bundle=True, current_mult=1.13, peak_mult=1.13,
+                       age_hours=16/60), P)
+    assert d.action == "hold"
+
+
+def test_bundle_not_cut_by_generic_time_stop_early():
+    # A green bundle at 6min is not cut by the scanner time_stop.
+    d = decide_exit(mk(is_bundle=True, current_mult=1.13, peak_mult=1.13,
+                       age_hours=6/60), P)
+    assert d.action == "hold"
 
 
 # ── 4am "let runners run" — the critical fix ─────────────────────────────
