@@ -3827,6 +3827,7 @@ AGENT_PARAM_DEFAULTS = {
     "algo_engine_enabled":   0.0,   # 1 = run new tokens through the custom algos
     "algo_size_sol":         0.2,   # auto-trade size per algo signal
     "algo_watch_min":       30.0,   # watch a new token this long for an algo match
+    "algo_discovery_interval_sec": 30.0,  # how often to poll pump.fun discovery endpoints
     "algo_tp_x":             5.0,   # algo trade take-profit
     "algo_sl_pct":          25.0,   # algo trade stop-loss
 

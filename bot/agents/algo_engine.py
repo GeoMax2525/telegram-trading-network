@@ -100,6 +100,77 @@ def _matches(algo, data: dict, growth_pct: float | None) -> bool:
     return True
 
 
+# pump.fun discovery endpoints (frontend-api-v3) — every useful token source.
+# We already hit /coins/{ca} successfully from Railway, so these same-domain
+# list endpoints should work with the same headers. Defensive: any that 401/403
+# (auth/Cloudflare) just log + skip without breaking the others.
+_API = "https://frontend-api-v3.pump.fun"
+_DISCOVERY = [
+    ("/coins/latest", {}),                                                   # freshest launches
+    ("/coins/currently-live", {"limit": 50, "includeNsfw": "true"}),          # actively trading
+    ("/coins", {"sort": "about_to_graduate", "order": "DESC",                 # near graduation
+                "limit": 50, "includeNsfw": "true"}),
+    ("/coins", {"sort": "last_trade_timestamp", "order": "DESC",              # most active
+                "limit": 50, "includeNsfw": "true"}),
+    ("/coins", {"sort": "reply_count", "order": "DESC",                       # most engaged
+                "limit": 50, "includeNsfw": "true"}),
+    ("/coins/king-of-the-hill", {}),                                          # KOTH
+]
+
+
+async def _fetch_coin_list(path: str, params: dict) -> list[dict]:
+    """Hit a pump.fun discovery endpoint; return a list of coin dicts (handles
+    both list and single-object responses). Never raises."""
+    url = _API + path
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, params=params, headers=_HEADERS,
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    logger.debug("algo_engine: %s → HTTP %s", path, r.status)
+                    return []
+                d = await r.json(content_type=None)
+    except Exception as exc:
+        logger.debug("algo_engine: discovery %s failed: %s", path, exc)
+        return []
+    if isinstance(d, dict):
+        # Some endpoints wrap the list; KOTH returns a single coin.
+        if d.get("mint"):
+            return [d]
+        for k in ("coins", "data", "results"):
+            if isinstance(d.get(k), list):
+                return d[k]
+        return []
+    return d if isinstance(d, list) else []
+
+
+async def _discovery_loop() -> None:
+    """Poll pump.fun's discovery endpoints and feed the algo watchlist — so the
+    algos see newest + trending + about-to-graduate + most-active tokens, not
+    just the block-0 firehose."""
+    from database.models import get_params
+    while True:
+        await asyncio.sleep(20)
+        if not await _enabled():
+            continue
+        interval = float((await get_params("algo_discovery_interval_sec"))
+                         .get("algo_discovery_interval_sec") or 30.0)
+        added = 0
+        for path, params in _DISCOVERY:
+            for coin in await _fetch_coin_list(path, params):
+                mint = coin.get("mint")
+                if not mint or mint in _watch:
+                    continue
+                if coin.get("complete"):   # already graduated — algos want pre-grad
+                    continue
+                _handle_new_token(coin)
+                added += 1
+            await asyncio.sleep(1)   # be gentle on Cloudflare
+        if added:
+            logger.info("algo_engine: discovery added %d tokens from pump.fun", added)
+        await asyncio.sleep(max(interval - len(_DISCOVERY), 5))
+
+
 def _handle_new_token(d: dict) -> None:
     mint = d.get("mint")
     if not mint or mint in _watch:
@@ -220,6 +291,7 @@ async def algo_engine_loop() -> None:
     Independent of the scanner. Gated by algo_engine_enabled."""
     await asyncio.sleep(STARTUP_DELAY)
     asyncio.create_task(_poll_loop())
+    asyncio.create_task(_discovery_loop())   # pump.fun endpoint discovery
     logger.info("algo_engine started (gated by algo_engine_enabled)")
     while True:
         if not await _enabled():
