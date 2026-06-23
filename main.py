@@ -190,6 +190,11 @@ async def main() -> None:
     from bot.agents.migration_sniper import migration_sniper_loop
     asyncio.create_task(migration_sniper_loop())
     logger.info("Migration sniper: queued (gated by migration_sniper_enabled)")
+
+    # Health watchdog — pages admins if any critical loop stalls.
+    from bot.health import watchdog_loop
+    asyncio.create_task(watchdog_loop())
+    logger.info("Health watchdog: queued")
     # mc_repair_loop REMOVED — was burning Helius credits on 66K+ old tokens.
     # MC is fetched fresh when needed: harvester discovery, scanner eval, paper monitor.
 
@@ -293,6 +298,8 @@ async def main() -> None:
             BotCommand(command="audit", description="Pre-live GO/NO-GO audit"),
             # ── Bundles & wallets ──
             BotCommand(command="sourcestats", description="4am vs scanner W/L + PnL"),
+            BotCommand(command="livestatus", description="Live risk ledger + caps today"),
+            BotCommand(command="health", description="Loop heartbeats / watchdog"),
             BotCommand(command="bundlers", description="Top bundle wallets by avg X"),
             BotCommand(command="wallets", description="Top wallet leaderboard"),
             # ── Token tools ──

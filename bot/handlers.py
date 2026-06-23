@@ -2224,6 +2224,61 @@ async def cmd_bundlers(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
+# ── /health — loop heartbeats + watchdog status ──────────────────────────
+@router.message(Command("health"))
+async def cmd_health(message: Message):
+    """Liveness of every monitored loop — age since last heartbeat + stale flag."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from bot.health import health_snapshot
+    rows = health_snapshot()
+    lines = ["🩺 BOT HEALTH", "━━━━━━━━━━━━━━━━━━━━━━━", ""]
+    if not rows:
+        lines.append("No loops registered yet (still warming up).")
+    for r in rows:
+        age = r["age_s"]
+        ago = f"{age:.0f}s" if age < 90 else f"{age/60:.1f}m"
+        flag = " ⚠️ STALE" if r["stale"] else " ✅"
+        lines.append(f"{r['name']:<16} last {ago}{flag}")
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
+# ── /livestatus — today's persistent live-risk ledger ─────────────────────
+@router.message(Command("livestatus"))
+async def cmd_livestatus(message: Message):
+    """Today's live-trading exposure from the PERSISTENT risk ledger + caps."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from bot.live_guard import live_status
+    from database.models import get_params
+    t = await live_status()
+    cfg = await get_params(
+        "live_trading_armed", "live_mirror_size_sol", "live_max_trade_sol",
+        "live_daily_spend_cap_sol", "live_daily_loss_cap_sol", "live_max_buys_per_day",
+    )
+    armed = float(cfg.get("live_trading_armed") or 0) >= 1.0
+    loss_cap = float(cfg.get("live_daily_loss_cap_sol") or 0)
+    halted = loss_cap > 0 and t["realized_pnl"] <= -loss_cap
+    lines = [
+        "🟢 LIVE STATUS" if armed else "🔴 LIVE STATUS (DISARMED)",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Armed: {'YES' if armed else 'NO'}",
+        f"Date (UTC): {t['date']}",
+        "",
+        f"Spent today: {t['spent_sol']:.3f} / {float(cfg.get('live_daily_spend_cap_sol') or 0):.2f} SOL",
+        f"Buys today:  {t['buys']} / {int(float(cfg.get('live_max_buys_per_day') or 0))}",
+        f"Realized:    {t['realized_pnl']:+.3f} SOL",
+        f"Loss cap:    -{loss_cap:.2f} SOL",
+        "",
+        ("🛑 CIRCUIT BREAKER TRIPPED — halted until UTC rollover" if halted
+         else "✅ Within limits"),
+        "",
+        f"Per-trade size: {float(cfg.get('live_mirror_size_sol') or 0):.3f} SOL "
+        f"(cap {float(cfg.get('live_max_trade_sol') or 0):.2f})",
+    ]
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /sourcestats — per-source trade counts, W/L, PnL ──────────────────────
 @router.message(Command("sourcestats"))
 async def cmd_sourcestats(message: Message):

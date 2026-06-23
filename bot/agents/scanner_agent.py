@@ -1925,10 +1925,13 @@ async def scanner_agent_loop() -> None:
     scanner cycle is always on."""
     await asyncio.sleep(STARTUP_DELAY)
     logger.info("Scanner agent started — polling every %ds default (urgent-wake enabled)", POLL_INTERVAL)
+    from bot.health import beat, register
+    register("scanner", stale_after_s=600)
     urgent = state.get_urgent_event()
     while True:
         try:
             await run_once()
+            beat("scanner")
         except Exception as exc:
             logger.error("Scanner loop error: %s", exc)
             state.scanner_status = "idle"

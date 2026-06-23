@@ -1148,10 +1148,13 @@ async def paper_monitor_loop(bot) -> None:
                 POLL_INTERVAL, POST_CLOSE_INTERVAL)
 
     last_post_close = datetime.utcnow()
+    from bot.health import beat, register
+    register("paper_monitor", stale_after_s=max(POLL_INTERVAL * 5, 300))
 
     while True:
         try:
             await _check_open_trades(bot)
+            beat("paper_monitor")  # exit checks ran this cycle — the critical one
 
             # Post-close tracking every 10 minutes
             if (datetime.utcnow() - last_post_close).total_seconds() >= POST_CLOSE_INTERVAL:
