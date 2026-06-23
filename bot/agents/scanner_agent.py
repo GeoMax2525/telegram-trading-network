@@ -1104,6 +1104,141 @@ async def _evaluate_candidate(
 
 # ── Main run ──────────────────────────────────────────────────────────────────
 
+async def autobuy_tg_signals(tg_candidates: list) -> None:
+    """Auto-buy 4am (tg_signal) candidates. Extracted from run_once so it runs in
+    its OWN loop (fouram_loop) — scanner health can never affect 4am, the proven
+    edge. Trusts the channel: no scoring, immediate buy with probe size."""
+    for tg in tg_candidates:
+        mint = tg.get("mint", "")
+        if not mint:
+            continue
+        if await has_open_paper_trade(mint):
+            continue
+        try:
+            tg_cd_cfg = await get_params("tg_signal_cooldown_hours")
+            tg_cd_hours = float(tg_cd_cfg.get("tg_signal_cooldown_hours") or 4.0)
+            if await has_recent_close(mint, within_hours=tg_cd_hours):
+                logger.info("4am: skip %s — already traded in last %.1fh", mint[:12], tg_cd_hours)
+                continue
+        except Exception:
+            pass
+
+        pair = await fetch_token_data(mint, allow_any_dex=True)
+        if pair is None:
+            logger.info("4am: %s — no pair data, skipping", mint[:12])
+            continue
+        metrics = parse_token_metrics(pair)
+        entry_mc = metrics.get("market_cap", 0) or 0
+        token_name = metrics.get("name", "?")
+        if not entry_mc or entry_mc <= 0:
+            continue
+
+        try:
+            state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+            tg_probe_cfg = await get_params("paper_probe_size", "tg_respect_cold")
+            tg_paper_sol = float(tg_probe_cfg.get("paper_probe_size") or 0.2)
+
+            from bot.agents.regime_tracker import get_probe_size_multiplier, should_skip_in_cold
+            # 4am is the trusted edge — it does NOT pause in a cold regime by
+            # default (that pause is a scanner-churn guard). Opt in via param.
+            if float(tg_probe_cfg.get("tg_respect_cold") or 0) >= 0.5 and should_skip_in_cold():
+                logger.info("4am: skip %s — regime=COLD (tg_respect_cold on)", mint[:12])
+                continue
+            tg_paper_sol = round(tg_paper_sol * get_probe_size_multiplier(), 4)
+
+            try:
+                from database.models import channel_size_multiplier
+                _conv = await channel_size_multiplier(tg.get("tg_channel"))
+                if _conv != 1.0:
+                    tg_paper_sol = round(tg_paper_sol * _conv, 4)
+                    logger.info("4am: conviction x%.2f channel %s → %.3f SOL",
+                                _conv, tg.get("tg_channel", "?"), tg_paper_sol)
+            except Exception as _ce:
+                logger.debug("conviction sizing failed: %s", _ce)
+
+            try:
+                from database.models import insider_confluence_mult
+                _conf = await insider_confluence_mult(mint)
+                if _conf != 1.0:
+                    tg_paper_sol = round(tg_paper_sol * _conf, 4)
+                    logger.info("4am: insider-confluence x%.2f on %s → %.3f SOL",
+                                _conf, token_name[:16], tg_paper_sol)
+            except Exception as _cfe:
+                logger.debug("confluence boost failed: %s", _cfe)
+
+            from bot.agents.entry_filter import check_entry_filters
+            ef_passed, ef_reason = await check_entry_filters(mint, pair)
+            if not ef_passed:
+                logger.info("4am: skip %s — entry filter: %s", mint[:12], ef_reason)
+                continue
+            if state.paper_balance < tg_paper_sol + 0.05:
+                continue
+
+            from bot.agents.entry_filter import classify_launch, bundle_trade_params
+            tg_tp_x, tg_sl_pct = 8.0, 20.0
+            tg_pattern = "tg_signal"
+            tg_cls = {"kind": None, "label": "", "wallets": []}
+            try:
+                tg_cls = await classify_launch(mint)
+                if tg_cls["kind"]:
+                    tg_tp_x, tg_sl_pct = bundle_trade_params(tg_tp_x, tg_sl_pct)
+                    tg_pattern = "tg_signal_bundle"
+                    logger.info("4am: %s %s — tp=%.1fx sl=%.0f%%",
+                                token_name[:16], tg_cls["label"], tg_tp_x, tg_sl_pct)
+                    asyncio.create_task(
+                        _record_bundle_wallets(mint, entry_mc, tg_cls.get("wallets")))
+            except Exception as _be:
+                logger.debug("4am: bundle classify failed %s: %s", mint[:12], _be)
+
+            await open_paper_trade(
+                token_address=mint, token_name=token_name,
+                entry_mc=entry_mc, entry_price=entry_mc, paper_sol=tg_paper_sol,
+                confidence=80.0, pattern_type=tg_pattern, tp_x=tg_tp_x, sl_pct=tg_sl_pct,
+                trade_reasoning=f"AUTO-BUY from 4am channel [{tg.get('tg_channel', '?')}]",
+                channel_name=tg.get("tg_channel"),
+            )
+            state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
+            state.paper_trades_today += 1
+            logger.info("4am: AUTO-BUY %s at MC=%s | %.2f SOL | bal=%.4f",
+                        token_name[:20], entry_mc, tg_paper_sol, state.paper_balance)
+            await _broadcast_entry(
+                source=(tg_cls["kind"] or "4am"),
+                name=token_name, mint=mint, size_sol=tg_paper_sol, entry_mc=entry_mc,
+                tp_x=tg_tp_x, sl_pct=tg_sl_pct,
+                reason=f"4am channel call [{tg.get('tg_channel', '?')}] — trusted source",
+                cls_label=tg_cls.get("label"),
+            )
+            try:
+                from bot.signal_relay import relay_trade_to_subscribers
+                await relay_trade_to_subscribers(
+                    token_address=mint, token_name=token_name, entry_mc=entry_mc,
+                    tp_x=8.0, sl_pct=20.0, pattern_type="tg_signal",
+                    trade_reasoning="AUTO-BUY from 4am channel", confidence=80.0,
+                )
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.error("4am: auto-buy failed for %s: %s", mint[:12], exc)
+
+
+async def fouram_loop() -> None:
+    """DEDICATED 4am buy loop — fully independent of the scanner. Consumes the
+    tg_signal candidates from the shared queue every few seconds and auto-buys
+    them. A quiet, slow, or erroring scanner can NEVER affect 4am now."""
+    await asyncio.sleep(STARTUP_DELAY)
+    logger.info("4am loop started — independent of scanner")
+    while True:
+        try:
+            tg = [c for c in state.pending_candidates if c.get("source") == "tg_signal"]
+            if tg:
+                state.pending_candidates[:] = [
+                    c for c in state.pending_candidates if c.get("source") != "tg_signal"]
+                await autobuy_tg_signals(tg)
+        except Exception as exc:
+            logger.error("4am loop error: %s", exc)
+        await asyncio.sleep(4)
+
+
 async def run_once() -> tuple[int, int]:
     """
     Single scanner tick — runs ALWAYS regardless of autotrade status.
@@ -1129,10 +1264,11 @@ async def run_once() -> tuple[int, int]:
     # once mode flipped back to paper. Cross-tick dedup is now handled
     # by DB gates (has_open_paper_trade + has_recent_manual_close)
     # which are correct and respect the actual trade state.
-    # Consume pending candidates (TG signals, etc.) BEFORE clearing.
-    # Previous bug: .clear() wiped TG signals before they were evaluated.
-    injected_candidates = list(state.pending_candidates)
-    state.pending_candidates.clear()
+    # 4am (tg_signal) candidates are now consumed by the DEDICATED fouram_loop
+    # so scanner health can NEVER affect 4am buys (the proven edge). Here we take
+    # only NON-tg candidates and leave tg_signal entries for that loop.
+    injected_candidates = [c for c in state.pending_candidates if c.get("source") != "tg_signal"]
+    state.pending_candidates[:] = [c for c in state.pending_candidates if c.get("source") == "tg_signal"]
     if injected_candidates:
         logger.info("Scanner: consumed %d injected candidates (TG signals, etc.)", len(injected_candidates))
 
@@ -1273,163 +1409,8 @@ async def run_once() -> tuple[int, int]:
         )
         evaluated = []
 
-    # TG signals AUTO-BUY — skip ALL scoring, buy immediately with probe size.
-    # The 4am channel has already filtered these. Trust the signal completely.
-    for tg in tg_candidates:
-        mint = tg.get("mint", "")
-        if not mint:
-            continue
-
-        # Check if already have this position open
-        if await has_open_paper_trade(mint):
-            continue
-
-        # Re-entry cooldown — tg_signal uses its own (shorter) window so
-        # 4am re-calls of recent winners aren't blocked. /setparam
-        # tg_signal_cooldown_hours to tune.
-        try:
-            tg_cd_cfg = await get_params("tg_signal_cooldown_hours")
-            tg_cd_hours = float(tg_cd_cfg.get("tg_signal_cooldown_hours") or 4.0)
-            if await has_recent_close(mint, within_hours=tg_cd_hours):
-                logger.info(
-                    "Scanner: TG skip %s — already traded in last %.1fh",
-                    mint[:12], tg_cd_hours,
-                )
-                continue
-        except Exception:
-            pass
-
-        # Get fresh MC for entry price
-        pair = await fetch_token_data(mint, allow_any_dex=True)
-        if pair is None:
-            logger.info("Scanner: TG signal %s — no pair data, skipping", mint[:12])
-            continue
-        metrics = parse_token_metrics(pair)
-        entry_mc = metrics.get("market_cap", 0) or 0
-        token_name = metrics.get("name", "?")
-
-        if not entry_mc or entry_mc <= 0:
-            continue
-
-        # Auto-buy with probe size — no confidence scoring needed
-        try:
-            state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-            tg_probe_cfg = await get_params("paper_probe_size")
-            tg_paper_sol = float(tg_probe_cfg.get("paper_probe_size") or 0.2)
-
-            # PHASE 3: regime-aware probe sizing for scanner-injected TG signals
-            from bot.agents.regime_tracker import (
-                get_probe_size_multiplier, should_skip_in_cold,
-            )
-            if should_skip_in_cold():
-                logger.info(
-                    "Scanner: TG skip %s — regime=COLD, operator paused",
-                    mint[:12],
-                )
-                continue
-            tg_paper_sol = round(tg_paper_sol * get_probe_size_multiplier(), 4)
-
-            # CONVICTION SIZING — bet more on channels that proven-call runners.
-            try:
-                from database.models import channel_size_multiplier
-                _conv = await channel_size_multiplier(tg.get("tg_channel"))
-                if _conv != 1.0:
-                    tg_paper_sol = round(tg_paper_sol * _conv, 4)
-                    logger.info("Scanner: TG conviction size x%.2f for channel %s → %.3f SOL",
-                                _conv, tg.get("tg_channel", "?"), tg_paper_sol)
-            except Exception as _ce:
-                logger.debug("conviction sizing failed: %s", _ce)
-
-            # OPTION B — scanner-as-confirmation: if smart money ALSO bought this
-            # 4am mint (insider confluence), two signals converge → size up.
-            try:
-                from database.models import insider_confluence_mult
-                _conf = await insider_confluence_mult(mint)
-                if _conf != 1.0:
-                    tg_paper_sol = round(tg_paper_sol * _conf, 4)
-                    logger.info("Scanner: TG insider-confluence x%.2f on %s → %.3f SOL",
-                                _conf, token_name[:16], tg_paper_sol)
-            except Exception as _cfe:
-                logger.debug("confluence boost failed: %s", _cfe)
-
-            # PHASE 4: on-chain entry filter for scanner-injected TG signals
-            from bot.agents.entry_filter import check_entry_filters
-            ef_passed, ef_reason = await check_entry_filters(mint, pair)
-            if not ef_passed:
-                logger.info(
-                    "Scanner: TG skip %s — entry filter rejected: %s",
-                    mint[:12], ef_reason,
-                )
-                continue
-
-            if state.paper_balance < tg_paper_sol + 0.05:
-                continue
-
-            # Bundle-aware: classify the launch (real launch-bundle, else
-            # high-concentration) and trade it with tighter rules.
-            from bot.agents.entry_filter import classify_launch, bundle_trade_params
-            tg_tp_x, tg_sl_pct = 8.0, 20.0
-            tg_pattern = "tg_signal"
-            tg_cls = {"kind": None, "label": "", "wallets": []}
-            try:
-                tg_cls = await classify_launch(mint)
-                if tg_cls["kind"]:
-                    tg_tp_x, tg_sl_pct = bundle_trade_params(tg_tp_x, tg_sl_pct)
-                    tg_pattern = "tg_signal_bundle"
-                    logger.info("Scanner: TG %s %s — tp=%.1fx sl=%.0f%%",
-                                token_name[:16], tg_cls["label"], tg_tp_x, tg_sl_pct)
-                    asyncio.create_task(
-                        _record_bundle_wallets(mint, entry_mc, tg_cls.get("wallets")))
-            except Exception as _be:
-                logger.debug("Scanner: bundle classify failed %s: %s", mint[:12], _be)
-
-            pt = await open_paper_trade(
-                token_address=mint,
-                token_name=token_name,
-                entry_mc=entry_mc,
-                entry_price=entry_mc,
-                paper_sol=tg_paper_sol,
-                confidence=80.0,  # high confidence — trusted signal
-                pattern_type=tg_pattern,
-                tp_x=tg_tp_x,
-                sl_pct=tg_sl_pct,
-                trade_reasoning=f"AUTO-BUY from 4am channel [{tg.get('tg_channel', '?')}]",
-                channel_name=tg.get("tg_channel"),
-            )
-            state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-            state.paper_trades_today += 1
-            logger.info(
-                "Scanner: TG AUTO-BUY %s at MC=%s | %.2f SOL | bal=%.4f",
-                token_name[:20], entry_mc, tg_paper_sol, state.paper_balance,
-            )
-
-            # Entry card — source, size, reason, in/out strategy (free: uses
-            # data we already have). Bundles/concentration say so honestly.
-            await _broadcast_entry(
-                source=(tg_cls["kind"] or "4am"),
-                name=token_name, mint=mint, size_sol=tg_paper_sol, entry_mc=entry_mc,
-                tp_x=tg_tp_x, sl_pct=tg_sl_pct,
-                reason=f"4am channel call [{tg.get('tg_channel', '?')}] — trusted source",
-                cls_label=tg_cls.get("label"),
-            )
-
-            # Relay to subscribers
-            try:
-                from bot.signal_relay import relay_trade_to_subscribers
-                await relay_trade_to_subscribers(
-                    token_address=mint,
-                    token_name=token_name,
-                    entry_mc=entry_mc,
-                    tp_x=8.0,
-                    sl_pct=20.0,
-                    pattern_type="tg_signal",
-                    trade_reasoning=f"AUTO-BUY from 4am channel",
-                    confidence=80.0,
-                )
-            except Exception:
-                pass
-        except Exception as exc:
-            logger.error("Scanner: TG auto-buy failed for %s: %s", mint[:12], exc)
+    # 4am AUTO-BUY moved to the dedicated fouram_loop (decoupled). run_once no
+    # longer processes tg_signal candidates — scanner health can't affect 4am.
 
     # Log evaluation results summary
     eval_none = sum(1 for r in evaluated if r is None)

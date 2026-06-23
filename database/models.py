@@ -3726,6 +3726,7 @@ AGENT_PARAM_DEFAULTS = {
     "conviction_max_mult":         3.0,   # cap upside sizing
     "conviction_min_mult":         0.5,   # floor downside sizing
 
+    "tg_respect_cold":      0.0,    # 1 = 4am pauses in COLD regime (default: 4am ignores cold)
     "tg_let_runners_run":   1.0,    # 1 = skip no_momentum + time_stop for 4am
     "tg_moonbag_pct":      25.0,    # % of a 4am position that NEVER stop-losses
                                     # (rides for the moon; the rest still SLs)

@@ -183,6 +183,8 @@ async def main() -> None:
     asyncio.create_task(wallet_analyst_loop())
     asyncio.create_task(pattern_engine_loop())
     asyncio.create_task(scanner_agent_loop())
+    from bot.agents.scanner_agent import fouram_loop
+    asyncio.create_task(fouram_loop())   # 4am buys — decoupled from the scanner
     asyncio.create_task(learning_loop(bot))
     asyncio.create_task(paper_monitor_loop(bot))
     asyncio.create_task(gmgn_agent_loop())
