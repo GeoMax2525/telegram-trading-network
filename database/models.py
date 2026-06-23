@@ -2860,6 +2860,48 @@ class EchoScore(Base):
     is_win    = Column(Boolean, default=False)
 
 
+async def channel_size_multiplier(channel: str | None) -> float:
+    """Conviction sizing: scale a 4am trade's size by the source CHANNEL's proven
+    tail-catching ability. In a power-law payoff the money is in the ≥5x runners,
+    so we size by each channel's historical ≥5x rate relative to a baseline — bet
+    MORE on channels that consistently call runners, LESS on the garbage. Never
+    sizes up a channel that's currently losing money (capture not working there).
+    Returns a clamped multiplier; 1.0 (neutral) until a channel has enough data.
+    Gated by conviction_sizing_enabled (default off)."""
+    cfg = await get_params(
+        "conviction_sizing_enabled", "conviction_min_trades",
+        "conviction_baseline_tail_rate", "conviction_tail_mult_x",
+        "conviction_max_mult", "conviction_min_mult",
+    )
+    if float(cfg.get("conviction_sizing_enabled") or 0) < 0.5 or not channel:
+        return 1.0
+    min_trades = int(float(cfg.get("conviction_min_trades") or 15))
+    baseline = float(cfg.get("conviction_baseline_tail_rate") or 0.08)
+    tail_x = float(cfg.get("conviction_tail_mult_x") or 5.0)
+    max_m = float(cfg.get("conviction_max_mult") or 3.0)
+    min_m = float(cfg.get("conviction_min_mult") or 0.5)
+
+    async with AsyncSessionLocal() as s:
+        rows = list((await s.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.channel_name == channel,
+                PaperTrade.pattern_type.like("%tg_signal%"),
+            )
+        )).scalars().all())
+    n = len(rows)
+    if n < min_trades:
+        return 1.0
+    tail_rate = sum(1 for r in rows if (r.peak_multiple or 0) >= tail_x) / n
+    pnl = sum((r.paper_pnl_sol or 0) for r in rows)
+    mult = tail_rate / baseline if baseline > 0 else 1.0
+    mult = max(min_m, min(max_m, mult))
+    if pnl < 0:
+        mult = min(mult, 1.0)   # don't size up a money-loser
+    return round(mult, 2)
+
+
 async def open_paper_trade(
     token_address: str, token_name: str | None,
     entry_mc: float | None, entry_price: float | None,
@@ -3608,6 +3650,14 @@ AGENT_PARAM_DEFAULTS = {
     "migration_sl_pct":       35.0,     # stop-loss
     "migration_watch_min":     8.0,     # ONLY catch the immediate post-migration dip
     "migration_max_buy_min":   8.0,     # never buy a token this long after migration
+
+    # ── Conviction sizing — bet more on proven runner-calling channels ───────
+    "conviction_sizing_enabled":   0.0,   # 1 = scale 4am size by channel tail rate
+    "conviction_min_trades":      15.0,   # min closed trades before a channel is sized
+    "conviction_baseline_tail_rate": 0.08,  # avg ≥5x rate (the neutral 1.0x point)
+    "conviction_tail_mult_x":      5.0,   # what X counts as a "tail runner"
+    "conviction_max_mult":         3.0,   # cap upside sizing
+    "conviction_min_mult":         0.5,   # floor downside sizing
 
     "tg_let_runners_run":   1.0,    # 1 = skip no_momentum + time_stop for 4am
     "tg_moonbag_pct":      25.0,    # % of a 4am position that NEVER stop-losses

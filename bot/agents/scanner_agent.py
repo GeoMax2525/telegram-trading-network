@@ -1329,6 +1329,17 @@ async def run_once() -> tuple[int, int]:
                 continue
             tg_paper_sol = round(tg_paper_sol * get_probe_size_multiplier(), 4)
 
+            # CONVICTION SIZING — bet more on channels that proven-call runners.
+            try:
+                from database.models import channel_size_multiplier
+                _conv = await channel_size_multiplier(tg.get("tg_channel"))
+                if _conv != 1.0:
+                    tg_paper_sol = round(tg_paper_sol * _conv, 4)
+                    logger.info("Scanner: TG conviction size x%.2f for channel %s → %.3f SOL",
+                                _conv, tg.get("tg_channel", "?"), tg_paper_sol)
+            except Exception as _ce:
+                logger.debug("conviction sizing failed: %s", _ce)
+
             # PHASE 4: on-chain entry filter for scanner-injected TG signals
             from bot.agents.entry_filter import check_entry_filters
             ef_passed, ef_reason = await check_entry_filters(mint, pair)

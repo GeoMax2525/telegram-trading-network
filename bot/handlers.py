@@ -2393,6 +2393,71 @@ async def cmd_4amattribution(message: Message):
         await message.reply(text[i:i+3800], parse_mode=None)
 
 
+# ── /migrationreport — migration dip source, measured on its own ──────────
+@router.message(Command("migrationreport"))
+async def cmd_migrationreport(message: Message):
+    """Migration Dip Buyer measured SEPARATELY: trades, WR, PnL, expectancy,
+    avg peak + tail rates, and exit-reason breakdown — so its edge (or lack of)
+    is never lumped with 4am/scanner. /migrationreport [days] (default 30)."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from datetime import datetime, timedelta
+    from database.models import AsyncSessionLocal, select, PaperTrade
+
+    parts = (message.text or "").split()
+    days = 30.0
+    if len(parts) > 1:
+        try:
+            days = float(parts[1])
+        except ValueError:
+            pass
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    async with AsyncSessionLocal() as s:
+        trades = list((await s.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.closed_at >= cutoff,
+                PaperTrade.pattern_type.like("%migration_dip%"),
+            )
+        )).scalars().all())
+
+    if not trades:
+        await message.reply(
+            "🎓 MIGRATION REPORT\nNo closed migration trades in window.\n"
+            "(Enable with /migration on — it's paper-only until proven.)",
+            parse_mode=None)
+        return
+
+    n = len(trades)
+    pnl = sum((t.paper_pnl_sol or 0) for t in trades)
+    wins = sum(1 for t in trades if (t.paper_pnl_sol or 0) > 0)
+    peaks = [float(t.peak_multiple or 0) for t in trades]
+    avg_peak = sum(peaks) / n
+    r2 = sum(1 for p in peaks if p >= 2) / n * 100
+    r5 = sum(1 for p in peaks if p >= 5) / n * 100
+    reasons: dict = {}
+    for t in trades:
+        reasons[t.close_reason or "?"] = reasons.get(t.close_reason or "?", 0) + 1
+
+    lines = [
+        f"🎓 MIGRATION DIP REPORT ({int(days)}d)",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Trades: {n}  |  {wins}W / {n-wins}L  ({wins/n*100:.0f}% WR)",
+        f"PnL: {pnl:+.3f} SOL  (exp {pnl/n:+.4f}/trade)",
+        f"Peak avg {avg_peak:.1f}x · ≥2x {r2:.0f}% · ≥5x {r5:.0f}%",
+        "",
+        "Exit reasons:",
+    ]
+    for r, c in sorted(reasons.items(), key=lambda x: -x[1]):
+        lines.append(f"  {r:<18} {c}")
+    lines += ["",
+              ("🟢 Positive edge — candidate to keep." if pnl > 0.05 else
+               "🔴 No edge — likely kill (no latency advantage vs snipers).")]
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /dumpmoon — moonbag validation: round-tripped winners ─────────────────
 @router.message(Command("dumpmoon"))
 async def cmd_dumpmoon(message: Message):
