@@ -1371,6 +1371,7 @@ async def run_once() -> tuple[int, int]:
                 tp_x=tg_tp_x,
                 sl_pct=tg_sl_pct,
                 trade_reasoning=f"AUTO-BUY from 4am channel [{tg.get('tg_channel', '?')}]",
+                channel_name=tg.get("tg_channel"),
             )
             state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
             state.paper_trades_today += 1

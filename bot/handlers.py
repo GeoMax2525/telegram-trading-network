@@ -2309,6 +2309,165 @@ async def cmd_livestatus(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
+# ── /4amattribution — per-channel 4am edge (the keystone report) ──────────
+@router.message(Command("4amattribution"))
+async def cmd_4amattribution(message: Message):
+    """Per-channel 4am edge: which channels call runners and which we profit on.
+    Signal quality (avg peak, tail rates) + OUR realized PnL, per channel — so
+    you can SCALE the alpha channels and CUT the garbage dragging the average.
+    /4amattribution [days]  (default 30)."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    import re
+    from datetime import datetime, timedelta
+    from database.models import AsyncSessionLocal, select, PaperTrade
+
+    parts = (message.text or "").split()
+    days = 30.0
+    if len(parts) > 1:
+        try:
+            days = float(parts[1])
+        except ValueError:
+            pass
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    async with AsyncSessionLocal() as s:
+        trades = list((await s.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.closed_at >= cutoff,
+            )
+        )).scalars().all())
+
+    # 4am trades only; pull the channel from channel_name or trade_reasoning.
+    def _channel(t) -> str | None:
+        if "tg_signal" not in (t.pattern_type or ""):
+            return None
+        if t.channel_name and t.channel_name not in ("scanner", "?"):
+            return t.channel_name
+        m = re.search(r"\[([^\]]+)\]", t.trade_reasoning or "")
+        return m.group(1) if m else "unknown"
+
+    ch: dict = {}
+    for t in trades:
+        c = _channel(t)
+        if c is None:
+            continue
+        ch.setdefault(c, []).append(t)
+
+    if not ch:
+        await message.reply("No 4am trades with channel data in window.", parse_mode=None)
+        return
+
+    rows = []
+    for name, ts in ch.items():
+        n = len(ts)
+        pnl = sum((t.paper_pnl_sol or 0) for t in ts)
+        peaks = [float(t.peak_multiple or 0) for t in ts]
+        wins = sum(1 for t in ts if (t.paper_pnl_sol or 0) > 0)
+        avg_peak = sum(peaks) / n if n else 0
+        r2 = sum(1 for p in peaks if p >= 2) / n * 100 if n else 0
+        r5 = sum(1 for p in peaks if p >= 5) / n * 100 if n else 0
+        r10 = sum(1 for p in peaks if p >= 10) / n * 100 if n else 0
+        rows.append({
+            "name": name, "n": n, "pnl": pnl, "wr": wins / n * 100 if n else 0,
+            "avg_peak": avg_peak, "r2": r2, "r5": r5, "r10": r10,
+            "exp": pnl / n if n else 0,
+        })
+    rows.sort(key=lambda r: r["pnl"], reverse=True)
+
+    lines = [f"📡 4AM CHANNEL ATTRIBUTION ({int(days)}d)",
+             "━━━━━━━━━━━━━━━━━━━━━━━",
+             "Signal quality (peak) + OUR realized PnL", ""]
+    for r in rows[:20]:
+        verdict = "🟢" if r["pnl"] > 0 else ("🔴" if r["pnl"] < -0.05 else "⚪")
+        lines.append(f"{verdict} {r['name'][:22]}")
+        lines.append(f"   {r['n']} trades · {r['wr']:.0f}% WR · PnL {r['pnl']:+.3f} ({r['exp']:+.4f}/trade)")
+        lines.append(f"   peak avg {r['avg_peak']:.1f}x · ≥2x {r['r2']:.0f}% · ≥5x {r['r5']:.0f}% · ≥10x {r['r10']:.0f}%")
+        lines.append("")
+    lines += ["🟢 = scale it · 🔴 = cut it · ⚪ = watch",
+              "High ≥10x% + negative PnL = good signal, bad capture."]
+    text = "\n".join(lines)
+    for i in range(0, len(text), 3800):
+        await message.reply(text[i:i+3800], parse_mode=None)
+
+
+# ── /dumpmoon — moonbag validation: round-tripped winners ─────────────────
+@router.message(Command("dumpmoon"))
+async def cmd_dumpmoon(message: Message):
+    """Validates the 'let runners run / moonbag' thesis. Of 4am trades we
+    closed at a LOSS, how high did they PEAK during the trade? High peak +
+    loss = a winner we round-tripped (the moonbag/wide-trail should now catch
+    these). Tracks whether capture is improving. /dumpmoon [days] (default 30)."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from datetime import datetime, timedelta
+    from database.models import AsyncSessionLocal, select, PaperTrade
+
+    parts = (message.text or "").split()
+    days = 30.0
+    if len(parts) > 1:
+        try:
+            days = float(parts[1])
+        except ValueError:
+            pass
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    async with AsyncSessionLocal() as s:
+        trades = list((await s.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.closed_at >= cutoff,
+            )
+        )).scalars().all())
+
+    tg = [t for t in trades if "tg_signal" in (t.pattern_type or "")]
+    losers = [t for t in tg if (t.paper_pnl_sol or 0) <= 0]
+    if not losers:
+        await message.reply("No losing 4am trades in window.", parse_mode=None)
+        return
+
+    # Bucket losers by their in-trade peak — how much we round-tripped.
+    buckets = {"flat (<1.3x)": 0, "1.3-2x": 0, "2-5x (lost a winner)": 0,
+               "5-10x (lost a BIG one)": 0, "10x+ (catastrophic miss)": 0}
+    roundtripped = 0
+    for t in losers:
+        p = float(t.peak_multiple or 1.0)
+        if p < 1.3:
+            buckets["flat (<1.3x)"] += 1
+        elif p < 2:
+            buckets["1.3-2x"] += 1
+        elif p < 5:
+            buckets["2-5x (lost a winner)"] += 1; roundtripped += 1
+        elif p < 10:
+            buckets["5-10x (lost a BIG one)"] += 1; roundtripped += 1
+        else:
+            buckets["10x+ (catastrophic miss)"] += 1; roundtripped += 1
+
+    n = len(losers)
+    rt_pct = roundtripped / n * 100 if n else 0
+    lines = [f"🌙 MOONBAG VALIDATION ({int(days)}d)",
+             "━━━━━━━━━━━━━━━━━━━━━━━",
+             f"Losing 4am trades: {n}",
+             "",
+             "In-trade PEAK of trades we closed at a loss:"]
+    for label, c in buckets.items():
+        pct = c / n * 100 if n else 0
+        lines.append(f"  {label:<26} {c:>4}  ({pct:.0f}%)")
+    lines += [
+        "",
+        f"⚠️ Round-tripped a 2x+ winner: {roundtripped}/{n} ({rt_pct:.0f}%)",
+        "",
+        ("🔴 HIGH round-trip rate — the moonbag/wide-trail should now capture"
+         " these. Compare this report before vs after the fix." if rt_pct > 15
+         else "🟢 Low round-trip — most losers genuinely never moved (the moonbag"
+         " rides those to ~0; consider a tighter moonbag)."),
+    ]
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /sourcestats — per-source trade counts, W/L, PnL ──────────────────────
 @router.message(Command("sourcestats"))
 async def cmd_sourcestats(message: Message):
