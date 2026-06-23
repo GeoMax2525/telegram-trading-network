@@ -2393,6 +2393,84 @@ async def cmd_4amattribution(message: Message):
         await message.reply(text[i:i+3800], parse_mode=None)
 
 
+# ── /scannerstats — scanner edge by sub-source (find what works) ──────────
+@router.message(Command("scannerstats"))
+async def cmd_scannerstats(message: Message):
+    """Scanner performance broken out BY SUB-SOURCE (insider / new-launch /
+    volume / gmgn) so we can see which signal actually has edge. The whole
+    scanner-fix thesis is that source-2 (insider/smart-money) carries it and the
+    rest is noise — this proves or kills that. /scannerstats [days] (default 30)."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from datetime import datetime, timedelta
+    from database.models import AsyncSessionLocal, select, PaperTrade
+
+    parts = (message.text or "").split()
+    days = 30.0
+    if len(parts) > 1:
+        try:
+            days = float(parts[1])
+        except ValueError:
+            pass
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    async with AsyncSessionLocal() as s:
+        trades = list((await s.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.closed_at >= cutoff,
+            )
+        )).scalars().all())
+
+    # Scanner trades only (exclude 4am, migration). Bucket by sub-source from
+    # the pattern_type tag (insider / new_launch / volume / gmgn / other).
+    def _sub(t) -> str | None:
+        p = (t.pattern_type or "").lower()
+        if "tg_signal" in p or "migration_dip" in p:
+            return None
+        if "insider" in p:
+            return "insider (s2)"
+        if "new_launch" in p or "s1" in p:
+            return "new_launch (s1)"
+        if "volume" in p or "s3" in p:
+            return "volume (s3)"
+        if "gmgn" in p or "smart" in p:
+            return "gmgn (s4)"
+        return "other"
+
+    groups: dict = {}
+    for t in trades:
+        sub = _sub(t)
+        if sub is None:
+            continue
+        groups.setdefault(sub, []).append(t)
+
+    if not groups:
+        await message.reply("No scanner trades in window.", parse_mode=None)
+        return
+
+    def _st(ts):
+        n = len(ts)
+        pnl = sum((t.paper_pnl_sol or 0) for t in ts)
+        wins = sum(1 for t in ts if (t.paper_pnl_sol or 0) > 0)
+        peaks = [float(t.peak_multiple or 0) for t in ts]
+        r5 = sum(1 for p in peaks if p >= 5) / n * 100 if n else 0
+        return n, pnl, wins / n * 100 if n else 0, pnl / n if n else 0, r5
+
+    rows = sorted(((sub, *_st(ts)) for sub, ts in groups.items()), key=lambda r: r[2], reverse=True)
+    lines = [f"🔍 SCANNER BY SUB-SOURCE ({int(days)}d)",
+             "━━━━━━━━━━━━━━━━━━━━━━━", ""]
+    for sub, n, pnl, wr, exp, r5 in rows:
+        v = "🟢" if pnl > 0 else ("🔴" if pnl < -0.05 else "⚪")
+        lines.append(f"{v} {sub}")
+        lines.append(f"   {n} trades · {wr:.0f}% WR · PnL {pnl:+.3f} ({exp:+.4f}/trade) · ≥5x {r5:.0f}%")
+        lines.append("")
+    lines.append("Thesis: insider (s2) carries it; s1/s3 are noise.")
+    lines.append("If s2 🟢 and others 🔴 → run insider-only.")
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /migrationreport — migration dip source, measured on its own ──────────
 @router.message(Command("migrationreport"))
 async def cmd_migrationreport(message: Message):

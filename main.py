@@ -294,6 +294,7 @@ async def main() -> None:
             BotCommand(command="claude_actions", description="Recent Claude decisions"),
             BotCommand(command="4amreport", description="4am call hit rates"),
             BotCommand(command="migrationreport", description="Migration dip source stats"),
+            BotCommand(command="scannerstats", description="Scanner edge by sub-source"),
             BotCommand(command="report", description="All-time learning report"),
             BotCommand(command="papertrades", description="Recent paper trades"),
             BotCommand(command="audit", description="Pre-live GO/NO-GO audit"),

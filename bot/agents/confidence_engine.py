@@ -46,19 +46,24 @@ from bot.agents.trade_profiles import match_pattern_types, resolve_trade_params
 
 logger = logging.getLogger(__name__)
 
-# MC-based default weight sets
+# MC-based weight sets — STRIPPED of noise (Oct audit). The old 6-factor blend
+# diluted the one predictive signal (insider / smart-money copy) with noise:
+# fingerprint (pattern-match on a 60s token), chart (no chart yet), and market
+# (a constant 50). That's why standalone scanner ran 3% WR. Now the score is
+# driven by insider + rug (safety), with a small caller weight. fingerprint/
+# chart/market are kept computed for logging but carry ~zero decision weight.
 MC_WEIGHTS = {
-    "low": {  # under $100K
-        "fingerprint": 0.28, "insider": 0.35, "chart": 0.05,
-        "rug": 0.20, "caller": 0.08, "market": 0.04,
+    "low": {  # under $100K — smart money matters most
+        "fingerprint": 0.0, "insider": 0.65, "chart": 0.0,
+        "rug": 0.30, "caller": 0.05, "market": 0.0,
     },
     "mid": {  # $100K – $1M
-        "fingerprint": 0.25, "insider": 0.30, "chart": 0.15,
-        "rug": 0.18, "caller": 0.08, "market": 0.04,
+        "fingerprint": 0.0, "insider": 0.60, "chart": 0.05,
+        "rug": 0.30, "caller": 0.05, "market": 0.0,
     },
-    "high": {  # over $1M
-        "fingerprint": 0.20, "insider": 0.20, "chart": 0.30,
-        "rug": 0.15, "caller": 0.10, "market": 0.05,
+    "high": {  # over $1M — a little chart weight is defensible here
+        "fingerprint": 0.0, "insider": 0.50, "chart": 0.10,
+        "rug": 0.35, "caller": 0.05, "market": 0.0,
     },
 }
 
@@ -629,6 +634,26 @@ async def score_candidate(candidate: dict) -> dict:
         and confidence >= t_paper
         and paper_rug_floor_pass
     )
+
+    # ── INSIDER GATE ─────────────────────────────────────────────────────────
+    # The hybrid fix: a scanner trade opens ONLY when proven smart-money wallets
+    # are buying (insider >= floor). Strips the 3%-WR "buy tokens the smart money
+    # isn't touching" failure mode without going fully insider-only while the
+    # wallet list matures. 4am auto-buys bypass score_candidate entirely, so this
+    # gates SCANNER trades only. Toggle: scanner_insider_gate.
+    try:
+        _ig = await get_params("scanner_insider_gate", "scanner_insider_min")
+        if float(_ig.get("scanner_insider_gate") or 0) >= 0.5:
+            _floor = float(_ig.get("scanner_insider_min") or 40.0)
+            if insider < _floor:
+                if paper_trade or decision in ("execute_full", "execute_half"):
+                    logger.info("Agent5: INSIDER GATE blocked %s — insider %.0f < %.0f",
+                                candidate.get("name", "?")[:20], insider, _floor)
+                paper_trade = False
+                if decision in ("execute_full", "execute_half"):
+                    decision = "monitor"
+    except Exception as _ige:
+        logger.debug("insider gate error: %s", _ige)
 
     logger.info(
         "Agent5: PAPER CHECK — %s mode=%s conf=%.1f threshold=%.0f rug=%.0f(floor=40) result=%s",

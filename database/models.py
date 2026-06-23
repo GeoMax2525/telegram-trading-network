@@ -2860,6 +2860,29 @@ class EchoScore(Base):
     is_win    = Column(Boolean, default=False)
 
 
+async def insider_confluence_mult(mint: str) -> float:
+    """Option B — scanner as a 4am CONFIRMATION layer. If the scanner's source-2
+    (smart-money wallet) signal also flagged this 4am mint with a strong insider
+    score, two independent signals converge → size up. Reuses the candidates
+    table (no new Helius calls). Returns the size multiplier (1.0 = no boost).
+    Gated by scanner_4am_confluence_enabled."""
+    cfg = await get_params(
+        "scanner_4am_confluence_enabled", "scanner_4am_confluence_mult",
+        "scanner_4am_confluence_min_insider",
+    )
+    if float(cfg.get("scanner_4am_confluence_enabled") or 0) < 0.5 or not mint:
+        return 1.0
+    try:
+        cand = await get_candidate_by_token(mint)
+        if cand is None:
+            return 1.0
+        if float(cand.insider_score or 0) >= float(cfg.get("scanner_4am_confluence_min_insider") or 40.0):
+            return float(cfg.get("scanner_4am_confluence_mult") or 1.5)
+    except Exception:
+        pass
+    return 1.0
+
+
 async def channel_size_multiplier(channel: str | None) -> float:
     """Conviction sizing: scale a 4am trade's size by the source CHANNEL's proven
     tail-catching ability. In a power-law payoff the money is in the ≥5x runners,
@@ -3650,6 +3673,14 @@ AGENT_PARAM_DEFAULTS = {
     "migration_sl_pct":       35.0,     # stop-loss
     "migration_watch_min":     8.0,     # ONLY catch the immediate post-migration dip
     "migration_max_buy_min":   8.0,     # never buy a token this long after migration
+
+    # ── Scanner insider gate — only trade when smart money is buying ─────────
+    "scanner_insider_gate":        0.0,   # 1 = no scanner trade without insider buys
+    "scanner_insider_min":        40.0,   # min insider score to pass the gate
+    # ── Scanner→4am confluence boost (Option B) ──────────────────────────────
+    "scanner_4am_confluence_enabled": 0.0,  # 1 = size up 4am calls insiders also bought
+    "scanner_4am_confluence_mult":    1.5,  # size multiplier when insider-confirmed
+    "scanner_4am_confluence_min_insider": 40.0,  # insider score to count as confirmation
 
     # ── Conviction sizing — bet more on proven runner-calling channels ───────
     "conviction_sizing_enabled":   0.0,   # 1 = scale 4am size by channel tail rate

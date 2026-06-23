@@ -1340,6 +1340,18 @@ async def run_once() -> tuple[int, int]:
             except Exception as _ce:
                 logger.debug("conviction sizing failed: %s", _ce)
 
+            # OPTION B — scanner-as-confirmation: if smart money ALSO bought this
+            # 4am mint (insider confluence), two signals converge → size up.
+            try:
+                from database.models import insider_confluence_mult
+                _conf = await insider_confluence_mult(mint)
+                if _conf != 1.0:
+                    tg_paper_sol = round(tg_paper_sol * _conf, 4)
+                    logger.info("Scanner: TG insider-confluence x%.2f on %s → %.3f SOL",
+                                _conf, token_name[:16], tg_paper_sol)
+            except Exception as _cfe:
+                logger.debug("confluence boost failed: %s", _cfe)
+
             # PHASE 4: on-chain entry filter for scanner-injected TG signals
             from bot.agents.entry_filter import check_entry_filters
             ef_passed, ef_reason = await check_entry_filters(mint, pair)
