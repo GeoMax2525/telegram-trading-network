@@ -18,6 +18,61 @@ import logging
 _close_commentary_tasks: set = set()
 
 
+# ── Shadow mode: run the pure exit engine alongside the live monitor ────────
+# Every tick we compute the engine's verdict from the same inputs and stash it;
+# on a real close we compare to what the monitor actually did. Divergences are
+# logged + counted (see /shadowstats) so we can prove the engine matches the
+# battle-tested monitor BEFORE cutting over to it. Fully isolated in try/except
+# — shadow code can never affect a real trade.
+_shadow: dict = {}
+_shadow_stats: dict = {"closes": 0, "match": 0, "diverge": 0}
+
+
+def shadow_stats() -> dict:
+    return dict(_shadow_stats)
+
+
+def _shadow_eval(pt, cfg, current_mult, peak_mult, age_hours, remaining,
+                 realized, is_tg_signal, let_run, resolved) -> None:
+    try:
+        from bot.exit_engine import PositionState, decide_exit
+        params = dict(cfg)
+        params["_tp_x"] = pt.take_profit_x or 0
+        params["_sl_pct"] = pt.stop_loss_pct or 30.0
+        params["_trail_trigger_raw"] = (resolved or {}).get("trail_trigger", 0.3) if resolved else 0.3
+        pos = PositionState(
+            entry_mc=pt.entry_mc or 0, current_mc=(pt.entry_mc or 0) * current_mult,
+            current_mult=current_mult, peak_mult=peak_mult, liq_usd=None,
+            age_hours=age_hours, remaining_pct=remaining, realized_pnl=realized,
+            size_sol=pt.paper_sol_spent or 0, is_tg_signal=is_tg_signal,
+            is_bundle="bundle" in (pt.pattern_type or ""), let_run=let_run,
+            subscriber=pt.subscriber_id is not None,
+            ladder_disabled=bool(getattr(pt, "claude_ladder_disabled", False)),
+            trail_override=getattr(pt, "claude_trail_override_pct", None),
+        )
+        _shadow[pt.id] = decide_exit(pos, params)
+    except Exception as exc:
+        logger.debug("shadow eval error id=%s: %s", getattr(pt, "id", "?"), exc)
+
+
+def _shadow_compare(trade_id, actual_reason) -> None:
+    try:
+        sd = _shadow.pop(trade_id, None)
+        if sd is None:
+            return
+        engine_reason = sd.reason if sd.action == "close" else (
+            "scale_out" if sd.action == "scale_out" else "hold")
+        _shadow_stats["closes"] += 1
+        if engine_reason == actual_reason:
+            _shadow_stats["match"] += 1
+        else:
+            _shadow_stats["diverge"] += 1
+            logger.warning("SHADOW DIVERGENCE id=%s: monitor=%s engine=%s (action=%s)",
+                           trade_id, actual_reason, engine_reason, sd.action)
+    except Exception:
+        pass
+
+
 def _source_tag(pattern_type: str | None) -> str:
     p = (pattern_type or "")
     if "migration_dip" in p:
@@ -190,6 +245,7 @@ async def _close_and_track(trade_id, reason, pnl, peak_mc, peak_mult, is_admin: 
     if not closed:
         logger.info("paper close skipped — trade %s already closed (race)", trade_id)
         return False
+    _shadow_compare(trade_id, reason)  # validate engine vs monitor on every close
     # Bundle wallet scoring — if this was a bundle trade, attribute its final
     # peak multiple to every wallet we recorded for it, so the /bundlers board
     # ranks bundlers by the avg peak their tokens reach. Best-effort, off-path.
@@ -607,6 +663,11 @@ async def _check_open_trades(bot) -> None:
             age_hours = 0.0
             if pt.opened_at:
                 age_hours = (datetime.utcnow() - pt.opened_at).total_seconds() / 3600.0
+
+            # SHADOW: compute the pure engine's verdict from the same inputs.
+            # Observational only — compared on close in _close_and_track.
+            _shadow_eval(pt, cfg, current_mult, peak_mult, age_hours, remaining,
+                         realized, is_tg_signal, _let_run, resolved)
 
             expired_h    = float(cfg.get("expired_exit_hours",     4.0) or 4.0)
             expired_thr  = float(cfg.get("expired_exit_threshold", 1.20) or 1.20)

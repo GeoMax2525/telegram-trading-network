@@ -300,6 +300,7 @@ async def main() -> None:
             BotCommand(command="sourcestats", description="4am vs scanner W/L + PnL"),
             BotCommand(command="livestatus", description="Live risk ledger + caps today"),
             BotCommand(command="health", description="Loop heartbeats / watchdog"),
+            BotCommand(command="shadowstats", description="Exit-engine shadow match rate"),
             BotCommand(command="bundlers", description="Top bundle wallets by avg X"),
             BotCommand(command="wallets", description="Top wallet leaderboard"),
             # ── Token tools ──

@@ -2224,6 +2224,36 @@ async def cmd_bundlers(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
+# ── /shadowstats — exit-engine shadow-mode match rate ─────────────────────
+@router.message(Command("shadowstats"))
+async def cmd_shadowstats(message: Message):
+    """How often the pure exit engine's verdict matches the live monitor on a
+    real close. 100% over a meaningful sample = safe to cut over to the engine."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from bot.agents.paper_monitor import shadow_stats
+    s = shadow_stats()
+    n = s.get("closes", 0)
+    match = s.get("match", 0)
+    div = s.get("diverge", 0)
+    rate = (match / n * 100) if n else 0
+    lines = [
+        "👥 EXIT-ENGINE SHADOW",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Closes compared: {n}",
+        f"✅ Match:    {match}",
+        f"⚠️ Diverge:  {div}",
+        f"Match rate:  {rate:.1f}%",
+        "",
+        ("✅ Engine matches the monitor — safe to cut over."
+         if n >= 50 and div == 0 else
+         "Gathering data — need a clean sample before cutover."),
+        "",
+        "Divergences are logged as 'SHADOW DIVERGENCE' in Railway logs.",
+    ]
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
 # ── /health — loop heartbeats + watchdog status ──────────────────────────
 @router.message(Command("health"))
 async def cmd_health(message: Message):
