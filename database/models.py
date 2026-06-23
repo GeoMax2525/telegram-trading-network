@@ -3678,6 +3678,8 @@ AGENT_PARAM_DEFAULTS = {
     "wallet_promote_min_peak":     5.0,   # only promote early buyers of >=5x winners
     "wallet_bot_max_trades":     800.0,   # reject spray-bots above this trade count
     "wallet_min_meaningful_wins":  2.0,   # min wins before a wallet is trusted
+    "wallet_demote_enabled":       1.0,   # 1 = re-tier cold wallets down (demotion sweep)
+    "wallet_demote_sweep_days":    7.0,   # how often the demotion sweep runs
 
     # ── Scanner insider gate — only trade when smart money is buying ─────────
     "scanner_insider_gate":        0.0,   # 1 = no scanner trade without insider buys

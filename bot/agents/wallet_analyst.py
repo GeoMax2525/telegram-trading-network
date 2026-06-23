@@ -38,7 +38,7 @@ from bot.helius import (
 from bot.scanner import fetch_token_data, parse_token_metrics
 from database.models import (
     get_last_agent_run, log_agent_run,
-    get_winning_scans, upsert_wallet, get_params,
+    get_winning_scans, upsert_wallet, get_params, get_tier_wallets,
     upsert_wallet_token_trade, get_wallet_token_trades,
     upsert_wallet_cluster, get_all_wallet_clusters,
     AsyncSessionLocal, select, Wallet, WalletTokenTrade, Token,
@@ -958,11 +958,77 @@ async def run_once() -> tuple[int, int]:
 
 # ── Background loop ──────────────────────────────────────────────────────────
 
+def _tier_rank(t: int) -> int:
+    """Higher = better. Tier 1 is best, 0 = ignored. Used to detect demotions."""
+    return {1: 3, 2: 2, 3: 1, 0: 0}.get(int(t or 0), 0)
+
+
+async def demote_sweep() -> dict:
+    """Re-analyze EVERY currently-tiered wallet and re-tier it from its CURRENT
+    on-chain performance. This is what keeps the smart-money list honest: a
+    wallet that went cold (recent calls decayed) gets DEMOTED instead of keeping
+    a stale tier forever. The promotion loop only re-touches wallets that appear
+    on new winners — this sweep re-checks the ones that DON'T. Returns
+    {checked, demoted, promoted}."""
+    cfg = await get_params("wallet_demote_enabled")
+    if float(cfg.get("wallet_demote_enabled") or 1.0) < 0.5:
+        return {"checked": 0, "demoted": 0, "promoted": 0}
+
+    wallets = await get_tier_wallets(max_tier=3)
+    if not wallets:
+        return {"checked": 0, "demoted": 0, "promoted": 0}
+
+    counters = {"checked": 0, "demoted": 0, "promoted": 0}
+    sem = asyncio.Semaphore(15)
+
+    async def _recheck(w):
+        async with sem:
+            old_tier = int(w.tier or 0)
+            try:
+                stats = await _analyze_wallet_trades(w.address)
+            except Exception as exc:
+                logger.debug("demote_sweep: analyze %s failed: %s", w.address[:8], exc)
+                return
+            total = stats["total_trades"]
+            if total < 1:
+                return
+            wins, losses = stats["wins"], stats["losses"]
+            multiples, entry_mcs = stats["multiples"], stats["entry_mcs"]
+            avg_mult = sum(multiples) / len(multiples) if multiples else 1.0
+            avg_entry = sum(entry_mcs) / len(entry_mcs) if entry_mcs else None
+            wr = wins / total if total else 0.0
+            early_rate = stats["early_entries"] / total if total else 0.0
+            wallet_type, bonus = await _classify_wallet(w.address)
+            score, new_tier = await _score_wallet(
+                wins, losses, total, avg_mult, early_rate, score_bonus=bonus)
+            await upsert_wallet(
+                address=w.address, score=score, tier=new_tier,
+                win_rate=round(wr, 4), avg_multiple=round(avg_mult, 2),
+                wins=wins, losses=losses, total_trades=total,
+                avg_entry_mcap=avg_entry, wallet_type=wallet_type,
+            )
+            counters["checked"] += 1
+            if _tier_rank(new_tier) < _tier_rank(old_tier):
+                counters["demoted"] += 1
+                logger.info("Wallet DEMOTE: %s tier %d→%d (score %.0f wr %.0f%% avg %.1fx)",
+                            w.address[:8], old_tier, new_tier, score, wr * 100, avg_mult)
+            elif _tier_rank(new_tier) > _tier_rank(old_tier):
+                counters["promoted"] += 1
+
+    await asyncio.gather(*[_recheck(w) for w in wallets[:MAX_WALLETS_PER_RUN]],
+                         return_exceptions=True)
+    logger.info("demote_sweep: checked=%d demoted=%d promoted=%d",
+                counters["checked"], counters["demoted"], counters["promoted"])
+    return counters
+
+
 async def wallet_analyst_loop() -> None:
     """Runs the wallet analyst once per hour. Skips ticks while
     helius_paused agent_param is on (credit kill-switch)."""
     await asyncio.sleep(STARTUP_DELAY)
     logger.info("Wallet Analyst agent started — running every %ds (Helius enrichment)", POLL_INTERVAL)
+    import time as _t
+    _last_sweep = 0.0
     while True:
         try:
             from database.models import get_param as _get_param
@@ -970,7 +1036,13 @@ async def wallet_analyst_loop() -> None:
             if paused and paused >= 0.5:
                 logger.info("Wallet Analyst: helius_paused=1, skipping tick")
             else:
-                await run_once()
+                await run_once()   # PROMOTE: early buyers of new winners
+                # DEMOTE: weekly re-tier of all tiered wallets so cold ones drop.
+                sweep_days = float((await get_params(
+                    "wallet_demote_sweep_days")).get("wallet_demote_sweep_days") or 7.0)
+                if _t.monotonic() - _last_sweep >= sweep_days * 86400:
+                    _last_sweep = _t.monotonic()
+                    await demote_sweep()
         except Exception as exc:
             logger.error("Wallet Analyst loop error: %s", exc)
         await asyncio.sleep(POLL_INTERVAL)

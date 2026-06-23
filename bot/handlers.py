@@ -2404,9 +2404,11 @@ async def cmd_updatewallets(message: Message):
     from database.models import AsyncSessionLocal, select, func, Wallet
     await message.reply("⏳ Running wallet analyst — promoting early buyers of recent winners…",
                         parse_mode=None)
+    sweep = None
     try:
-        from bot.agents.wallet_analyst import run_once as _run_wallets
-        found, saved = await _run_wallets()
+        from bot.agents.wallet_analyst import run_once as _run_wallets, demote_sweep
+        found, saved = await _run_wallets()   # promote early buyers of new winners
+        sweep = await demote_sweep()          # re-tier cold wallets down
     except Exception as exc:
         await message.reply(f"⚠️ Run error: {exc}", parse_mode=None)
         found = saved = None
@@ -2422,7 +2424,10 @@ async def cmd_updatewallets(message: Message):
 
     lines = ["👛 SMART-MONEY WALLET LIST", "━━━━━━━━━━━━━━━━━━━━━━━"]
     if found is not None:
-        lines.append(f"Run: {found} winners scanned, {saved} wallets updated")
+        lines.append(f"Promote: {found} winners scanned, {saved} wallets updated")
+    if sweep is not None:
+        lines.append(f"Demote sweep: {sweep['checked']} re-checked, "
+                     f"{sweep['demoted']} demoted, {sweep['promoted']} promoted")
     lines += [
         "",
         f"Tier 1: {tiers[1]}   Tier 2: {tiers[2]}   Tier 3: {tiers[3]}",
