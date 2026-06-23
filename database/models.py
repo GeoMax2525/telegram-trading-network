@@ -2958,13 +2958,17 @@ async def open_paper_trade(
     # scanner gate.
     _pt_str = (pattern_type or "").lower()
     _is_tg = "tg_signal" in _pt_str
+    # Migration is its OWN independent source (gated by migration_sniper_enabled,
+    # checked in the migration loop). It must NOT route through the scanner gate —
+    # otherwise /4amonly (scanner_enabled=0) silently blocks every migration buy.
+    _is_migration = "migration_dip" in _pt_str
 
     # Direct env-var check FIRST — bulletproof against any get_params
-    # weirdness (module caching, stale deploys, multi-replica drift).
-    # If SCANNER_LOCK env var is set off, no non-tg trade can ever pass.
+    # weirdness. If SCANNER_LOCK env var is off, no scanner trade can pass
+    # (but tg_signal and migration are exempt — they're their own sources).
     _scanner_lock_env = os.getenv("SCANNER_LOCK", "").strip().lower()
     _tg_lock_env = os.getenv("TG_SCRAPER_LOCK", "").strip().lower()
-    if not _is_tg and _scanner_lock_env in ("off", "0", "false", "no", "n"):
+    if not _is_tg and not _is_migration and _scanner_lock_env in ("off", "0", "false", "no", "n"):
         logger.warning(
             "open_paper_trade GATE BLOCK: SCANNER_LOCK=%s refused scanner trade "
             "%s mint=%s pattern=%s",
@@ -2982,7 +2986,9 @@ async def open_paper_trade(
         raise PaperTradeBlocked(f"TG_SCRAPER_LOCK={_tg_lock_env}")
 
     _gate = await get_params("scanner_enabled", "tg_scraper_enabled")
-    if _is_tg:
+    if _is_migration:
+        pass  # gated upstream by migration_sniper_enabled — independent source
+    elif _is_tg:
         if float(_gate.get("tg_scraper_enabled", 1.0) or 1.0) < 0.5:
             logger.warning(
                 "open_paper_trade GATE BLOCK: tg_scraper_enabled=0 refused tg trade "
