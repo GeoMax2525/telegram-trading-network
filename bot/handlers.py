@@ -711,29 +711,27 @@ async def _build_hub_text(autotrade: bool) -> str:
     else:
         status_dot, status_word = "🔴", "DRAWDOWN"
 
-    # ── ONE COHESIVE ARCADE SCREEN (SEGA vibe) ───────────────────────────
-    # Whole dashboard is a SINGLE monospace panel (one <pre>), not a stack of
-    # separate rounded cards. All-caps sections, block-bar banner, ▲/▼ ticks.
-    # Lines kept <= ~30 chars so Telegram mobile doesn't wrap. Only token /
-    # wallet names get _esc(); everything else is plain ASCII + unicode marks.
-    BAR = "▰" * 24
+    # ── Telegram dashboard UI (HTML, NOT a code block) ───────────────────
+    # Bold section titles + inline values. No <pre>, so there's no copy
+    # button and the text flows as a normal message. Token/wallet names are
+    # _esc()'d; everything else is plain text + emoji.
     arrow = "▲" if pnl_val >= 0 else "▼"
     pnl_sign = "+" if pnl_val >= 0 else ""
 
     out: list[str] = []
-    out.append(BAR)
-    out.append("     R E V O L T  ·  A I")
-    out.append(f" {mode_word:<12}{status_dot} {status_word}")
-    out.append(BAR)
+    out.append(f"{status_dot} <b>REVOLT · AI</b>")
+    out.append(f"<i>{mode_word} · {status_word}</i>")
     out.append("")
-    out.append(" ◈ BANKROLL")
-    out.append(f"   {real_balance:.2f} SOL")
-    out.append(f"   {arrow} {pnl_sign}{pnl_val:.2f}  ({pnl_pct:+.1f}%)")
-    out.append(f"   TODAY {perf_today_pnl:+.2f} · WR {perf_wr}% · {perf_closed}W")
+
+    # ── BANKROLL ──────────────────────────────────────────────────────────
+    out.append("💰 <b>BANKROLL</b>")
+    out.append(f"<b>{real_balance:.2f} SOL</b>  ·  {arrow} {pnl_sign}{pnl_val:.2f} ({pnl_pct:+.1f}%)")
+    out.append(f"Today {perf_today_pnl:+.2f}  ·  WR {perf_wr}%  ·  {perf_closed} closed")
     out.append("")
 
     # ── SOURCES — how each machine is performing (closed HQ trades, 7d) ───
-    out.append(" ▶ SOURCES            7D")
+    out.append("📊 <b>SOURCES</b> <i>(7d)</i>")
+    _emoji = {"4AM": "⚡", "SCAN": "🔍", "ALGO": "🧪", "BNDL": "📦"}
     try:
         from datetime import datetime as _dtn, timedelta as _td
         from database.models import AsyncSessionLocal as _ASL, select as _sel, PaperTrade as _PT
@@ -768,11 +766,11 @@ async def _build_hub_text(autotrade: bool) -> str:
             _l = len(_g) - _w
             _wr = int(_w / len(_g) * 100) if _g else 0
             _a = "▲" if _pnl >= 0 else "▼"
-            out.append(f"   {_k:<5}{_a}{_pnl:+.2f}  {_w:>2}-{_l:<2} {_wr:>3}%")
+            out.append(f"{_emoji[_k]} <b>{_k}</b>  {_a} {_pnl:+.2f}  ·  {_w}-{_l}  ·  {_wr}%")
         if not _any:
-            out.append("   no closed trades yet")
+            out.append("<i>no closed trades yet</i>")
     except Exception:
-        out.append("   (breakdown unavailable)")
+        out.append("<i>breakdown unavailable</i>")
     out.append("")
 
     # ── OPEN PLAYS — live positions, source-tagged ───────────────────────
@@ -795,6 +793,7 @@ async def _build_hub_text(autotrade: bool) -> str:
         if "algo:" in p:        return (pt.channel_name or "algo")[:6]
         return "scan"
 
+    out.append("📂 <b>OPEN PLAYS</b>")
     if open_trades:
         live_mcs = await asyncio.gather(
             *[fetch_current_market_cap(pt.token_address) for pt in open_trades],
@@ -815,62 +814,60 @@ async def _build_hub_text(autotrade: bool) -> str:
             except Exception:
                 age = "?"
             dot = "🟢" if mult >= 1.3 else ("🟡" if mult >= 1.0 else "🔴")
-            nm = _esc((pt.token_name or "?").replace("_", " ")[:12])
+            nm = _esc((pt.token_name or "?").replace("_", " ")[:16])
             mults = f"{mult:.2f}x" if mult > 0 else "—"
-            play_rows.append(f"  {dot} {nm:<12} {mults:>6} pk{peak:.1f}")
+            play_rows.append(f"{dot} <b>{nm}</b> {mults} · pk {peak:.1f}x")
             play_rows.append(
-                f"     {_mc(entry_mc)}→{_mc(current_mc)} {(pt.paper_sol_spent or 0):.2f}◎ {_src(pt)} {age}"
+                f"   {_mc(entry_mc)}→{_mc(current_mc)} · {(pt.paper_sol_spent or 0):.2f}◎ · {_src(pt)} · {age}"
             )
-        out.append(f" ▶ OPEN  {len(open_trades)} · {unrealized:+.2f}")
+        out.append(f"<i>{len(open_trades)} open · {unrealized:+.2f} SOL unrealized</i>")
         out += play_rows
     else:
-        out.append(" ▶ OPEN  none")
+        out.append("<i>none</i>")
     out.append("")
 
     # ── LAST DROPS — recent closes ───────────────────────────────────────
     reason_map = {
         "tp_hit": "win", "sl_hit": "stop", "trail_hit": "trail",
-        "breakeven_stop": "b/e", "profit_trail": "trail", "stale": "stale",
-        "expired": "exp", "manual_close": "man", "dead_token": "dead",
-        "no_momentum": "nomo", "bundle_time_exit": "bndl",
+        "breakeven_stop": "break-even", "profit_trail": "trail", "stale": "stale",
+        "expired": "expired", "manual_close": "manual", "dead_token": "dead",
+        "no_momentum": "no-mo", "bundle_time_exit": "bundle",
     }
     recent = paper_stats.get("recent") or []
-    out.append(" ▶ LAST DROPS")
+    out.append("📉 <b>LAST DROPS</b>")
     if recent:
         for pt in recent[:6]:
-            nm = _esc((pt.token_name or "?").replace("_", " ")[:12])
+            nm = _esc((pt.token_name or "?").replace("_", " ")[:16])
             if pt.status == "open":
-                out.append(f"  🟡 {nm:<12} open")
+                out.append(f"🟡 <b>{nm}</b> · open")
                 continue
             pnl = pt.paper_pnl_sol or 0
             win = pnl > 0
             tag = f"{(pt.peak_multiple or 0):.1f}x" if win else reason_map.get(
-                pt.close_reason or "", (pt.close_reason or "?")[:5])
+                pt.close_reason or "", (pt.close_reason or "?"))
             mark = "🟢" if win else "🔴"
-            out.append(f"  {mark} {nm:<12} {tag:<6}{pnl:>+6.2f}")
+            out.append(f"{mark} <b>{nm}</b> · {tag} · {pnl:+.2f}")
     else:
-        out.append("   no trades yet")
+        out.append("<i>no trades yet</i>")
     out.append("")
 
     # ── HIGH SCORES — top smart-money wallets ────────────────────────────
-    out.append(" ▶ HIGH SCORES")
+    out.append("🏆 <b>HIGH SCORES</b>")
     top_wallets = await get_top_wallets(limit=5)
     if top_wallets:
         for i, w in enumerate(top_wallets, 1):
             short = f"{w.address[:4]}…{w.address[-4:]}"
             wr = int((w.win_rate or 0) * 100)
-            out.append(f"  {i} {short:<11}{w.score:>3.0f} {wr:>3}%")
+            out.append(f"{i}. {short} · {w.score:.0f} · {wr}%")
     else:
-        out.append("   building list…")
+        out.append("<i>building list…</i>")
     out.append("")
 
-    # ── Footer ───────────────────────────────────────────────────────────
-    out.append(BAR)
-    out.append(f" SYS {status_dot} {status_word}")
-    out.append(" /sourcestats /algos /4amreport")
+    # ── SYS footer ────────────────────────────────────────────────────────
+    out.append(f"{status_dot} <b>SYS</b> {status_word}")
+    out.append("<i>/sourcestats · /algos · /4amreport</i>")
 
-    # Whole screen = ONE monospace panel (cohesive, not stacked cards).
-    return "<pre>" + "\n".join(out) + "</pre>"
+    return "\n".join(out)
 
 
 # ── Subscriber-scoped /hub view ─────────────────────────────────────────────
