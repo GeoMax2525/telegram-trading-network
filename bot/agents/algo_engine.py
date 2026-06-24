@@ -262,12 +262,38 @@ async def _poll_loop() -> None:
                         bal = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
                         if bal < size + 0.02:
                             continue
+
+                        # Enrichment (rules #3 + #5): wallet-confluence sizes the
+                        # position UP; bundle/top-holder data sizes it DOWN and
+                        # tightens TP/SL. The algo keeps its own identity tag so
+                        # per-algo tracking (algo_stats LIKE %algo:name%) still works.
+                        a_size, a_tp, a_sl = size, tp_x, sl_pct
+                        a_pattern = f"algo:{algo.name}"
+                        try:
+                            from database.models import insider_confluence_mult
+                            _ac = await insider_confluence_mult(mint)
+                            if _ac != 1.0:
+                                a_size = round(a_size * _ac, 4)
+                        except Exception:
+                            pass
+                        try:
+                            from bot.agents.entry_filter import classify_launch, bundle_trade_params
+                            from database.models import get_params as _gp
+                            _acls = await classify_launch(mint)
+                            if _acls.get("kind"):
+                                a_tp, a_sl = bundle_trade_params(a_tp, a_sl)
+                                _abm = await _gp("bundle_size_mult")
+                                a_size = round(a_size * float(_abm.get("bundle_size_mult") or 0.5), 4)
+                                a_pattern = a_pattern + ",bundle"
+                        except Exception:
+                            pass
+
                         try:
                             await open_paper_trade(
                                 token_address=mint, token_name=data["name"],
                                 entry_mc=data["mc"], entry_price=data["mc"],
-                                paper_sol=size, confidence=70.0,
-                                pattern_type=f"algo:{algo.name}", tp_x=tp_x, sl_pct=sl_pct,
+                                paper_sol=a_size, confidence=70.0,
+                                pattern_type=a_pattern, tp_x=a_tp, sl_pct=a_sl,
                                 trade_reasoning=f"Algo {algo.name} match — "
                                                 f"MC ${data['mc']/1000:.0f}K, growth {growth or 0:.0f}%",
                                 channel_name=algo.name,

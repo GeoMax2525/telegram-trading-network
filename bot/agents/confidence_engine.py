@@ -623,37 +623,38 @@ async def score_candidate(candidate: dict) -> dict:
         and decision in ("execute_full", "execute_half")
     )
 
-    # PAPER execution: DB-driven confidence threshold + rug floor.
-    # Previously had no hard gates, which let garbage tokens through
-    # whenever the weighted score happened to land above the (low)
-    # paper threshold. Rug floor at 40 keeps obvious scams out of
-    # the learning corpus without being as strict as the live gate.
-    paper_rug_floor_pass = rug >= 40
+    # ── PAPER DECISION — PRACTICAL FILTERS, NOT SCORING (rule #2) ─────────────
+    # The practical gauntlet is already enforced UPSTREAM when candidates are
+    # gathered (scanner_agent: mcap window, liquidity floor, max age, min
+    # buyers_m5, rugcheck max-risk). A candidate that reaches here has already
+    # passed those. So we DO NOT gate paper trades on the noisy weighted
+    # confidence score anymore — it's kept for logging/learning only. Final
+    # practical checks: a rug-safety floor + an optional buy-pressure sanity
+    # (buys >= sells; fails open when txn data is missing). Smart-money/insider
+    # is a SIZE weight at the open site (insider_confluence_mult), NEVER a gate
+    # (rule #3 — wallets help, they don't block).
+    _flt = await get_params("scanner_paper_rug_floor", "scanner_require_buy_pressure")
+    _paper_rug_floor = float(_flt.get("scanner_paper_rug_floor") or 40.0)
+    paper_rug_floor_pass = rug >= _paper_rug_floor
+
+    buy_pressure_ok = True
+    if float(_flt.get("scanner_require_buy_pressure") or 1.0) >= 0.5:
+        _b, _s = candidate.get("buys_m5"), candidate.get("sells_m5")
+        if isinstance(_b, (int, float)) and isinstance(_s, (int, float)) and (_b + _s) > 0:
+            buy_pressure_ok = _b >= _s
+            if not buy_pressure_ok:
+                logger.info("Agent5: buy-pressure fail %s — buys %s < sells %s",
+                            candidate.get("name", "?")[:20], _b, _s)
+
     paper_trade = (
         state.trade_mode == "paper"
-        and confidence >= t_paper
         and paper_rug_floor_pass
+        and buy_pressure_ok
     )
 
-    # ── INSIDER GATE ─────────────────────────────────────────────────────────
-    # The hybrid fix: a scanner trade opens ONLY when proven smart-money wallets
-    # are buying (insider >= floor). Strips the 3%-WR "buy tokens the smart money
-    # isn't touching" failure mode without going fully insider-only while the
-    # wallet list matures. 4am auto-buys bypass score_candidate entirely, so this
-    # gates SCANNER trades only. Toggle: scanner_insider_gate.
-    try:
-        _ig = await get_params("scanner_insider_gate", "scanner_insider_min")
-        if float(_ig.get("scanner_insider_gate") or 0) >= 0.5:
-            _floor = float(_ig.get("scanner_insider_min") or 40.0)
-            if insider < _floor:
-                if paper_trade or decision in ("execute_full", "execute_half"):
-                    logger.info("Agent5: INSIDER GATE blocked %s — insider %.0f < %.0f",
-                                candidate.get("name", "?")[:20], insider, _floor)
-                paper_trade = False
-                if decision in ("execute_full", "execute_half"):
-                    decision = "monitor"
-    except Exception as _ige:
-        logger.debug("insider gate error: %s", _ige)
+    # NOTE: the INSIDER GATE that previously blocked scanner trades when no
+    # smart-money wallet was buying has been REMOVED (rule #3). Wallet
+    # presence now only increases position SIZE, never blocks the entry.
 
     logger.info(
         "Agent5: PAPER CHECK — %s mode=%s conf=%.1f threshold=%.0f rug=%.0f(floor=40) result=%s",

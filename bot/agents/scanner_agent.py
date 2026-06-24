@@ -1138,12 +1138,9 @@ async def autobuy_tg_signals(tg_candidates: list) -> None:
             tg_probe_cfg = await get_params("paper_probe_size", "tg_respect_cold")
             tg_paper_sol = float(tg_probe_cfg.get("paper_probe_size") or 0.2)
 
-            from bot.agents.regime_tracker import get_probe_size_multiplier, should_skip_in_cold
-            # 4am is the trusted edge — it does NOT pause in a cold regime by
-            # default (that pause is a scanner-churn guard). Opt in via param.
-            if float(tg_probe_cfg.get("tg_respect_cold") or 0) >= 0.5 and should_skip_in_cold():
-                logger.info("4am: skip %s — regime=COLD (tg_respect_cold on)", mint[:12])
-                continue
+            # 4am is a CLEAN snipe (rule #1) — NO cold-pause filter. Regime
+            # only scales probe SIZE (smaller in cold), never blocks the buy.
+            from bot.agents.regime_tracker import get_probe_size_multiplier
             tg_paper_sol = round(tg_paper_sol * get_probe_size_multiplier(), 4)
 
             try:
@@ -1166,11 +1163,8 @@ async def autobuy_tg_signals(tg_candidates: list) -> None:
             except Exception as _cfe:
                 logger.debug("confluence boost failed: %s", _cfe)
 
-            from bot.agents.entry_filter import check_entry_filters
-            ef_passed, ef_reason = await check_entry_filters(mint, pair)
-            if not ef_passed:
-                logger.info("4am: skip %s — entry filter: %s", mint[:12], ef_reason)
-                continue
+            # NO entry_filter on 4am (rule #1) — it rejects legitimate fresh
+            # launches (high early top10 concentration is normal). Removed.
             if state.paper_balance < tg_paper_sol + 0.05:
                 continue
 
@@ -1692,6 +1686,20 @@ async def run_once() -> tuple[int, int]:
                 continue
             paper_sol = round(paper_sol * get_probe_size_multiplier(), 4)
 
+            # RULE #3: smart money is a SIZE WEIGHT, not a gate. When proven
+            # wallets are buying this token, size the position UP. When they're
+            # not, we still trade (it passed the practical filters) — just at
+            # base size. This replaces the old insider GATE that blocked trades.
+            try:
+                from database.models import insider_confluence_mult
+                _conf = await insider_confluence_mult(scored.get("mint", ""))
+                if _conf != 1.0:
+                    paper_sol = round(paper_sol * _conf, 4)
+                    logger.info("Scanner: insider-confluence x%.2f on %s → %.3f SOL",
+                                _conf, scored.get("name", "?")[:16], paper_sol)
+            except Exception as _cfe:
+                logger.debug("Scanner confluence boost failed: %s", _cfe)
+
             logger.info(
                 "Scanner: PAPER TRADE %s conf=%.0f sol=%.4f bal=%.4f",
                 scored.get("name", "?")[:20],
@@ -1829,10 +1837,21 @@ async def run_once() -> tuple[int, int]:
                     _cls = await classify_launch(scored.get("mint", ""))
                     if _cls["kind"]:  # bundle OR high concentration → tighter rules
                         tp_for_open, sl_for_open = bundle_trade_params(tp_for_open, sl_for_open)
+                        # RULE #5: bundle/top-holder data influences SIZE too, not
+                        # just TP/SL. A clustered launch is higher-risk → smaller
+                        # position. Tunable via bundle_size_mult (1.0 = no change).
+                        try:
+                            _bsz = await get_params("bundle_size_mult")
+                            _bm = float(_bsz.get("bundle_size_mult") or 0.5)
+                            if _bm != 1.0:
+                                paper_sol = round(paper_sol * _bm, 4)
+                        except Exception:
+                            pass
                         _scan_pattern = (_scan_pattern + ",bundle").lstrip(",")
                         logger.info(
-                            "Scanner: %s %s — tp=%.1fx sl=%.0f%%",
-                            (scored.get("name") or "?")[:16], _cls["label"], tp_for_open, sl_for_open,
+                            "Scanner: %s %s — tp=%.1fx sl=%.0f%% size=%.3f",
+                            (scored.get("name") or "?")[:16], _cls["label"],
+                            tp_for_open, sl_for_open, paper_sol,
                         )
                         # Record participant wallets (real launch-bundle wallets
                         # when we have them; else resolve top holders) off-path.

@@ -196,10 +196,10 @@ async def main() -> None:
     asyncio.create_task(learning_loop(bot))
     asyncio.create_task(paper_monitor_loop(bot))
     asyncio.create_task(gmgn_agent_loop())
-    # Migration Dip Buyer — own source, gated off by migration_sniper_enabled.
-    from bot.agents.migration_sniper import migration_sniper_loop
-    asyncio.create_task(migration_sniper_loop())
-    logger.info("Migration sniper: queued (gated by migration_sniper_enabled)")
+    # Migration Dip Buyer — REMOVED. It overlapped the algo engine (both scan
+    # fresh pump.fun tokens) and added bug surface without proven edge. The
+    # loop is no longer started; migration_sniper.py is left dormant for now.
+    # (param migration_sniper_enabled stays 0; nothing reads it operationally.)
 
     # Health watchdog — pages admins if any critical loop stalls.
     from bot.health import watchdog_loop

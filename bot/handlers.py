@@ -754,8 +754,12 @@ async def _build_hub_text(autotrade: bool) -> str:
                       "Closed", f"{perf_closed}"))
     out.append("")
 
-    # Open positions — clean rows.
+    # Open positions — detailed plays (entry→current MC, size, peak, age, source).
+    # Restored to the original full-detail layout: operator wants to see the
+    # live plays, not just a one-line summary. Always shown, even when empty.
+    from datetime import datetime as _dt
     open_trades = await get_open_paper_trades()
+    out.append("<b>Open Plays</b>")
     if open_trades:
         live_mcs = await asyncio.gather(
             *[fetch_current_market_cap(pt.token_address) for pt in open_trades],
@@ -763,18 +767,51 @@ async def _build_hub_text(autotrade: bool) -> str:
         )
         unrealized = 0.0
         rows = []
+
+        def _mc(v):
+            if not v or v <= 0:
+                return "?"
+            if v >= 1_000_000:
+                return f"{v/1_000_000:.1f}M"
+            if v >= 1_000:
+                return f"{v/1_000:.0f}K"
+            return f"{v:.0f}"
+
+        def _src(pt):
+            p = (pt.pattern_type or "").lower()
+            if "tg_signal" in p:
+                return "4am"
+            if "migration_dip" in p:
+                return "migr"
+            if "algo:" in p:
+                return (pt.channel_name or "algo")[:8]
+            return "scan"
+
         for pt, live_mc in zip(open_trades, live_mcs):
             entry_mc = pt.entry_mc or 0
             current_mc = live_mc if isinstance(live_mc, (int, float)) and live_mc else 0
             mult = (current_mc / entry_mc) if (entry_mc > 0 and current_mc > 0) else 0
             if entry_mc > 0 and current_mc > 0:
                 unrealized += (pt.paper_sol_spent or 0) * (mult - 1)
+            peak = pt.peak_multiple or (mult if mult > 0 else 0)
+            try:
+                age_m = int((_dt.utcnow() - pt.opened_at).total_seconds() // 60)
+                age = f"{age_m}m" if age_m < 90 else f"{age_m // 60}h{age_m % 60:02d}m"
+            except Exception:
+                age = "?"
             dot = "🟢" if mult >= 1.3 else ("🟡" if mult >= 1.0 else "🔴")
             nm = _esc((pt.token_name or "?").replace("_", " ")[:14])
-            rows.append(f"{dot}  {nm:<14} {mult:>5.2f}x")
-        out.append(f"<b>Open Positions</b>   <i>{unrealized:+.2f} SOL unrealized</i>")
+            mults = f"{mult:.2f}x" if mult > 0 else "—"
+            rows.append(f"{dot} {nm:<14} {mults:>6}  pk {peak:.1f}x")
+            rows.append(
+                f"   {_mc(entry_mc)}→{_mc(current_mc)} · "
+                f"{(pt.paper_sol_spent or 0):.2f}◎ · {_src(pt)} · {age}"
+            )
+        out.append(f"<i>{len(open_trades)} open · {unrealized:+.2f} SOL unrealized</i>")
         out.append("<pre>" + "\n".join(rows) + "</pre>")
-        out.append("")
+    else:
+        out.append("<pre>No open plays</pre>")
+    out.append("")
 
     # Recent trades — modern rows, green/red mark.
     reason_map = {

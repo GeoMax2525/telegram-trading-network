@@ -506,6 +506,9 @@ class PaperTrade(Base):
     realized_pnl_sol  = Column(Float,       nullable=False, default=0.0)   # profit already taken
     trade_reasoning   = Column(String(512), nullable=True)  # why the trade was opened
     close_commentary  = Column(String(1024), nullable=True)  # Claude's postmortem at close
+    # Signal source label (algo name, channel name) — used by algo_stats and the
+    # /hub Open Plays source tag. open_paper_trade(channel_name=...) writes here.
+    channel_name      = Column(String(64),  nullable=True)
     opened_at         = Column(DateTime,    default=datetime.utcnow, nullable=False)
     closed_at         = Column(DateTime,    nullable=True)
     # Post-close tracking (filled by monitor over 24h after close)
@@ -704,6 +707,7 @@ _NEW_PAPER_TRADE_COLS = [
     ("realized_pnl_sol",  "REAL DEFAULT 0"),
     ("trade_reasoning",   "TEXT"),
     ("close_commentary",  "TEXT"),
+    ("channel_name",      "VARCHAR(64)"),
 ]
 
 _NEW_AI_TRADE_PARAMS_COLS = [
@@ -3813,9 +3817,15 @@ AGENT_PARAM_DEFAULTS = {
     "wallet_demote_sweep_days":    7.0,   # how often the demotion sweep runs
     "wallet_seed_winners_enabled": 1.0,   # 1 = seed GMGN top-traders of OUR winners
 
-    # ── Scanner insider gate — only trade when smart money is buying ─────────
-    "scanner_insider_gate":        0.0,   # 1 = no scanner trade without insider buys
-    "scanner_insider_min":        40.0,   # min insider score to pass the gate
+    # ── Scanner practical-filter decision (rule #2) ──────────────────────────
+    # The scanner trades on practical filters (enforced upstream) + these two
+    # final checks, NOT on the confidence score. Wallets never block (rule #3).
+    "scanner_paper_rug_floor":     40.0,  # min rug-safety score for a paper trade
+    "scanner_require_buy_pressure": 1.0,  # 1 = require buys>=sells (fails open if no data)
+    # ── Scanner insider gate — DEPRECATED (rule #3: wallets weight, don't block)
+    # Kept for backward-compat reads; no longer consulted by score_candidate.
+    "scanner_insider_gate":        0.0,   # (deprecated) was: block trades w/o insider buys
+    "scanner_insider_min":        40.0,   # (deprecated) min insider score to pass the gate
     # ── Scanner→4am confluence boost (Option B) ──────────────────────────────
     "scanner_4am_confluence_enabled": 0.0,  # 1 = size up 4am calls insiders also bought
     "scanner_4am_confluence_mult":    1.5,  # size multiplier when insider-confirmed
@@ -3880,6 +3890,7 @@ AGENT_PARAM_DEFAULTS = {
     # Bundle-aware trading: a bundled launch (top-10 wallets clustered) pumps AND
     # dumps fast, so we trade it with TIGHTER rules instead of skipping it.
     "bundle_detect_enabled":       1.0,   # 0 = off (trade everything as clean)
+    "bundle_size_mult":            0.5,   # bundle/high-concentration → smaller position (rule #5)
     "bundle_top10_pct_threshold":  60.0,  # top-10 concentration >= this = bundle
     "bundle_time_exit_min":        15.0,  # bundle FLAT/RED after this = exit (dump window)
     "bundle_flat_mult":            1.05,  # cut only if cur < this (green climbers ride)

@@ -347,54 +347,19 @@ async def _handle_message(event, channel_name: str) -> None:
                 tg_paper_sol = float(tg_cfg.get("paper_probe_size") or 0.2)
                 tg_tp_x = float(tg_cfg.get("tg_signal_tp_x") or 8.0)
 
-                # PHASE 3: scale probe size by current market regime.
-                # HOT meta → bigger probes (1.5x), COLD → smaller (0.5x).
-                # Skip the trade entirely if operator has enabled
-                # cold-pause via /setparam regime_cold_skip_trades 1.
-                from bot.agents.regime_tracker import (
-                    get_probe_size_multiplier, should_skip_in_cold,
-                )
-                if should_skip_in_cold():
-                    skip_reason = "regime_cold_paused"
-                    logger.info(
-                        "TG scraper SKIPPED %s — regime=COLD, paused per operator",
-                        mint[:12],
-                    )
-                    return
+                # 4am is a CLEAN snipe — NO entry filters. Rule #1: 4am is
+                # the main edge and must stay clean. It buys every CA the
+                # channel posts. Risk is managed by small probe size +
+                # moonbag exits, NOT by blocking the entry. Removed here:
+                #   - cold-pause skip      (was should_skip_in_cold)
+                #   - on-chain entry_filter (top10/liquidity/mint authority —
+                #     these reject legitimate fresh launches; see the warning
+                #     in entry_filter.py's own header)
+                #   - momentum gate        (don't second-guess the caller)
+                # Regime still scales probe SIZE (smaller in cold), never blocks.
+                from bot.agents.regime_tracker import get_probe_size_multiplier
                 regime_mult = get_probe_size_multiplier()
                 tg_paper_sol = round(tg_paper_sol * regime_mult, 4)
-
-                # PHASE 4: on-chain entry filter — top10 concentration,
-                # liquidity floor, mint authority. 4am signals usually
-                # bypass these (they only fire from Telegram channel),
-                # so this is the only filter standing between the bot
-                # and a rug. Tunable via /setparam.
-                from bot.agents.entry_filter import check_entry_filters
-                ef_passed, ef_reason = await check_entry_filters(mint, pair)
-                if not ef_passed:
-                    skip_reason = f"entry_filter:{ef_reason}"
-                    logger.info(
-                        "TG scraper SKIPPED %s — entry filter rejected: %s",
-                        mint[:12], ef_reason,
-                    )
-                    return
-
-                # Entry momentum gate (Profit Protection v2): don't buy a 4am
-                # signal that's already net-dumping at the moment it fires.
-                # Fails open on missing txn data; tunable via /setparam.
-                from bot.scanner import passes_momentum_gate
-                mom_ok, mom_reason = await passes_momentum_gate(
-                    metrics.get("buys_m5"), metrics.get("sells_m5"),
-                    price_change_m5=metrics.get("price_change_m5"),
-                    label=token_name,
-                )
-                if not mom_ok:
-                    skip_reason = f"momentum_gate:{mom_reason}"
-                    logger.info(
-                        "TG scraper SKIPPED %s — momentum gate: %s",
-                        mint[:12], mom_reason,
-                    )
-                    return
 
                 bal = await compute_paper_balance(_state.PAPER_STARTING_BALANCE)
                 if bal < tg_paper_sol + 0.05:
@@ -428,15 +393,11 @@ async def _handle_message(event, channel_name: str) -> None:
                         logger.warning("Claude strategist failed for %s: %s — using rule defaults", token_name[:20], exc)
                         decision = None
 
-                    if decision is not None and not decision["go"]:
-                        skip_reason = f"claude_no:{decision['reason'][:80]}"
-                        logger.info(
-                            "TG scraper SKIPPED %s — Claude NO: %s",
-                            mint[:12], decision["reason"],
-                        )
-                        return
-
-                    if decision is not None:
+                    # ADVISOR ONLY — Claude never vetoes a 4am call (rule #1).
+                    # We always buy. When Claude says GO, we let it tune
+                    # size/tp/sl. When it says NO, we log the reason but still
+                    # buy at rule defaults (it's advice, not a gate).
+                    if decision is not None and decision["go"]:
                         tg_paper_sol = decision["size_sol"]
                         tg_tp_x = decision["tp_x"]
                         tg_sl_pct = decision["sl_pct"]
@@ -451,6 +412,16 @@ async def _handle_message(event, channel_name: str) -> None:
                                 f"({bal:.3f}<{tg_paper_sol + 0.05:.3f})"
                             )
                             return
+                    elif decision is not None and not decision["go"]:
+                        logger.info(
+                            "TG scraper: Claude advised NO on %s (%s) — "
+                            "buying anyway at rule defaults (4am is unfiltered)",
+                            mint[:12], decision["reason"][:80],
+                        )
+                        tg_trade_reasoning = (
+                            f"AUTO-BUY [fast-path] from {channel_name} | "
+                            f"Claude advised-no: {decision['reason']}"
+                        )[:512]
 
                     pt = await open_paper_trade(
                         token_address=mint,
