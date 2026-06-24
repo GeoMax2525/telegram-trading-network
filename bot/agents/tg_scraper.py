@@ -443,6 +443,27 @@ async def _handle_message(event, channel_name: str) -> None:
                         token_name[:20], entry_mc, tg_paper_sol, _state.paper_balance,
                     )
 
+                    # ENTRY CARD — show the source (4am + channel) and Claude's
+                    # reasoning. The fast-path is the PRIMARY 4am buyer, so without
+                    # this the operator never saw a card for most 4am buys.
+                    try:
+                        _cnote = None
+                        if decision is not None:
+                            _cn = (decision.get("reason") or "").strip()
+                            _cnotes = (decision.get("notes") or "").strip()
+                            if _cn or _cnotes:
+                                _cnote = f"{_cn} {_cnotes}".strip()
+                        from bot.agents.scanner_agent import _broadcast_entry
+                        await _broadcast_entry(
+                            source="4am", name=token_name, mint=mint,
+                            size_sol=tg_paper_sol, entry_mc=entry_mc,
+                            tp_x=tg_tp_x, sl_pct=tg_sl_pct,
+                            reason=f"4am channel call [{channel_name}] — trusted source",
+                            origin=f"4am · {channel_name}", claude_note=_cnote,
+                        )
+                    except Exception as _bc_exc:
+                        logger.debug("Fast-path entry card failed: %s", _bc_exc)
+
                     # Relay to subscribers (background task — doesn't block)
                     try:
                         from bot.signal_relay import relay_trade_to_subscribers

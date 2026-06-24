@@ -77,11 +77,16 @@ async def _broadcast_entry(
     *, source: str, name: str, mint: str, size_sol: float, entry_mc: float,
     tp_x: float, sl_pct: float, reason: str | None,
     cls_label: str | None = None,
+    origin: str | None = None, claude_note: str | None = None,
 ) -> None:
     """Post an ENTRY card to the caller group + community feed showing WHY we
     entered and the in/out strategy. Uses only data we already have at entry —
     zero extra API/Claude cost. source: 'bundle' | 'concentration' | 'scanner'
-    | '4am'. cls_label is the honest detected-launch description."""
+    | '4am' (drives the heading style / launch type). cls_label is the honest
+    detected-launch description. origin is the SIGNAL SOURCE label (e.g.
+    '4am · ChannelName', 'Scanner · volume_spike', 'Algo · X-FILES') — shown
+    on its own line so every card says where the buy came from. claude_note is
+    Claude's entry reasoning, shown when the strategist was consulted."""
     try:
         from bot.config import CALLER_GROUP_ID, SCAN_TOPIC_ID
         from bot.community_feed import post_to_community
@@ -118,6 +123,12 @@ async def _broadcast_entry(
             "",
             f"🪙 <b>Entry MC:</b> {mc_str} | <b>Size:</b> {size_sol:.2f} SOL",
         ]
+        # SIGNAL SOURCE — always show where the buy came from (4am channel /
+        # scanner sub-source / algo name). Falls back to the heading source.
+        _origin = origin or {
+            "4am": "4am call", "bundle": "Scanner", "concentration": "Scanner",
+        }.get(source, "Scanner")
+        lines.append(f"📡 <b>Source:</b> {_esc(str(_origin)[:48])}")
         if tag_line:
             lines.append(tag_line)
         if reason:
@@ -125,6 +136,8 @@ async def _broadcast_entry(
             bullets = [b.strip() for b in str(reason).split("|") if b.strip()]
             lines += ["", "📝 <b>Why:</b>"]
             lines += [f"• {_esc(b[:80])}" for b in bullets[:6]]
+        if claude_note:
+            lines += ["", "🤖 <b>Claude:</b>", f"<i>{_esc(str(claude_note)[:240])}</i>"]
         lines += ["", strat_head, strat_body]
         text = "\n".join(lines)
 
@@ -1195,12 +1208,14 @@ async def autobuy_tg_signals(tg_candidates: list) -> None:
             state.paper_trades_today += 1
             logger.info("4am: AUTO-BUY %s at MC=%s | %.2f SOL | bal=%.4f",
                         token_name[:20], entry_mc, tg_paper_sol, state.paper_balance)
+            _4am_chan = tg.get("tg_channel") or "?"
             await _broadcast_entry(
                 source=(tg_cls["kind"] or "4am"),
                 name=token_name, mint=mint, size_sol=tg_paper_sol, entry_mc=entry_mc,
                 tp_x=tg_tp_x, sl_pct=tg_sl_pct,
-                reason=f"4am channel call [{tg.get('tg_channel', '?')}] — trusted source",
+                reason=f"4am channel call [{_4am_chan}] — trusted source",
                 cls_label=tg_cls.get("label"),
+                origin=f"4am · {_4am_chan}",
             )
             try:
                 from bot.signal_relay import relay_trade_to_subscribers
@@ -1791,6 +1806,7 @@ async def run_once() -> tuple[int, int]:
                 # Only candidates that already passed confidence + momentum gate
                 # + slot checks reach here, so Claude call volume is bounded.
                 # Gated by claude_scanner_entry_enabled (default on).
+                _claude_note = None   # captured for the entry card
                 try:
                     from bot.agents.claude_reasoning import claude_available
                     _ce_cfg = await get_params("claude_scanner_entry_enabled")
@@ -1821,6 +1837,10 @@ async def run_once() -> tuple[int, int]:
                             paper_sol   = float(_cdec.get("size_sol") or paper_sol)
                             tp_for_open = float(_cdec.get("tp_x") or tp_for_open)
                             sl_for_open = float(_cdec.get("sl_pct") or sl_for_open)
+                            _cn = (_cdec.get("reason") or "").strip()
+                            _cnotes = (_cdec.get("notes") or "").strip()
+                            if _cn or _cnotes:
+                                _claude_note = f"{_cn} {_cnotes}".strip()
                 except Exception as _ce_exc:
                     logger.warning(
                         "Scanner: Claude entry error for %s: %s — using rule defaults",
@@ -1881,6 +1901,8 @@ async def run_once() -> tuple[int, int]:
 
                 # Entry card — source, size, reason, in/out strategy. The reason
                 # is the confidence engine's own trade_reasoning (already computed).
+                _sub = (scored.get("source") or scored.get("profile_tag") or "").strip()
+                _scan_origin = f"Scanner · {_sub}" if _sub else "Scanner"
                 await _broadcast_entry(
                     source=(_cls["kind"] or "scanner"),
                     name=scored.get("name") or "?", mint=scored.get("mint", ""),
@@ -1889,6 +1911,7 @@ async def run_once() -> tuple[int, int]:
                     reason=(scored.get("trade_reasoning")
                             or f"confidence {scored.get('confidence_score', 0):.0f}/100"),
                     cls_label=_cls.get("label"),
+                    origin=_scan_origin, claude_note=_claude_note,
                 )
 
                 # Relay trade to subscribers (runs in background; delay=RELAY_DELAY)
