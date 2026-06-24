@@ -757,7 +757,7 @@ async def quality_grade(ca: str, window_min: float) -> str:
 
 # ── Phanes points: pure bracket on the post-call return ─────────────────────
 def phanes_points(mult, _mc=None) -> float:
-    """Points by return bracket. Wins scale with size; L=-1; rug=-2."""
+    """Points by return bracket. Wins scale with size; L=-1; rug=-1."""
     m = float(mult or 0.0)
     if m < 1.8:   return  0.0   # placeholder — wins/losses handled by status below
     if m < 5.0:   return  1.0
@@ -770,11 +770,14 @@ def phanes_points(mult, _mc=None) -> float:
 
 
 def token_points(status: str, ath_mult: float) -> float:
-    """Simple flat scoring: wins scale by bracket, L=-1, rug=-2."""
+    """Simple flat scoring: wins scale by bracket, L=-1, rug=-1.
+    A rug now costs the same as a loss (-1). Rugs are still TRACKED
+    separately (caller_breakdown counts them) — only the points penalty
+    changed; the 💀 TOP RUGS stats are unaffected."""
     if status == "win":
         return phanes_points(ath_mult)
     if status == "rug":
-        return -2.0
+        return -1.0   # same as a loss now (was -2)
     return -1.0  # loss
 
 
