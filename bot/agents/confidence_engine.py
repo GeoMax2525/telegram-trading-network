@@ -735,29 +735,31 @@ async def score_candidate(candidate: dict) -> dict:
         trail_enabled = True
         trail_trigger = 2.0
 
-    # Build trade reasoning — explains WHY this trade was opened
+    # Build trade reasoning — HONEST: reflects the PRACTICAL-FILTER decision
+    # (rule #2), not the old confidence components. The scanner buys because a
+    # token PASSED the practical gauntlet (mcap/liquidity/age/buy-pressure/
+    # rug-safety) — NOT because of a "pattern match" score or a placeholder
+    # "favorable market" number (both demoted to logging-only). We list only
+    # the real positive signals that actually influenced the trade.
     reasons = []
-    if fingerprint >= 60:
-        reasons.append(f"strong pattern match ({fingerprint:.0f})")
-    if insider >= 55:
-        reasons.append(f"insider wallet activity ({insider:.0f})")
-    if chart >= 60:
-        reasons.append(f"bullish chart ({chart:.0f})")
     if rug >= 80:
-        reasons.append(f"clean safety ({rug:.0f})")
-    if tg_boost > 0:
-        reasons.append(f"TG signal (+{tg_boost:.0f})")
-    if market >= 60:
-        reasons.append(f"favorable market ({market:.0f})")
+        reasons.append("rug-safe")
+    # Smart money is the one wallet signal that actually sizes the position.
+    if insider >= 55:
+        reasons.append(f"smart-money buying ({insider:.0f})")
     if candidate.get("gmgn_smart_money"):
         reasons.append("GMGN smart money")
     if candidate.get("gmgn_trending"):
         reasons.append("GMGN trending")
+    # Buy pressure — the real entry gate.
+    _b, _s = candidate.get("buys_m5"), candidate.get("sells_m5")
+    if isinstance(_b, (int, float)) and isinstance(_s, (int, float)) and _b > _s:
+        reasons.append(f"buy pressure {int(_b)}/{int(_s)} m5")
+    if tg_boost > 0:
+        reasons.append("4am-confirmed")
     mc_str = f"${mcap/1000:.0f}K" if mcap < 1_000_000 else f"${mcap/1_000_000:.1f}M"
-    trade_reasoning = (
-        f"Bought at {mc_str} MC | conf={confidence:.0f} | "
-        + ", ".join(reasons[:4]) if reasons else f"Bought at {mc_str} MC | conf={confidence:.0f} | baseline signals"
-    )
+    base = f"Bought at {mc_str} — passed scanner filters (liq/age/rug/buy-pressure)"
+    trade_reasoning = base + (" | " + ", ".join(reasons[:4]) if reasons else "")
 
     profile_tag_csv    = ",".join(pattern_tags)
     params_source = (
