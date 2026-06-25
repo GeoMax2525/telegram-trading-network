@@ -207,7 +207,23 @@ def test_claude_trail_override_respected():
 # ── Precedence: breakeven fires before profit_trail at exactly 1.0x ───────
 def test_breakeven_precedence_over_trail():
     d = decide_exit(mk(current_mult=1.0, peak_mult=3.0, age_hours=0.5), P)
-    assert d.reason == "breakeven_stop"  # not profit_trail
+    assert d.reason == "breakeven_stop"  # not profit_trail (scanner)
+
+
+# ── Capture fix: breakeven must NOT fire on 4am let-runners ───────────────
+def test_breakeven_skipped_for_4am():
+    # 4am runner peaked 2.5x then round-tripped to 1.0x — must NOT close via
+    # breakeven; the trail/moonbag protect it instead (this was capping capture).
+    d = decide_exit(mk(is_tg_signal=True, let_run=True,
+                       current_mult=1.0, peak_mult=2.5, age_hours=0.5), P)
+    assert d.reason != "breakeven_stop"
+
+
+def test_breakeven_reenabled_for_4am_by_param():
+    p = dict(P); p["tg_breakeven_enabled"] = 1.0
+    d = decide_exit(mk(is_tg_signal=True, let_run=True,
+                       current_mult=1.0, peak_mult=2.5, age_hours=0.5), p)
+    assert d.reason == "breakeven_stop"
 
 
 if __name__ == "__main__":

@@ -729,9 +729,9 @@ async def _build_hub_text(autotrade: bool) -> str:
     out.append(f"Today {perf_today_pnl:+.2f}  ·  WR {perf_wr}%  ·  {perf_closed} closed")
     out.append("")
 
-    # ── SOURCES — how each machine is performing (closed HQ trades, 7d) ───
+    # ── SOURCES — per TRUE source (4am/scanner/algo); bundle is an overlay ──
     out.append("📊 <b>SOURCES</b> <i>(7d)</i>")
-    _emoji = {"4AM": "⚡", "SCAN": "🔍", "ALGO": "🧪", "BNDL": "📦"}
+    _emoji = {"4AM": "⚡", "SCAN": "🔍", "ALGO": "🧪"}
     try:
         from datetime import datetime as _dtn, timedelta as _td
         from database.models import AsyncSessionLocal as _ASL, select as _sel, PaperTrade as _PT
@@ -748,15 +748,14 @@ async def _build_hub_text(autotrade: bool) -> str:
         def _bkt(t) -> str:
             p = (t.pattern_type or "").lower()
             if "algo:" in p:    return "ALGO"
-            if "bundle" in p:   return "BNDL"
             if "tg_signal" in p: return "4AM"
             return "SCAN"
 
-        _grp: dict = {"4AM": [], "SCAN": [], "ALGO": [], "BNDL": []}
+        _grp: dict = {"4AM": [], "SCAN": [], "ALGO": []}
         for _t in _rows:
             _grp[_bkt(_t)].append(_t)
         _any = False
-        for _k in ("4AM", "SCAN", "ALGO", "BNDL"):
+        for _k in ("4AM", "SCAN", "ALGO"):
             _g = _grp[_k]
             if not _g:
                 continue
@@ -767,6 +766,12 @@ async def _build_hub_text(autotrade: bool) -> str:
             _wr = int(_w / len(_g) * 100) if _g else 0
             _a = "▲" if _pnl >= 0 else "▼"
             out.append(f"{_emoji[_k]} <b>{_k}</b>  {_a} {_pnl:+.2f}  ·  {_w}-{_l}  ·  {_wr}%")
+        # Bundle overlay — subset of the above, not additive.
+        _bnd = [x for x in _rows if "bundle" in (x.pattern_type or "").lower()]
+        if _bnd:
+            _bp = sum((x.paper_pnl_sol or 0) for x in _bnd)
+            _ba = "▲" if _bp >= 0 else "▼"
+            out.append(f"📦 <i>of which bundled: {_ba} {_bp:+.2f} ({len(_bnd)})</i>")
         if not _any:
             out.append("<i>no closed trades yet</i>")
     except Exception:
@@ -2801,21 +2806,24 @@ async def cmd_sourcestats(message: Message):
             q = q.where(PaperTrade.closed_at >= cutoff)
         trades = list((await s.execute(q)).scalars().all())
 
+    # Bucket by TRUE SOURCE (4am / scanner / algo / migration). Bundle is NOT
+    # a source — it's a launch type that overlays the real sources. It's shown
+    # as a separate "of which bundled" overlay line so the per-source PnL is
+    # finally clean and attributable (was: bundle stole trades from 4am/scanner).
     def _bucket(t) -> str:
         p = (t.pattern_type or "").lower()
         if "algo:" in p:
             return "algo"
         if "migration_dip" in p:
             return "migration"
-        if "bundle" in p:
-            return "bundle"
         if "tg_signal" in p:
             return "4am"
         return "scanner"
 
-    groups: dict = {"4am": [], "scanner": [], "bundle": [], "migration": [], "algo": []}
+    groups: dict = {"4am": [], "scanner": [], "migration": [], "algo": []}
     for t in trades:
         groups[_bucket(t)].append(t)
+    bundled = [t for t in trades if "bundle" in (t.pattern_type or "").lower()]
 
     def _stats(rows) -> dict:
         n = len(rows)
@@ -2823,9 +2831,10 @@ async def cmd_sourcestats(message: Message):
         wins = sum(1 for r in rows if (r.paper_pnl_sol or 0) > 0)
         losses = n - wins
         wr = (wins / n * 100) if n else 0
-        return {"n": n, "pnl": pnl, "wins": wins, "losses": losses, "wr": wr}
+        best = max((r.peak_multiple or 0 for r in rows), default=0)
+        return {"n": n, "pnl": pnl, "wins": wins, "losses": losses, "wr": wr, "best": best}
 
-    labels = {"4am": "⚡ 4AM", "scanner": "🔍 SCANNER", "bundle": "📦 BUNDLE",
+    labels = {"4am": "⚡ 4AM", "scanner": "🔍 SCANNER",
               "migration": "🎓 MIGRATION DIP", "algo": "🧪 ALGOS"}
     lines = [
         f"📊 SOURCE BREAKDOWN ({window_label})",
@@ -2833,7 +2842,7 @@ async def cmd_sourcestats(message: Message):
         "",
     ]
     tot = _stats(trades)
-    for key in ("4am", "scanner", "bundle", "migration", "algo"):
+    for key in ("4am", "scanner", "migration", "algo"):
         st = _stats(groups[key])
         if st["n"] == 0:
             lines.append(f"{labels[key]}: no trades")
@@ -2843,6 +2852,16 @@ async def cmd_sourcestats(message: Message):
             f"{labels[key]}",
             f"  Trades: {st['n']}  |  {st['wins']}W / {st['losses']}L  ({st['wr']:.0f}% WR)",
             f"  PnL: {st['pnl']:+.3f} SOL  (avg {st['pnl']/st['n']:+.4f}/trade)",
+            f"  Best peak: {st['best']:.1f}x",
+            "",
+        ]
+    # Bundle overlay — a SUBSET of the sources above, not additive to the total.
+    bst = _stats(bundled)
+    if bst["n"] > 0:
+        lines += [
+            f"📦 of which BUNDLED  (subset, overlaps above)",
+            f"  Trades: {bst['n']}  |  {bst['wins']}W / {bst['losses']}L  ({bst['wr']:.0f}% WR)",
+            f"  PnL: {bst['pnl']:+.3f} SOL",
             "",
         ]
     lines += [
@@ -2850,6 +2869,80 @@ async def cmd_sourcestats(message: Message):
         f"TOTAL: {tot['n']} trades  |  {tot['wins']}W / {tot['losses']}L "
         f"({tot['wr']:.0f}% WR)",
         f"NET PnL: {tot['pnl']:+.3f} SOL",
+    ]
+    await message.reply("\n".join(lines), parse_mode=None)
+
+
+# ── /hourstats — which UTC hours are HOT vs COLD ──────────────────────────
+
+@router.message(Command("hourstats"))
+async def cmd_hourstats(message: Message):
+    """Per-UTC-hour edge: net PnL, W/L and best peak by the hour a trade OPENED.
+    Answers 'which time windows are hot'. Window: /hourstats 7 (days, default 7).
+    Read-only for now — once a clean week accrues we can size by hot/cold hours."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    from datetime import datetime, timedelta
+    from database.models import AsyncSessionLocal, select, PaperTrade
+
+    parts = (message.text or "").split()
+    days = 7.0
+    if len(parts) > 1:
+        try:
+            days = float(parts[1])
+        except ValueError:
+            pass
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    async with AsyncSessionLocal() as s:
+        trades = list((await s.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.opened_at >= cutoff,
+            )
+        )).scalars().all())
+
+    buckets: dict = {h: [] for h in range(24)}
+    for t in trades:
+        if t.opened_at is not None:
+            buckets[t.opened_at.hour].append(t)
+
+    rows = []
+    for h in range(24):
+        g = buckets[h]
+        if not g:
+            continue
+        pnl = sum((x.paper_pnl_sol or 0) for x in g)
+        wins = sum(1 for x in g if (x.paper_pnl_sol or 0) > 0)
+        best = max((x.peak_multiple or 0 for x in g), default=0)
+        rows.append((h, len(g), pnl, wins, best))
+
+    if not rows:
+        await message.reply("🕐 No closed trades in window.", parse_mode=None)
+        return
+
+    lines = [
+        f"🕐 HOUR-OF-DAY EDGE (UTC, {int(days)}d)",
+        "by the hour the trade OPENED",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+    for h, n, pnl, wins, best in rows:
+        mark = "🟢" if pnl >= 0 else "🔴"
+        wr = int(wins / n * 100) if n else 0
+        lines.append(
+            f"{mark} {h:02d}:00  {pnl:+.3f} SOL  {wins}/{n} ({wr}%)  pk {best:.0f}x"
+        )
+
+    hot = max(rows, key=lambda r: r[2])
+    cold = min(rows, key=lambda r: r[2])
+    lines += [
+        "",
+        f"🔥 Hottest: {hot[0]:02d}:00 UTC  ({hot[2]:+.3f} SOL)",
+        f"🧊 Coldest: {cold[0]:02d}:00 UTC  ({cold[2]:+.3f} SOL)",
+        "",
+        "Small sample early — needs a clean week before sizing by hour.",
     ]
     await message.reply("\n".join(lines), parse_mode=None)
 

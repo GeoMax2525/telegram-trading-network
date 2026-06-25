@@ -142,9 +142,16 @@ def decide_exit(pos: PositionState, p: dict) -> ExitDecision:
             and age >= (ts_min / 60.0) and peak < ts_thr and cur < ts_thr):
         return _close("time_stop", silent=True)
 
-    # 6. breakeven stop.
+    # 6. breakeven stop — DISABLED for 4am let-runners by default.
+    #    A 1.4x breakeven was closing fat-tail runners at 1.0x the instant they
+    #    wobbled, BEFORE the moonbag could ever form (capture ~0.13% of peak).
+    #    For 4am the moonbag (25% rides) + the wide profit-trail are the
+    #    protection — a breakeven stop fights the whole "let runners run"
+    #    thesis. Scanner KEEPS breakeven (it's a scalp source). Re-enable for
+    #    4am with /setparam tg_breakeven_enabled 1.
     be_trigger = float(p.get("breakeven_trigger", 2.0) or 2.0)
-    if peak >= be_trigger and cur <= 1.0:
+    be_applies = (not skip_fast) or (float(p.get("tg_breakeven_enabled", 0.0) or 0.0) >= 0.5)
+    if be_applies and peak >= be_trigger and cur <= 1.0:
         return _close("breakeven_stop", note=f"Peak {peak:.1f}x — protected the entry.")
 
     # 7. profit trail.

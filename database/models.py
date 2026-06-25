@@ -3849,6 +3849,8 @@ AGENT_PARAM_DEFAULTS = {
 
     "tg_respect_cold":      0.0,    # 1 = 4am pauses in COLD regime (default: 4am ignores cold)
     "tg_let_runners_run":   1.0,    # 1 = skip no_momentum + time_stop for 4am
+    "tg_breakeven_enabled": 0.0,    # 0 = NO breakeven stop on 4am (let the moonbag/trail
+                                    #     protect runners; 1.4x breakeven was capping capture)
     "tg_moonbag_pct":      25.0,    # % of a 4am position that NEVER stop-losses
                                     # (rides for the moon; the rest still SLs)
     "tg_moonbag_trail_pct": 0.60,   # moonbag trail width once it's running (wide)
