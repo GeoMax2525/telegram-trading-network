@@ -49,6 +49,7 @@ def _shadow_eval(pt, cfg, current_mult, peak_mult, age_hours, remaining,
             subscriber=pt.subscriber_id is not None,
             ladder_disabled=bool(getattr(pt, "claude_ladder_disabled", False)),
             trail_override=getattr(pt, "claude_trail_override_pct", None),
+            ride=(is_tg_signal or "algo:" in (pt.pattern_type or "").lower()),
         )
         _shadow[pt.id] = decide_exit(pos, params)
     except Exception as exc:
@@ -621,6 +622,12 @@ async def _check_open_trades(bot) -> None:
             _let_run = (is_tg_signal
                         and float(cfg.get("tg_let_runners_run", 1.0) or 0) >= 0.5)
             _skip_fast = _let_run
+            # Runner sources (4am + algos) ride the tail instead of capping at a
+            # fixed TP: scale-out banks the base hit, the trail rides the rest,
+            # and a 2x floor (armed once peak >= 3x) preserves the gain on faders.
+            _is_algo = "algo:" in (pt.pattern_type or "").lower()
+            _ride = ((is_tg_signal or _is_algo)
+                     and float(cfg.get("runner_ride_enabled", 1.0) or 0) >= 0.5)
             peak_mc = max(pt.peak_mc or 0, current_mc)
             peak_mult = max(pt.peak_multiple or 1.0, current_mult)
 
@@ -809,8 +816,15 @@ async def _check_open_trades(bot) -> None:
             # ── Profit protection ────────────────────────────────────────
             # Break-even SL: once peak crossed the breakeven trigger,
             # never let the trade close below 1.0x from here on.
+            # DISABLED for 4am let-runners (capture fix): a 1.4x breakeven was
+            # closing fat-tail runners at 1.0x the moment they wobbled, before
+            # the moonbag could ever form. 4am is protected by the moonbag +
+            # wide trail instead. Scanner KEEPS breakeven. Re-enable for 4am
+            # via /setparam tg_breakeven_enabled 1.
             be_trigger = float(cfg.get("breakeven_trigger", 2.0) or 2.0)
-            if peak_mult >= be_trigger and current_mult <= 1.0:
+            _be_applies = ((not _skip_fast)
+                           or float(cfg.get("tg_breakeven_enabled", 0.0) or 0.0) >= 0.5)
+            if _be_applies and peak_mult >= be_trigger and current_mult <= 1.0:
                 remaining_sol = sol * (remaining / 100.0)
                 pnl = round(realized + remaining_sol * (current_mult - 1), 4)
                 logger.info(
@@ -825,6 +839,31 @@ async def _check_open_trades(bot) -> None:
                     parse_mode="HTML",
                 )
                 continue
+
+            # ── RUNNER 2x PROFIT FLOOR ────────────────────────────────────
+            # Once a runner (4am/algo) has ridden to >= floor_arm (3x), never
+            # let the remaining chunk close below floor_lock (2x). This is the
+            # capital-preservation guarantee on the un-capped runner: the wide
+            # trail lets the big ones ride, but a token that hit 3x and fades
+            # always banks at least 2x on what's left.
+            if _ride:
+                _floor_arm = float(cfg.get("runner_floor_arm", 3.0) or 3.0)
+                _floor_lock = float(cfg.get("runner_floor_lock", 2.0) or 2.0)
+                if peak_mult >= _floor_arm and current_mult <= _floor_lock:
+                    remaining_sol = sol * (remaining / 100.0)
+                    pnl = round(realized + remaining_sol * (current_mult - 1), 4)
+                    logger.info(
+                        "Paper: PROFIT-FLOOR %s — peak=%.2fx now=%.2fx locked %.0fx pnl=%+.4f",
+                        name, peak_mult, current_mult, _floor_lock, pnl,
+                    )
+                    await _finalize_paper_close(
+                        bot, pt, "profit_floor", pnl, peak_mc, peak_mult,
+                        _close_card("🔒", f"PROFIT FLOOR — locked {_floor_lock:.0f}x",
+                                    name, current_mult, pnl, entry_mc, current_mc,
+                                    note=f"Peak {peak_mult:.1f}x — preserved the {_floor_lock:.0f}x floor."),
+                        parse_mode="HTML",
+                    )
+                    continue
 
             # Profit trailing stop: once peak crosses the profit trail
             # trigger, follow the peak down by trail width.
@@ -974,8 +1013,12 @@ async def _check_open_trades(bot) -> None:
                     logger.error("live_mirror partial(25) hook failed: %s", exc)
                 scale_out_done = True
 
-            # Check TP — only on remaining position
-            if current_mult >= pt.take_profit_x:
+            # Check TP — only on remaining position.
+            # SKIPPED for runner sources (4am/algos): a fixed TP caps the tail
+            # at 5x/8x on a token that could do 50x. Instead the scale-out
+            # ladder banks the base hit and the trail rides the rest (with the
+            # 2x floor as the downside guarantee). Scanner keeps its hard TP.
+            if not _ride and current_mult >= pt.take_profit_x:
                 # Close remaining position at TP
                 remaining_sol = sol * (remaining / 100.0)
                 pnl = round(realized + remaining_sol * (current_mult - 1), 4)

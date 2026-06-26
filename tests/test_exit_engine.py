@@ -226,6 +226,41 @@ def test_breakeven_reenabled_for_4am_by_param():
     assert d.reason == "breakeven_stop"
 
 
+# ── Runner ride: no fixed TP cap + 2x profit floor ───────────────────────
+def test_runner_no_tp_cap():
+    # Runner at 5x with an 8x... no, _tp_x=5: a ride source must NOT tp-close.
+    p = dict(P); p["_tp_x"] = 5.0
+    d = decide_exit(mk(is_tg_signal=True, let_run=True, ride=True,
+                       current_mult=5.0, peak_mult=5.0, age_hours=0.5,
+                       remaining_pct=35.0), p)
+    assert d.reason != "tp_hit"
+
+
+def test_scanner_keeps_tp_cap():
+    # Non-ride (scanner) at/above TP still takes profit. remaining_pct=60 so the
+    # scale-out ladder (which precedes TP) doesn't fire first.
+    p = dict(P); p["_tp_x"] = 3.0
+    d = decide_exit(mk(is_tg_signal=False, ride=False, remaining_pct=60.0,
+                       current_mult=3.0, peak_mult=3.0, age_hours=0.5), p)
+    assert d.action == "close" and d.reason == "tp_hit"
+
+
+def test_runner_2x_floor():
+    # Rode to 3x then faded to 2x → lock the 2x floor (not give it all back).
+    d = decide_exit(mk(is_tg_signal=True, let_run=True, ride=True,
+                       current_mult=2.0, peak_mult=3.2, age_hours=0.5,
+                       remaining_pct=35.0), P)
+    assert d.action == "close" and d.reason == "profit_floor"
+
+
+def test_runner_floor_not_armed_below_3x():
+    # Peaked only 2.5x → floor not armed yet; 2x pullback should NOT floor-close.
+    d = decide_exit(mk(is_tg_signal=True, let_run=True, ride=True,
+                       current_mult=2.0, peak_mult=2.5, age_hours=0.5,
+                       remaining_pct=35.0), P)
+    assert d.reason != "profit_floor"
+
+
 if __name__ == "__main__":
     import subprocess
     raise SystemExit(subprocess.call(["pytest", "-v", __file__]))

@@ -3851,6 +3851,12 @@ AGENT_PARAM_DEFAULTS = {
     "tg_let_runners_run":   1.0,    # 1 = skip no_momentum + time_stop for 4am
     "tg_breakeven_enabled": 0.0,    # 0 = NO breakeven stop on 4am (let the moonbag/trail
                                     #     protect runners; 1.4x breakeven was capping capture)
+    # Runner ride + profit floor (4am + algos): drop the fixed TP so the last
+    # chunk rides the trail to catch the tail, but lock a 2x floor once it has
+    # ridden to 3x so faders always preserve at least 2x on what's left.
+    "runner_ride_enabled":  1.0,    # 1 = no fixed TP cap on 4am/algos (ride the trail)
+    "runner_floor_arm":     3.0,    # arm the floor once peak >= this multiple
+    "runner_floor_lock":    2.0,    # ...then never close the runner below this multiple
     "tg_moonbag_pct":      25.0,    # % of a 4am position that NEVER stop-losses
                                     # (rides for the moon; the rest still SLs)
     "tg_moonbag_trail_pct": 0.60,   # moonbag trail width once it's running (wide)

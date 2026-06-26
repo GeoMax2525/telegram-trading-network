@@ -50,6 +50,7 @@ class PositionState:
     subscriber: bool = False       # relay row (no scale-out / moonbag)
     ladder_disabled: bool = False  # Claude let it ride (no auto-ladder)
     trail_override: float | None = None   # Claude per-position trail width
+    ride: bool = False             # runner source (4am/algo): no fixed TP cap, 2x floor
 
 
 @dataclass
@@ -154,6 +155,15 @@ def decide_exit(pos: PositionState, p: dict) -> ExitDecision:
     if be_applies and peak >= be_trigger and cur <= 1.0:
         return _close("breakeven_stop", note=f"Peak {peak:.1f}x — protected the entry.")
 
+    # 6.5 RUNNER 2x PROFIT FLOOR — once a runner (4am/algo) has ridden to >=3x,
+    #     never let the remaining chunk close below 2x. Capital-preservation
+    #     guarantee on the un-capped runner; the wide trail rides the big ones.
+    if pos.ride:
+        floor_arm = float(p.get("runner_floor_arm", 3.0) or 3.0)
+        floor_lock = float(p.get("runner_floor_lock", 2.0) or 2.0)
+        if peak >= floor_arm and cur <= floor_lock:
+            return _close("profit_floor", note=f"Peak {peak:.1f}x — locked the {floor_lock:.0f}x floor.")
+
     # 7. profit trail.
     if pos.is_tg_signal:
         pt_trigger = float(p.get("tg_signal_trail_trigger", 1.5) or 1.5)
@@ -181,9 +191,11 @@ def decide_exit(pos: PositionState, p: dict) -> ExitDecision:
                                 new_realized=round(realized + sold, 4),
                                 note=f"Sold 25% at {cur:.1f}x")
 
-    # 9. take-profit.
+    # 9. take-profit — SKIPPED for runner sources (4am/algos): the scale-out
+    #    ladder + trail + 2x floor ride the tail instead of capping at a fixed TP.
     tp_x = float(p.get("_tp_x") or 0)
-    if tp_x > 0 and cur >= tp_x:
+    ride_on = pos.ride and float(p.get("runner_ride_enabled", 1.0) or 0) >= 0.5
+    if tp_x > 0 and cur >= tp_x and not ride_on:
         return _close("tp_hit", note="🎯 Target reached.")
 
     # 10. trailing stop.
