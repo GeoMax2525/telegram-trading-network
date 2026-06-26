@@ -3925,6 +3925,8 @@ AGENT_PARAM_DEFAULTS = {
     "algo_tp_x":             5.0,   # algo trade take-profit
     "algo_sl_pct":          25.0,   # algo trade stop-loss
 
+    "tg_signal_sl_pct":    38.0,    # 4am initial stop-loss % (wide — survive the
+                                    #   early dump-then-moon chop; was a tight 20%)
     "tg_respect_cold":      0.0,    # 1 = 4am pauses in COLD regime (default: 4am ignores cold)
     "tg_let_runners_run":   1.0,    # 1 = skip no_momentum + time_stop for 4am
     "tg_breakeven_enabled": 0.0,    # 0 = NO breakeven stop on 4am (let the moonbag/trail

@@ -138,7 +138,33 @@ async def _broadcast_entry(
             lines += [f"• {_esc(b[:80])}" for b in bullets[:6]]
         if claude_note:
             lines += ["", "🤖 <b>Claude:</b>", f"<i>{_esc(str(claude_note)[:240])}</i>"]
-        lines += ["", strat_head, strat_body]
+
+        # Strategy block — show the ACTIVE exit method. When the SmartScaling
+        # manager is on (default), render its real scale-ladder + runner trail
+        # for this trade type instead of the legacy "TP | SL | cut flat" line.
+        _strat_lines = None
+        try:
+            from database.models import get_params as _gp, get_scaling_config
+            if float((await _gp("scaling_manager_enabled")).get(
+                    "scaling_manager_enabled", 0.0) or 0) >= 0.5:
+                _ctype = ("bundle" if source in ("bundle", "concentration")
+                          else "high_conviction" if source == "4am" else "conservative")
+                _sc = await get_scaling_config(_ctype)
+                _ladder = " · ".join(
+                    f"{int(s['sell_pct'])}%@{s['at']:g}x" for s in _sc["scales"])
+                _runner = int(100 - sum(s["sell_pct"] for s in _sc["scales"]))
+                _floor = next((s["stop"][1] for s in _sc["scales"]
+                               if s["stop"][0] == "mult"), None)
+                _trail = int(_sc["runner_trail_pct"] * 100)
+                _floor_txt = f" · floor {_floor:g}x" if _floor else ""
+                _strat_lines = [
+                    "", "⚡ <b>Strategy:</b> Scale &amp; ride",
+                    f"📈 Scale {_ladder}",
+                    f"🏃 {_runner}% runner · {_trail}% trail (arms 3x){_floor_txt}",
+                ]
+        except Exception:
+            _strat_lines = None
+        lines += _strat_lines if _strat_lines else ["", strat_head, strat_body]
         text = "\n".join(lines)
 
         if bot_ref is not None:
@@ -1148,7 +1174,7 @@ async def autobuy_tg_signals(tg_candidates: list) -> None:
 
         try:
             state.paper_balance = await compute_paper_balance(state.PAPER_STARTING_BALANCE)
-            tg_probe_cfg = await get_params("paper_probe_size", "tg_respect_cold")
+            tg_probe_cfg = await get_params("paper_probe_size", "tg_respect_cold", "tg_signal_sl_pct")
             tg_paper_sol = float(tg_probe_cfg.get("paper_probe_size") or 0.2)
 
             # 4am is a CLEAN snipe (rule #1) — NO cold-pause filter. Regime
@@ -1182,7 +1208,8 @@ async def autobuy_tg_signals(tg_candidates: list) -> None:
                 continue
 
             from bot.agents.entry_filter import classify_launch, bundle_trade_params
-            tg_tp_x, tg_sl_pct = 8.0, 20.0
+            tg_tp_x = 8.0
+            tg_sl_pct = float(tg_probe_cfg.get("tg_signal_sl_pct") or 38.0)
             tg_pattern = "tg_signal"
             tg_cls = {"kind": None, "label": "", "wallets": []}
             try:

@@ -327,6 +327,19 @@ async def _alert(algo, data, growth, bought=False) -> None:
                 f"growth {growth or 0:.0f}%\n"
                 f"{data['desc_len']} char desc · {data['reply_count']} replies {soc}\n"
                 f"<code>{_esc(data['mint'])}</code>")
+        # Strategy line on AUTO BUYs — algos ride the high-conviction ladder.
+        if bought:
+            try:
+                from database.models import get_params, get_scaling_config
+                if float((await get_params("scaling_manager_enabled")).get(
+                        "scaling_manager_enabled", 0.0) or 0) >= 0.5:
+                    _sc = await get_scaling_config("high_conviction")
+                    _lad = " · ".join(f"{int(s['sell_pct'])}%@{s['at']:g}x" for s in _sc["scales"])
+                    _run = int(100 - sum(s["sell_pct"] for s in _sc["scales"]))
+                    text += (f"\n\n⚡ <b>Scale &amp; ride:</b> {_lad}"
+                             f"\n🏃 {_run}% runner · {int(_sc['runner_trail_pct']*100)}% trail")
+            except Exception:
+                pass
         try:
             await bot_ref.send_message(CALLER_GROUP_ID, text,
                                        message_thread_id=SCAN_TOPIC_ID, parse_mode="HTML")

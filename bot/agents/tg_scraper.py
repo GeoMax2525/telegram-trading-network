@@ -343,7 +343,7 @@ async def _handle_message(event, channel_name: str) -> None:
             if entry_mc <= 0:
                 skip_reason = "dexscreener_zero_mc"
             else:
-                tg_cfg = await get_params("paper_probe_size", "tg_signal_tp_x")
+                tg_cfg = await get_params("paper_probe_size", "tg_signal_tp_x", "tg_signal_sl_pct")
                 tg_paper_sol = float(tg_cfg.get("paper_probe_size") or 0.2)
                 tg_tp_x = float(tg_cfg.get("tg_signal_tp_x") or 8.0)
 
@@ -371,7 +371,7 @@ async def _handle_message(event, channel_name: str) -> None:
                     #   - say YES and override size_sol / tp_x / sl_pct
                     # If Claude unavailable / times out / over budget,
                     # the rule defaults below run unchanged.
-                    tg_sl_pct = 20.0
+                    tg_sl_pct = float(tg_cfg.get("tg_signal_sl_pct") or 38.0)
                     tg_trade_reasoning = f"AUTO-BUY [fast-path] from {channel_name}"
                     try:
                         from bot.agents.claude_strategist import decide_entry
