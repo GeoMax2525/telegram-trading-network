@@ -44,20 +44,27 @@ from typing import Optional
 CONFIGS = {
     "high_conviction": {                       # 4am / high_conviction / algo
         "scales": [
-            {"at": 2.0, "sell_pct": 28.0, "stop": ("mult", 1.65)},
-            {"at": 4.5, "sell_pct": 22.0, "stop": ("current",)},
-            {"at": 8.0, "sell_pct": 12.0, "stop": ("current",)},
+            {"at": 2.0, "sell_pct": 28.0, "stop": ("mult", 1.65)},  # lock a 1.65x floor
+            {"at": 4.5, "sell_pct": 22.0, "stop": ("none",)},       # let the WIDE TRAIL govern
+            {"at": 8.0, "sell_pct": 12.0, "stop": ("none",)},       # (engaged once peak >= 3x)
         ],
         "runner_trail_pct": 0.35,
     },
     "conservative": {                          # scanner / normal
         "scales": [
             {"at": 2.0, "sell_pct": 35.0, "stop": ("mult", 1.50)},
-            {"at": 5.0, "sell_pct": 20.0, "stop": ("current",)},
+            {"at": 5.0, "sell_pct": 20.0, "stop": ("none",)},
         ],
         "runner_trail_pct": 0.26,
     },
 }
+
+# Once peak reaches this, the wide trailing stop takes over from the fixed
+# floor — even mid-ladder. This is the "Runner Protection" layer: it gives the
+# position breathing room (a 35% pullback) instead of a tight lock that stops
+# you out on normal volatility before the real run. Below this, only the 1.65x
+# floor from scale-1 protects (plus the base SL handled by the monitor).
+RUNNER_TRAIL_ARM = 3.0
 
 TYPE_ALIASES = {
     "4am": "high_conviction", "high_conviction": "high_conviction",
@@ -196,10 +203,12 @@ class SmartScalingExitManager:
                 and (self._runner_active or not self.is_let_run)):
             return self._do_exit(current_price, mult)
 
-        # 3) RUNNER TRAIL — once every tier is sold, ratchet the trailing stop UP.
-        #    The runner uses ONLY this % trail (and the locked floor from the last
-        #    ratchet, whichever is higher). Never a hard milestone stop.
-        if self._runner_active:
+        # 3) WIDE TRAIL — engages once the runner is active OR peak >= 3x (the
+        #    Runner-Protection layer). Ratchets the stop UP with the peak at the
+        #    trail width, but never below the locked floor from scale-1. This
+        #    replaces the old tight per-tier lock that would stop a runner out on
+        #    a normal pullback (e.g. 4.5x → 3.6x). The 35% trail lets it breathe.
+        if self._runner_active or self.peak_price >= RUNNER_TRAIL_ARM:
             trailed = self.peak_price * (1.0 - self._cfg["runner_trail_pct"])
             if self.current_stop_price is None or trailed > self.current_stop_price:
                 self.current_stop_price = trailed
@@ -222,8 +231,9 @@ class SmartScalingExitManager:
         self.current_position_pct = max(self.current_position_pct - sell_pct, 0.0)
         self.scales_done.append(scale["at"])
         new_stop = self._stop_from_rule(scale["stop"], price)
-        self.current_stop_price = (new_stop if self.current_stop_price is None
-                                   else max(self.current_stop_price, new_stop))
+        if new_stop is not None:   # ("none",) tiers leave the stop to the trail
+            self.current_stop_price = (new_stop if self.current_stop_price is None
+                                       else max(self.current_stop_price, new_stop))
         if self._next_scale() is None:
             self._runner_active = True
         reason = (f"Scale @ {mult:.2f}x — sold {sell_pct:.0f}% (orig), "
@@ -247,6 +257,8 @@ class SmartScalingExitManager:
             return self.entry_price * rule[1]
         if mode == "current":
             return price
+        if mode == "none":          # leave the stop to the wide trail
+            return None
         raise ValueError(f"unknown stop rule {rule!r}")
 
     def _frac_of_remaining(self, sell_pct_of_orig):

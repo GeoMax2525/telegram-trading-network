@@ -28,22 +28,37 @@ def test_runner_left_is_38pct_after_three_scales():
 
 def test_stop_ratchets_up_only():
     m = _mgr("4am")
-    m.on_price_update(2.0)            # stop → 1.65
-    m.on_price_update(4.5)            # stop → 4.5 (current)
-    assert m.current_stop_price >= 4.5
-    # a lower-price tick must never lower the stop
-    m.on_price_update(3.0)
-    assert m.current_stop_price >= 4.5
+    m.on_price_update(2.0)            # scale-1 → fixed floor 1.65
+    m.on_price_update(4.5)            # scale-2 (none) → stop stays 1.65 this tick
+    m.on_price_update(4.5)            # peak 4.5 ≥ 3 → wide trail: 4.5*0.65 = 2.925
+    assert 1.65 < m.current_stop_price < 4.5
+    prev = m.current_stop_price
+    m.on_price_update(3.5)            # lower tick must never lower the stop
+    assert m.current_stop_price == prev
 
 
 def test_runner_exits_on_trail_not_tp():
     m = _mgr("4am")
     for x in [2.0, 4.5, 8.0, 12.0]:
-        m.on_price_update(x)
-    # peak 12x, 35% trail → stop ~7.8x; but milestone lock from 8x is 8.0 → max
-    r = m.on_price_update(7.9)
-    # 7.9 is above the 8.0 lock? no — 7.9 < 8.0 → exit at the locked 8x floor
+        m.on_price_update(x)         # peak 12x → trail stop 12*0.65 = 7.8x
+    r = m.on_price_update(7.7)       # below 7.8 trail → runner exits (not a TP cap)
     assert r["action"] == "exit"
+
+
+def test_45x_worst_case_is_wide_trail_not_2x():
+    """Your question: if it hits 4.5x, what's the worst stop-out? With the wide
+    trail it's ~2.9x (peak*0.65), NOT 2x and NOT a tight 4.5x lock — and it
+    ratchets up as the token climbs, so a normal pullback doesn't stop you out."""
+    m = _mgr("4am")
+    m.on_price_update(2.0)
+    m.on_price_update(4.5)
+    m.on_price_update(4.5)           # arm the trail at peak 4.5 → stop ~2.925
+    stop = m.current_stop_price
+    assert 2.5 < stop < 3.5          # breathing room, well above 2x
+    # a normal pullback to 3.6x must NOT stop out (3.6 > ~2.9)
+    assert m.on_price_update(3.6)["action"] != "exit"
+    # a real fade to 2.9x DOES exit (the floor caught it)
+    assert m.on_price_update(2.9)["action"] == "exit"
 
 
 def test_conservative_uses_two_tiers():
