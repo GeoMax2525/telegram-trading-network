@@ -509,6 +509,9 @@ class PaperTrade(Base):
     # Signal source label (algo name, channel name) — used by algo_stats and the
     # /hub Open Plays source tag. open_paper_trade(channel_name=...) writes here.
     channel_name      = Column(String(64),  nullable=True)
+    # SmartScalingExitManager state (persisted between monitor polls).
+    current_stop_mult = Column(Float,       nullable=True)      # ratcheted stop (multiple)
+    scale_tier        = Column(Integer,     nullable=False, default=0)  # tiers sold so far
     opened_at         = Column(DateTime,    default=datetime.utcnow, nullable=False)
     closed_at         = Column(DateTime,    nullable=True)
     # Post-close tracking (filled by monitor over 24h after close)
@@ -708,6 +711,8 @@ _NEW_PAPER_TRADE_COLS = [
     ("trade_reasoning",   "TEXT"),
     ("close_commentary",  "TEXT"),
     ("channel_name",      "VARCHAR(64)"),
+    ("current_stop_mult", "REAL"),
+    ("scale_tier",        "INTEGER DEFAULT 0"),
 ]
 
 _NEW_AI_TRADE_PARAMS_COLS = [
@@ -2807,6 +2812,79 @@ async def algo_stats(name: str, days: float = 7.0) -> dict:
             "best": best, "pnl": pnl}
 
 
+# ── SmartScalingExitManager config (DB-backed, tuned by scaling_optimizer) ────
+
+class ScalingConfig(Base):
+    """Per-trade-type scaling/trail config for the SmartScalingExitManager.
+    Lives in the DB so the learning loop can tune it without a deploy.
+    trade_type is the CANONICAL key: high_conviction / conservative / bundle."""
+    __tablename__ = "scaling_configs"
+    trade_type       = Column(String(24),  primary_key=True)
+    scales_json      = Column(Text,        nullable=False)   # JSON list of tiers
+    runner_trail_pct = Column(Float,       nullable=False)
+    updated_at       = Column(DateTime,    default=datetime.utcnow)
+    update_count     = Column(Integer,     default=0)        # how many times tuned
+
+
+async def seed_default_scaling_configs() -> int:
+    """Seed the 3 canonical configs from the manager's code defaults (idempotent)."""
+    import json as _json
+    from bot.smart_scaling_exit import default_config
+    added = 0
+    async with AsyncSessionLocal() as s:
+        for key in ("high_conviction", "conservative", "bundle"):
+            if await s.get(ScalingConfig, key) is None:
+                cfg = default_config(key)
+                s.add(ScalingConfig(
+                    trade_type=key,
+                    scales_json=_json.dumps(cfg["scales"]),
+                    runner_trail_pct=cfg["runner_trail_pct"],
+                ))
+                added += 1
+        if added:
+            await s.commit()
+    return added
+
+
+async def get_scaling_config(trade_type: str) -> dict:
+    """Return {scales, runner_trail_pct} for a canonical type. Falls back to the
+    code default if the row is missing (so the manager never breaks)."""
+    import json as _json
+    from bot.smart_scaling_exit import default_config
+    async with AsyncSessionLocal() as s:
+        row = await s.get(ScalingConfig, trade_type)
+        if row is None:
+            return default_config(trade_type)
+        try:
+            return {"scales": _json.loads(row.scales_json),
+                    "runner_trail_pct": float(row.runner_trail_pct)}
+        except Exception:
+            return default_config(trade_type)
+
+
+async def update_scaling_config(trade_type: str, scales=None,
+                                runner_trail_pct=None) -> bool:
+    """Persist a tuned config (used by scaling_optimizer)."""
+    import json as _json
+    async with AsyncSessionLocal() as s:
+        row = await s.get(ScalingConfig, trade_type)
+        if row is None:
+            return False
+        if scales is not None:
+            row.scales_json = _json.dumps(scales)
+        if runner_trail_pct is not None:
+            row.runner_trail_pct = float(runner_trail_pct)
+        row.updated_at = datetime.utcnow()
+        row.update_count = (row.update_count or 0) + 1
+        await s.commit()
+        return True
+
+
+async def get_all_scaling_configs() -> list["ScalingConfig"]:
+    async with AsyncSessionLocal() as s:
+        return list((await s.execute(select(ScalingConfig))).scalars().all())
+
+
 class DailyRiskLedger(Base):
     """Persistent daily live-risk state — survives restarts/redeploys so the
     spend cap, count cap and LOSS circuit breaker actually hold (the in-memory
@@ -3857,6 +3935,14 @@ AGENT_PARAM_DEFAULTS = {
     "runner_ride_enabled":  1.0,    # 1 = no fixed TP cap on 4am/algos (ride the trail)
     "runner_floor_arm":     3.0,    # arm the floor once peak >= this multiple
     "runner_floor_lock":    2.0,    # ...then never close the runner below this multiple
+    # ── SmartScalingExitManager (new modular exit method) ────────────────────
+    # When on, the manager owns scale-outs + ratcheting stop + runner trail
+    # (replacing the inline breakeven/scale/trail/TP block). The base SL still
+    # protects the sub-2x downside; the hard rules (eject/timeout/bundle) stay.
+    "scaling_manager_enabled": 1.0,  # 1 = use the manager for paper exits
+    "scaling_learn_enabled":   1.0,  # 1 = let scaling_optimizer tune the configs
+    "scaling_optimizer_interval_hours": 24.0,
+    "scaling_optimizer_min_trades":     20.0,  # per type, before tuning kicks in
     "tg_moonbag_pct":      25.0,    # % of a 4am position that NEVER stop-losses
                                     # (rides for the moon; the rest still SLs)
     "tg_moonbag_trail_pct": 0.60,   # moonbag trail width once it's running (wide)

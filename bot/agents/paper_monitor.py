@@ -497,6 +497,9 @@ async def _check_open_trades(bot) -> None:
         "time_stop_minutes", "entry_eject_after_sec", "entry_eject_peak_mult",
         "bundle_time_exit_min", "bundle_time_exit_mult",
         "tg_let_runners_run", "tg_moonbag_pct", "tg_moonbag_trail_pct",
+        "tg_breakeven_enabled", "runner_ride_enabled",
+        "runner_floor_arm", "runner_floor_lock",
+        "scaling_manager_enabled",
     )
 
     for pt in trades:
@@ -811,6 +814,115 @@ async def _check_open_trades(bot) -> None:
                 await _finalize_silent_close(
                     pt, "time_stop", pnl, peak_mc, peak_mult,
                 )
+                continue
+
+            # ── SMART SCALING EXIT MANAGER (new modular method) ──────────
+            # When enabled, the manager OWNS the profit side: tiered scale-outs,
+            # ratcheting stop, runner trail. It replaces the inline breakeven/
+            # scale/trail/TP block below (we always `continue` out of here so
+            # that legacy code only runs when the manager is off). The hard
+            # rules above already ran; the base SL below handles the sub-2x
+            # downside (the manager only arms a stop once it reaches 2x). The
+            # manager's tiered runner SUBSUMES the old moonbag.
+            if float(cfg.get("scaling_manager_enabled", 0.0) or 0) >= 0.5:
+                from bot.smart_scaling_exit import SmartScalingExitManager
+                from database.models import get_scaling_config
+                _p = (pt.pattern_type or "").lower()
+                if "bundle" in _p:
+                    _stype = "bundle"
+                elif "tg_signal" in _p or "algo:" in _p:
+                    _stype = "high_conviction"
+                else:
+                    _stype = "conservative"
+                _scfg = await get_scaling_config(_stype)
+                _mgr = SmartScalingExitManager().start_position(
+                    entry_price=1.0, trade_type=_stype, is_let_run=_let_run, config=_scfg)
+                _mgr.rehydrate(remaining_pct=remaining, peak_mult=peak_mult,
+                               current_stop=getattr(pt, "current_stop_mult", None),
+                               scale_tier=getattr(pt, "scale_tier", 0) or 0)
+                _res = _mgr.on_price_update(current_mult)
+                _act = _res["action"]
+
+                if _act == "scale":
+                    sold_pct = _res["sell_pct"]                       # % of original
+                    sold_sol = sol * (sold_pct / 100.0) * (current_mult - 1.0)
+                    new_remaining = _res["remaining_pct"]
+                    try:
+                        async with AsyncSessionLocal() as sess:
+                            tr = await sess.get(PaperTrade, pt.id)
+                            if tr:
+                                tr.remaining_pct = new_remaining
+                                tr.realized_pnl_sol = round(realized + sold_sol, 4)
+                                tr.current_stop_mult = _res["new_stop"]
+                                tr.scale_tier = _res["scale_tier"]
+                                await sess.commit()
+                    except Exception as exc:
+                        logger.error("scaling persist(scale) failed: %s", exc)
+                    src_tag = ("⚡ 4AM" if is_tg_signal
+                               else ("🧪 Algo" if _is_algo else "🔍 Scanner"))
+                    _txt = "\n".join([
+                        f"📈 PAPER — SCALE {sold_pct:.0f}% ({src_tag})",
+                        f"🪙 {name} | {current_mult:.1f}x | +{sold_sol:.4f} SOL",
+                        f"Stop→{_res['new_stop']:.2f}x · {new_remaining:.0f}% riding",
+                    ])
+                    try:
+                        await bot.send_message(CALLER_GROUP_ID, _txt,
+                                               message_thread_id=SCAN_TOPIC_ID)
+                    except Exception:
+                        pass
+                    try:
+                        from bot.community_feed import post_to_community
+                        await post_to_community(bot, _txt)
+                    except Exception:
+                        pass
+                    try:
+                        from bot.live_mirror import mirror_partial
+                        await mirror_partial(pt.id, pt.token_address,
+                                             _res["sell_fraction_of_remaining"])
+                    except Exception as exc:
+                        logger.error("scaling mirror_partial failed: %s", exc)
+                    continue
+
+                if _act == "exit":
+                    remaining_sol = sol * (remaining / 100.0)
+                    pnl = round(realized + remaining_sol * (current_mult - 1.0), 4)
+                    await _finalize_paper_close(
+                        bot, pt, "scaled_exit", pnl, peak_mc, peak_mult,
+                        _close_card("🏁", "RUNNER EXIT — trail/stop", name, current_mult,
+                                    pnl, entry_mc, current_mc, note=_res["reason"]),
+                        parse_mode="HTML",
+                    )
+                    continue
+
+                if _act == "trail":
+                    try:
+                        async with AsyncSessionLocal() as sess:
+                            tr = await sess.get(PaperTrade, pt.id)
+                            if tr:
+                                tr.current_stop_mult = _res["new_stop"]
+                                await sess.commit()
+                    except Exception as exc:
+                        logger.error("scaling persist(trail) failed: %s", exc)
+                    continue
+
+                # action None → base SL guards the sub-2x downside (before the
+                # manager has armed any stop). Then continue so legacy profit
+                # logic never runs while the manager is the active method.
+                _slt = 1.0 - ((pt.stop_loss_pct or 30.0) / 100.0)
+                _grace = (10.0 if is_tg_signal else 5.0) / 60.0
+                _hit = (current_mult <= 0.50) if age_hours < _grace else (current_mult <= _slt)
+                if _hit:
+                    _slip = float(cfg.get("paper_stop_slippage_pct", 15.0) or 15.0) / 100.0
+                    _fill = current_mult * (1.0 - _slip)
+                    remaining_sol = sol * (remaining / 100.0)
+                    pnl = round(realized - remaining_sol * (1.0 - _fill), 4)
+                    await _finalize_paper_close(
+                        bot, pt, "sl_hit", pnl, peak_mc, peak_mult,
+                        _close_card("🛑", "STOP LOSS", name, current_mult, pnl,
+                                    entry_mc, current_mc,
+                                    note="Base SL — never reached scale 1."),
+                        parse_mode="HTML",
+                    )
                 continue
 
             # ── Profit protection ────────────────────────────────────────

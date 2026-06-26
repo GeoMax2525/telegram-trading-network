@@ -152,6 +152,11 @@ async def main() -> None:
     if algos_added:
         logger.info("Seeded %d custom algos (X-FILES, ZANZIBAR, …)", algos_added)
 
+    from database.models import seed_default_scaling_configs
+    sc_added = await seed_default_scaling_configs()
+    if sc_added:
+        logger.info("Seeded %d scaling configs (smart exit manager)", sc_added)
+
     # Restore trade mode from DB (survives restarts)
     from bot import state as _state
     mode_val = await get_param("trade_mode")
@@ -192,6 +197,8 @@ async def main() -> None:
     asyncio.create_task(fouram_loop())   # 4am buys — decoupled from the scanner
     from bot.agents.algo_engine import algo_engine_loop
     asyncio.create_task(algo_engine_loop())  # custom algos (gated by algo_engine_enabled)
+    from bot.agents.scaling_optimizer import scaling_optimizer_loop
+    asyncio.create_task(scaling_optimizer_loop())  # learns scaling configs (gated by scaling_learn_enabled)
     logger.info("Algo engine: queued (gated by algo_engine_enabled)")
     asyncio.create_task(learning_loop(bot))
     asyncio.create_task(paper_monitor_loop(bot))
