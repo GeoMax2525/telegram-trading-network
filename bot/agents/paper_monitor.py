@@ -495,6 +495,7 @@ async def _check_open_trades(bot) -> None:
         "tg_signal_trail_pct", "dead_token_threshold_usd",
         "paper_stop_slippage_pct",
         "time_stop_minutes", "entry_eject_after_sec", "entry_eject_peak_mult",
+        "momentum_eject_enabled",
         "bundle_time_exit_min", "bundle_time_exit_mult",
         "tg_let_runners_run", "tg_moonbag_pct", "tg_moonbag_trail_pct",
         "tg_breakeven_enabled", "runner_ride_enabled",
@@ -624,13 +625,15 @@ async def _check_open_trades(bot) -> None:
             # proved runners peak hours later, so 4am must survive the timeouts.
             _let_run = (is_tg_signal
                         and float(cfg.get("tg_let_runners_run", 1.0) or 0) >= 0.5)
-            _skip_fast = _let_run
             # Runner sources (4am + algos) ride the tail instead of capping at a
-            # fixed TP: scale-out banks the base hit, the trail rides the rest,
-            # and a 2x floor (armed once peak >= 3x) preserves the gain on faders.
+            # fixed TP, AND skip the early killers (no_momentum eject + time_stop)
+            # — an early dip is the NORMAL dump-then-moon pattern for a runner, so
+            # ejecting at 90s kills the exact tokens we want. They still recycle
+            # flat capital via the slower expired / hard-timeout cleanups.
             _is_algo = "algo:" in (pt.pattern_type or "").lower()
             _ride = ((is_tg_signal or _is_algo)
                      and float(cfg.get("runner_ride_enabled", 1.0) or 0) >= 0.5)
+            _skip_fast = _let_run or _ride
             peak_mc = max(pt.peak_mc or 0, current_mc)
             peak_mult = max(pt.peak_multiple or 1.0, current_mult)
 
@@ -746,7 +749,10 @@ async def _check_open_trades(bot) -> None:
             eject_after_h = float(cfg.get("entry_eject_after_sec", 90.0) or 90.0) / 3600.0
             eject_peak = float(cfg.get("entry_eject_peak_mult", 1.10) or 1.10)
             _ts_min = float(cfg.get("time_stop_minutes", 5.0) or 5.0)
-            if (not _skip_fast
+            # Global kill-switch — /setparam momentum_eject_enabled 0 disables the
+            # 90s DOA eject entirely (operator flagged it as a runner-killer).
+            _eject_on = float(cfg.get("momentum_eject_enabled", 1.0) or 0) >= 0.5
+            if (_eject_on and not _skip_fast
                     and eject_after_h <= age_hours < (_ts_min / 60.0)
                     and peak_mult < eject_peak
                     and current_mult < 1.0):

@@ -4002,6 +4002,7 @@ AGENT_PARAM_DEFAULTS = {
     # Post-entry momentum eject (report rec). Cut a dead-on-arrival entry
     # at ~90s if it never moved (peak < eject_peak) and is below entry,
     # instead of riding the full time stop. /setparam to tune.
+    "momentum_eject_enabled":  1.0,   # 0 = disable the 90s DOA eject everywhere
     "entry_eject_after_sec":   90.0,
     "entry_eject_peak_mult":   1.10,
     # Time stop cut from 8 -> 5 min (report: dead positions should die faster).
