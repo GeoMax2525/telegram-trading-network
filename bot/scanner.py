@@ -728,6 +728,30 @@ async def fetch_current_market_cap(
     return float(pair.get("marketCap") or pair.get("fdv") or 0) or None
 
 
+# Short-TTL cache for pump.fun MC lookups. The monitor polls every open trade
+# each cycle; without this, a batch of pre-graduation tokens would hammer
+# pump.fun's Cloudflare rate limit. One lookup per token per ~15s is plenty.
+_PF_MC_CACHE: dict = {}   # mint -> (timestamp, mc)
+_PF_MC_TTL = 15.0
+
+
+async def _pumpfun_mc_cached(mint: str) -> float:
+    """pump.fun USD market cap for a mint, cached ~15s. 0 on failure."""
+    import time as _t
+    now = _t.time()
+    hit = _PF_MC_CACHE.get(mint)
+    if hit and (now - hit[0]) < _PF_MC_TTL:
+        return hit[1]
+    try:
+        from bot.agents.algo_engine import fetch_pumpfun_coin
+        pf = await fetch_pumpfun_coin(mint)
+        mc = float((pf or {}).get("mc") or 0)
+    except Exception:
+        mc = 0.0
+    _PF_MC_CACHE[mint] = (now, mc)
+    return mc
+
+
 async def fetch_live_data(address: str, bypass_cache: bool = False) -> Optional[dict]:
     """
     Returns live token data dict, or None on failure.
@@ -742,6 +766,23 @@ async def fetch_live_data(address: str, bypass_cache: bool = False) -> Optional[
     """
     pair = await fetch_token_data(address, allow_any_dex=True, bypass_cache=bypass_cache)
     if pair is None:
+        # DexScreener doesn't index PRE-GRADUATION pump.fun tokens (bonding
+        # curve). Without a price the monitor can't track peak, so the whole
+        # exit engine goes blind and can never sell a bonding-curve runner —
+        # exactly why 30K→1M winners logged as "peak 1.0x" and only got closed
+        # by hand. Fall back to pump.fun's own MC so the bot can actually see
+        # (and sell) them. Cached ~15s to stay under pump.fun's rate limit.
+        pf_mc = await _pumpfun_mc_cached(address)
+        if pf_mc and pf_mc > 0:
+            return {
+                "market_cap":    pf_mc,
+                "liquidity_usd": 0.0,     # unknown on the bonding curve
+                "price_usd":     0.0,
+                "symbol":        "???",
+                "price_changes": {"m5": 0, "h1": 0, "h6": 0, "h24": 0},
+                "volume":        {"m5": 0, "h1": 0, "h6": 0, "h24": 0},
+                "source":        "pumpfun",
+            }
         return None
     mc     = float(pair.get("marketCap") or pair.get("fdv") or 0)
     liq    = float((pair.get("liquidity") or {}).get("usd") or 0)
