@@ -20,7 +20,7 @@ from bot import state as app_state
 from bot.agents.wallet_analyst import _score_wallet
 from database.models import (
     token_exists, save_token, upsert_wallet, log_agent_run,
-    AsyncSessionLocal, select, Token,
+    AsyncSessionLocal, select, Token, Wallet,
 )
 
 logger = logging.getLogger(__name__)
@@ -823,28 +823,74 @@ async def gmgn_agent_loop() -> None:
             await asyncio.sleep(TOP_COIN_POLL)
 
     async def _kol_loop():
-        """Track KOL (Key Opinion Leader) trades — influencer wallets."""
+        """Track KOL (Key Opinion Leader) trades — influencer wallets.
+
+        FIXED (audit finding): this used to stamp EVERY KOL wallet with
+        hardcoded fake stats (score=70, win_rate=0.55, avg_multiple=2.5,
+        total_trades=1) with zero real analysis behind it. Those fabricated
+        numbers fed straight into the insider gate + 4am confluence sizing —
+        the bot was upsizing trades on wallets nobody had ever verified were
+        actually profitable, and since total_trades=1 never satisfies any
+        real re-scoring path, they sat there identical forever ("never
+        updates"). Now it runs the SAME honest analysis every other wallet
+        source goes through (real Helius trade history + the real scorer) —
+        a KOL only gets tiered if it actually earns it. Bounded per cycle to
+        control Helius cost; skips addresses already properly analyzed.
+        """
+        from bot.agents.wallet_analyst import _analyze_wallet_trades, _score_wallet
+        MAX_KOL_PER_CYCLE = 15
         while True:
             try:
                 kol_trades = await gmgn_kol_trades(limit=50)
                 if kol_trades:
-                    kol_wallets = 0
+                    seen: set[str] = set()
+                    checked = saved = 0
                     for trade in kol_trades:
                         addr = trade.get("maker") or trade.get("wallet_address")
                         side = trade.get("side")
-                        if not addr or (side and side != "buy"):
+                        if not addr or (side and side != "buy") or addr in seen:
                             continue
-                        # KOL wallets are high-signal — save as tier 2
+                        seen.add(addr)
+                        if checked >= MAX_KOL_PER_CYCLE:
+                            break
+                        # Skip wallets already properly analyzed (real total_trades
+                        # from a genuine pass) — no need to re-spend Helius calls
+                        # every 20 minutes on the same address.
+                        async with AsyncSessionLocal() as _s:
+                            existing = (await _s.execute(
+                                select(Wallet).where(Wallet.address == addr)
+                            )).scalar_one_or_none()
+                        if existing and existing.total_trades > 1:
+                            continue
+                        checked += 1
+                        try:
+                            stats = await _analyze_wallet_trades(addr)
+                        except Exception as exc:
+                            logger.debug("GMGN KOL: analyze %s failed: %s", addr[:8], exc)
+                            continue
+                        total = stats["total_trades"]
+                        if total < 1 or stats["wins"] < 2:
+                            continue   # doesn't earn a tier — don't fabricate one
+                        wins, losses = stats["wins"], stats["losses"]
+                        mult = stats["multiples"]
+                        avg_mult = sum(mult) / len(mult) if mult else 1.0
+                        wr = wins / total if total else 0.0
+                        early_rate = stats["early_entries"] / total if total else 0.0
+                        score, tier = await _score_wallet(
+                            wins, losses, total, avg_mult, early_rate)
+                        if tier <= 0:
+                            continue
                         await upsert_wallet(
-                            address=addr, score=70.0, tier=2,
-                            win_rate=0.55, avg_multiple=2.5,
-                            wins=1, losses=0, total_trades=1,
+                            address=addr, score=score, tier=tier,
+                            win_rate=round(wr, 4), avg_multiple=round(avg_mult, 2),
+                            wins=wins, losses=losses, total_trades=total,
                             avg_entry_mcap=None,
-                            source="gmgn", wallet_type="early_insider",
+                            source="gmgn_kol", wallet_type="early_insider",
                         )
-                        kol_wallets += 1
-                    if kol_wallets:
-                        logger.info("GMGN KOL: imported %d KOL wallets", kol_wallets)
+                        saved += 1
+                    if checked:
+                        logger.info("GMGN KOL: analyzed %d, saved %d (honest scoring)",
+                                    checked, saved)
             except Exception as exc:
                 logger.error("GMGN KOL tracking error: %s", exc)
             await asyncio.sleep(TRADE_POLL)

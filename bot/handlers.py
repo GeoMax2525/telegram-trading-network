@@ -1257,6 +1257,113 @@ async def cmd_hub(message: Message):
         await message.reply(f"⛔ Hub error: {exc}", parse_mode=None)
 
 
+# ── Wallet analysis — full leaderboard + clickable deep-dive ────────────────
+# Tapping any wallet button below runs a full analysis: score/tier/type,
+# real win-rate + avg multiple, cluster membership, and its actual trade
+# history (from wallet_token_trades — the real per-token record, not a
+# summary). Shared by the /hub "Top Wallets" button and /wallet <address>.
+
+_WALLET_TYPE_LABEL = {
+    "early_insider":    "🎯 Early Insider",
+    "sniper_holder":    "🎯 Sniper Holder",
+    "coordinated_group": "🔗 Coordinated Group",
+    "gmgn_smart":        "📡 GMGN Smart Money",
+    "unknown":           "❔ Unclassified",
+}
+
+
+async def _render_wallet_list_kb(wallets: list) -> InlineKeyboardMarkup:
+    """One button per wallet (2 per row) so any of them can be tapped for
+    a full deep-dive, plus a refresh button."""
+    kb = InlineKeyboardBuilder()
+    for w in wallets:
+        short = f"T{w.tier} {w.address[:4]}…{w.address[-4:]} · {w.avg_multiple:.1f}x"
+        kb.button(text=short, callback_data=f"wa:{w.address}")
+    kb.adjust(2)
+    kb.row(InlineKeyboardButton(text="🔄 Refresh", callback_data="hub:wallets"))
+    return kb.as_markup()
+
+
+async def _render_wallet_detail(address: str) -> tuple[str, InlineKeyboardMarkup]:
+    """Full analysis for one wallet: score/tier/type, cluster info, and its
+    real trade history. Returns (text, keyboard)."""
+    from database.models import (
+        get_wallet_by_address, get_wallet_token_trades, get_wallet_cluster,
+    )
+    w = await get_wallet_by_address(address)
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(
+        text="🔍 View on Solscan", url=f"https://solscan.io/account/{address}"))
+    kb.row(InlineKeyboardButton(text="🔙 Back to list", callback_data="hub:wallets"))
+
+    if w is None:
+        return (f"👛 <b>WALLET ANALYSIS</b>\n\n<code>{_esc(address)}</code>\n\n"
+                f"Not in our tracked list yet — no analysis on file.", kb.as_markup())
+
+    type_label = _WALLET_TYPE_LABEL.get(w.wallet_type, w.wallet_type or "unknown")
+    lines = [
+        "👛 <b>WALLET ANALYSIS</b>",
+        f"<code>{_esc(w.address)}</code>",
+        "",
+        f"<b>Tier {w.tier}</b> · Score {w.score:.0f}",
+        f"Win Rate: {w.win_rate*100:.0f}%  ({w.wins}W / {w.losses}L, {w.total_trades} trades)",
+        f"Avg Multiple: {w.avg_multiple:.1f}x",
+        f"Type: {type_label}",
+    ]
+    if w.source:
+        lines.append(f"Source: {_esc(w.source)}")
+    if w.avg_entry_mcap:
+        lines.append(f"Avg entry MC: ${w.avg_entry_mcap/1000:.0f}K")
+    lines.append(f"First seen: {w.first_seen_at.strftime('%Y-%m-%d')}")
+    lines.append(f"Last updated: {w.last_updated_at.strftime('%Y-%m-%d %H:%M')} UTC")
+
+    if w.cluster_id:
+        cl = await get_wallet_cluster(w.cluster_id)
+        if cl:
+            try:
+                import json as _json
+                n_members = len(_json.loads(cl.wallet_addresses))
+            except Exception:
+                n_members = "?"
+            lines += ["", f"🔗 Coordinated cluster ({n_members} wallets) — "
+                          f"{cl.win_rate*100:.0f}% WR · {cl.avg_multiple:.1f}x avg"]
+
+    trades = await get_wallet_token_trades(address)
+    if trades:
+        recent = list(reversed(trades))[:8]
+        lines += ["", "📜 <b>Recent trades:</b>"]
+        for t in recent:
+            mult_txt = f"{t.multiple:.1f}x" if t.multiple is not None else "open"
+            mc_txt = f" · entry ${t.entry_mcap/1000:.0f}K" if t.entry_mcap else ""
+            lines.append(f"  🪙 {_esc(t.token_address[:4])}…{_esc(t.token_address[-4:])} "
+                        f"— {mult_txt}{mc_txt}")
+    else:
+        lines += ["", "<i>No per-token trade history recorded yet.</i>"]
+
+    return "\n".join(lines), kb.as_markup()
+
+
+@router.message(Command("wallet"))
+async def cmd_wallet(message: Message):
+    """/wallet <address> — full analysis of any tracked wallet."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply("Usage: /wallet <address>", parse_mode=None)
+        return
+    text, kb = await _render_wallet_detail(parts[1].strip())
+    await message.reply(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("wa:"))
+async def cb_wallet_detail(callback: CallbackQuery):
+    address = callback.data.split(":", 1)[1]
+    await callback.answer()
+    text, kb = await _render_wallet_detail(address)
+    await callback.message.reply(text, parse_mode="HTML", reply_markup=kb)
+
+
 @router.callback_query(lambda c: c.data and c.data.startswith("hub:"))
 async def cb_hub(callback: CallbackQuery):
     action = callback.data.split(":", 1)[1]
@@ -1509,22 +1616,26 @@ async def cb_hub(callback: CallbackQuery):
             await callback.answer("Agent detail unavailable.", show_alert=True)
 
     elif action == "wallets":
-        wallets = await get_top_wallets(limit=10)
+        wallets = await get_top_wallets(limit=20)
         if not wallets:
             await callback.answer(
                 "No wallets scored yet — Agent 2 is still running.", show_alert=True
             )
         else:
-            lines = ["👛 *TOP WALLETS*\n"]
+            lines = [f"👛 <b>TOP WALLETS</b>  <i>({len(wallets)} shown, tap any for full analysis)</i>\n"]
             for i, w in enumerate(wallets, 1):
-                short = f"{w.address[:4]}...{w.address[-4:]}"
+                short = f"{w.address[:4]}…{w.address[-4:]}"
                 lines.append(
-                    f"#{i} {short} | Score: {w.score:.0f} | "
-                    f"{w.wins}W {w.losses}L | {w.win_rate * 100:.0f}% | {w.avg_multiple:.1f}x | T{w.tier}"
-                + (f" | {w.source}" if getattr(w, "source", None) else "")
+                    f"#{i} {short} — Score {w.score:.0f} | "
+                    f"{w.wins}W/{w.losses}L ({w.win_rate*100:.0f}%) | "
+                    f"{w.avg_multiple:.1f}x | T{w.tier}"
+                    + (f" | {_esc(w.source)}" if getattr(w, "source", None) else "")
                 )
             await callback.answer()
-            await callback.message.reply("\n".join(lines), parse_mode="Markdown")
+            await callback.message.reply(
+                "\n".join(lines), parse_mode="HTML",
+                reply_markup=await _render_wallet_list_kb(wallets),
+            )
 
     elif action == "history":
         await callback.answer(

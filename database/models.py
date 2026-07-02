@@ -1900,6 +1900,20 @@ async def get_top_wallets(limit: int = 10) -> list["Wallet"]:
         return list(result.scalars().all())
 
 
+async def get_wallet_by_address(address: str) -> "Wallet | None":
+    async with AsyncSessionLocal() as session:
+        return (await session.execute(
+            select(Wallet).where(Wallet.address == address)
+        )).scalar_one_or_none()
+
+
+async def get_wallet_cluster(cluster_id: str) -> "WalletCluster | None":
+    async with AsyncSessionLocal() as session:
+        return (await session.execute(
+            select(WalletCluster).where(WalletCluster.cluster_id == cluster_id)
+        )).scalar_one_or_none()
+
+
 async def get_wallet_counts() -> dict:
     """Returns total wallet count and per-tier counts."""
     async with AsyncSessionLocal() as session:
