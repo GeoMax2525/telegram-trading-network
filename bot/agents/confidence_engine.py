@@ -33,13 +33,11 @@ import logging
 from bot import state
 from bot.agents.chart_detector import analyze_chart
 from database.models import (
-    get_pattern_by_type,
     get_tier_wallets,
     has_caller_scanned,
     save_candidate,
     log_agent_run,
     get_current_weights,
-    get_token_by_mint,
     get_params,
 )
 from bot.agents.trade_profiles import match_pattern_types, resolve_trade_params
@@ -72,118 +70,15 @@ DEFAULT_WEIGHTS = MC_WEIGHTS["mid"]
 
 
 # ── Component scorers ────────────────────────────────────────────────────────
-
-async def _score_fingerprint(candidate: dict, pattern) -> float:
-    """Score 0–100 based on how well metrics match learned pattern buckets.
-    Uses winner_2x as the primary signal, winner_5x as a bonus, and the
-    rug fingerprint as a penalty — so the system learns from both wins AND
-    losses. Includes pump.fun bonuses for social links and bonding curve."""
-    mcap = candidate.get("mcap", 0)
-    liquidity = candidate.get("liquidity", 0)
-    ai_score = candidate.get("ai_score", 0)
-
-    def _match_pattern(pat) -> float | None:
-        if pat is None:
-            return None
-        sc = 0.0
-        n = 0
-        if pat.mcap_range_low and pat.mcap_range_high:
-            n += 1
-            low = pat.mcap_range_low * 0.5
-            high = pat.mcap_range_high * 2.0
-            if low <= mcap <= high:
-                sc += 100.0
-            elif mcap < low:
-                sc += 30.0
-            else:
-                sc += 10.0
-        if pat.avg_liquidity and pat.avg_liquidity > 0:
-            n += 1
-            ratio = min(liquidity / pat.avg_liquidity, 2.0)
-            sc += ratio * 50.0
-        if pat.avg_ai_score and pat.avg_ai_score > 0:
-            n += 1
-            ratio = min(ai_score / pat.avg_ai_score, 1.5)
-            sc += ratio * 66.7
-        if n == 0:
-            return None
-        raw = sc / n
-        conf = (pat.confidence_score or 0) / 100.0
-        return min(raw * conf + raw * (1 - conf * 0.3), 100)
-
-    # Primary: winner_2x
-    if pattern is None:
-        base = 50.0
-    else:
-        w2x = _match_pattern(pattern)
-        base = w2x if w2x is not None else 50.0
-
-    # Bonus: winner_5x — high-conviction fingerprint match
-    try:
-        pat_5x = await get_pattern_by_type("winner_5x")
-        w5x = _match_pattern(pat_5x)
-        if w5x is not None and w5x > 70:
-            base = min(base + 10.0, 100.0)
-    except Exception:
-        pass
-
-    # Bonus: winner_10x — moonshot fingerprint (rare but very high signal)
-    try:
-        pat_10x = await get_pattern_by_type("winner_10x")
-        w10x = _match_pattern(pat_10x)
-        if w10x is not None and w10x > 75:
-            base = min(base + 15.0, 100.0)
-    except Exception:
-        pass
-
-    # Penalty: rug fingerprint — avoid repeating past trap shapes
-    try:
-        pat_rug = await get_pattern_by_type("rug")
-        rug_match = _match_pattern(pat_rug)
-        if rug_match is not None and rug_match > 70:
-            base = max(base - 15.0, 0.0)
-    except Exception:
-        pass
-
-    # Bonus: best_time — if current hour/day matches historically
-    # profitable trading windows from the best_time pattern
-    try:
-        import json as _json2
-        pat_time = await get_pattern_by_type("best_time")
-        if pat_time and pat_time.best_hours:
-            from datetime import datetime as _dt
-            now_hour = _dt.utcnow().hour
-            best_hours = _json2.loads(pat_time.best_hours)
-            if now_hour in best_hours[:3]:
-                base = min(base + 5.0, 100.0)
-    except Exception:
-        pass
-
-    # Pump.fun bonuses — look up token data
-    mint = candidate.get("mint", "")
-    if mint:
-        token = await get_token_by_mint(mint)
-        if token:
-            # Social links bonus: twitter + telegram = +5
-            if token.social_links:
-                import json as _json
-                try:
-                    links = _json.loads(token.social_links)
-                    if links.get("twitter") and links.get("telegram"):
-                        base += 5.0
-                except Exception:
-                    pass
-
-            # Bonding curve > 50% = +10
-            if token.bonding_curve and token.bonding_curve > 50:
-                base += 10.0
-
-            # GMGN trending bonus = +10
-            if getattr(token, "gmgn_trending", None):
-                base += 10.0
-
-    return round(min(base, 100.0), 1)
-
+#
+# _score_fingerprint REMOVED (July 2026 architecture audit) — verified 0.0
+# weight in every MC_WEIGHTS bucket (never a live/paper gate either), so it
+# was doing ~5 DB round-trips per candidate (get_pattern_by_type x4 +
+# get_token_by_mint) to compute a number multiplied by zero. fingerprint is
+# now hardcoded 0.0 at the call site — mathematically identical confidence
+# output, zero wasted queries. NOTE: _score_chart is NOT removed — verified
+# it carries real weight in mid/high MC buckets AND is a hard live-execution
+# gate (chart_gate_pass = chart >= 50), so it stays live-critical.
 
 async def _score_insider(candidate: dict) -> float:
     """Score 0–100 based on insider wallet activity, tier quality, recency,
@@ -416,29 +311,13 @@ async def _score_caller(candidate: dict) -> float:
     return 80.0 if scanned else 20.0
 
 
-def _score_market() -> float:
-    """Score 0-100 based on SOL 24h change and market regime."""
-    sol_change = getattr(state, "sol_24h_change", 0.0) or 0.0
-    regime = getattr(state, "market_regime", "NEUTRAL")
-
-    if sol_change > 5.0:
-        base = 80.0
-    elif sol_change > 2.0:
-        base = 65.0
-    elif sol_change > -2.0:
-        base = 50.0
-    elif sol_change > -5.0:
-        base = 35.0
-    else:
-        base = 20.0
-
-    # Regime adjustment from Agent 6
-    if regime == "GOOD":
-        base = min(100, base + 10)
-    elif regime == "BAD":
-        base = max(0, base - 10)
-
-    return round(base, 1)
+# _score_market REMOVED (July 2026 architecture audit) — verified 0.0 weight
+# in every MC_WEIGHTS bucket, not a gate anywhere. It read
+# state.market_regime / state.sol_24h_change; that detector
+# (learning_loop._detect_market_regime) is LEFT INTACT — it also feeds Agent
+# 6's live position-sizing adjustment (_optimize_trade_params), so it has a
+# real second consumer and must not be touched. Only this dead-weight reader
+# is removed; market is now hardcoded 0.0 at the call site.
 
 
 # ── Main scoring function ────────────────────────────────────────────────────
@@ -522,17 +401,18 @@ async def score_candidate(candidate: dict) -> dict:
             "reason": f"unsupported_dex:{dex_id}",
         }
 
-    pattern = await get_pattern_by_type("winner_2x")
     mcap = candidate.get("mcap", 0) or 0
     weights, weight_set = await _load_weights(mcap)
 
-    # Compute all 6 component scores
-    fingerprint = await _score_fingerprint(candidate, pattern)
+    # fingerprint/market frozen at 0.0 (July 2026 audit — verified 0.0 weight
+    # in every MC_WEIGHTS bucket, not a gate; the scorer functions + their
+    # DB round-trips were removed). chart/insider/rug/caller are still real.
+    fingerprint = 0.0
     insider     = await _score_insider(candidate)
     chart, chart_pattern = await _score_chart(candidate)
     rug         = await _score_rug(candidate)
     caller      = await _score_caller(candidate)
-    market      = _score_market()
+    market      = 0.0
 
     # Weighted confidence score using MC-adjusted weights
     confidence = round(

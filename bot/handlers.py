@@ -2299,34 +2299,24 @@ async def cmd_bundlers(message: Message):
     await message.reply("\n".join(lines), parse_mode=None)
 
 
-# ── /shadowstats — exit-engine shadow-mode match rate ─────────────────────
+# ── /shadowstats — RETIRED (July 2026 architecture audit) ─────────────────
 @router.message(Command("shadowstats"))
 async def cmd_shadowstats(message: Message):
-    """How often the pure exit engine's verdict matches the live monitor on a
-    real close. 100% over a meaningful sample = safe to cut over to the engine."""
+    """RETIRED. The shadow comparison was against bot/exit_engine.py, an
+    earlier full-decision prototype that was never cut over to — the profit
+    side went to SmartScalingExitManager instead, with a different, DB-tunable
+    scale-out ladder. The shadow had drifted into comparing live trades
+    against a third, orphaned hypothetical with no relationship to what
+    actually runs. Stub kept so the old command doesn't 404."""
     if message.from_user.id not in ADMIN_IDS:
         return
-    from bot.agents.paper_monitor import shadow_stats
-    s = shadow_stats()
-    n = s.get("closes", 0)
-    match = s.get("match", 0)
-    div = s.get("diverge", 0)
-    rate = (match / n * 100) if n else 0
-    lines = [
-        "👥 EXIT-ENGINE SHADOW",
-        "━━━━━━━━━━━━━━━━━━━━━━━",
-        f"Closes compared: {n}",
-        f"✅ Match:    {match}",
-        f"⚠️ Diverge:  {div}",
-        f"Match rate:  {rate:.1f}%",
-        "",
-        ("✅ Engine matches the monitor — safe to cut over."
-         if n >= 50 and div == 0 else
-         "Gathering data — need a clean sample before cutover."),
-        "",
-        "Divergences are logged as 'SHADOW DIVERGENCE' in Railway logs.",
-    ]
-    await message.reply("\n".join(lines), parse_mode=None)
+    await message.reply(
+        "👥 Exit-engine shadow mode was <b>retired</b> (July 2026 architecture "
+        "audit) — it was comparing against a design that was never adopted "
+        "for live exits. SmartScalingExitManager owns exits now.\n\n"
+        "For real exit performance, use /sourcestats or /4amreport.",
+        parse_mode="HTML",
+    )
 
 
 # ── /health — loop heartbeats + watchdog status ──────────────────────────
@@ -7304,32 +7294,19 @@ async def cmd_alltrades(message: Message):
 
 @router.message(Command("migration"))
 async def cmd_migration(message: Message):
-    """Toggle the Migration Dip Buyer source on/off. /migration on | off."""
+    """RETIRED (architecture audit, July 2026) — the Migration Dip Buyer
+    module was removed (overlapped algo_engine's own pump.fun discovery, no
+    proven edge). This stub exists only so the old muscle-memory command
+    doesn't silently 404; historical migration_dip trades are still queryable
+    via /migrationreport."""
     if message.from_user.id not in ADMIN_IDS:
         return
-    arg = (message.text or "").split()
-    want = arg[1].lower() if len(arg) > 1 else "status"
-    if want in ("on", "1", "enable"):
-        await set_param("migration_sniper_enabled", 1.0, f"/migration on by {message.from_user.id}")
-        await message.reply(
-            "🎓 <b>MIGRATION DIP BUYER enabled</b>\n\n"
-            "Watching pump.fun → Raydium graduations. Buys the post-migration "
-            "dip (≥20% drop, ≥$15K liq) with TP +80% / SL -35%.\n"
-            "Tune: /setparam migration_dip_pct, migration_size_sol, etc.",
-            parse_mode="HTML",
-        )
-    elif want in ("off", "0", "disable"):
-        await set_param("migration_sniper_enabled", 0.0, f"/migration off by {message.from_user.id}")
-        await message.reply("🎓 Migration Dip Buyer <b>disabled</b>.", parse_mode="HTML")
-    else:
-        from database.models import get_param
-        v = await get_param("migration_sniper_enabled")
-        on = bool(v and v >= 0.5)
-        await message.reply(
-            f"🎓 Migration Dip Buyer: <b>{'ON' if on else 'OFF'}</b>\n"
-            f"Use /migration on or /migration off.",
-            parse_mode="HTML",
-        )
+    await message.reply(
+        "🎓 Migration Dip Buyer was <b>retired</b> (July 2026 architecture audit) — "
+        "the module overlapped the algo engine's own pump.fun discovery with no "
+        "proven edge.\n\nHistorical results: /migrationreport",
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("tradesoff"))

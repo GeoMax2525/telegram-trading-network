@@ -474,15 +474,19 @@ async def _optimize_trade_params(regime: str) -> int:
     For each group with >= MIN_SAMPLE_FOR_LEARNING samples we analyze
     four signals and adjust the row in ai_trade_params.
 
-    Signal → action rules (applied independently, clamped per step):
-      1. sl_hit_rate > 0.50            → tighten sl_pct by -5 points
-      2. peak_exceeds_tp_rate > 0.60   → raise tp_x by +0.5
-      3. avg_peak_mult < current_tp*0.80 → lower tp_x by -0.3
-      4. avg(mc_1h_after / close_mc) > 1.20 → raise tp_x by +0.3
-                                              (price kept running — we
-                                              sold too early)
+    Signal → action rules (SL only — see TP freeze note below):
+      1. sl_hit_rate > 0.35   → tighten sl_pct by -5 points
+      2. dead_hit_rate > 0.25 → tighten sl_pct by -3 points
+      3. sold_too_late_rate > 0.20 → widen sl_pct by +5 points
 
-    Hard bounds: tp_x ∈ [1.5, 10.0], sl_pct ∈ [10.0, 50.0].
+    TP learning is FROZEN (July 2026 audit) — the live exit path
+    (SmartScalingExitManager, on by default) never reads a trade's
+    take_profit_x; only sl_pct (the pre-scale-1 base-SL floor) and
+    position sizing are actually consumed downstream. optimal_tp_x is
+    still stored (informational / re-enable point if the manager is ever
+    turned off) but this loop no longer adjusts it.
+
+    Hard bounds: sl_pct ∈ [10.0, 50.0].
     """
     raw_all = await _fetch_closed_paper_trades(limit=500)
     if not raw_all:
@@ -564,6 +568,16 @@ async def _optimize_trade_params(regime: str) -> int:
 
         # Apply adjustment rules — thresholds loosened so learning actually
         # fires with real trade data instead of requiring extreme distributions
+        #
+        # TP LEARNING FROZEN (July 2026 architecture audit): verified that
+        # paper_monitor's SmartScalingExitManager branch (the live exit path
+        # whenever scaling_manager_enabled=1, the default) never reads
+        # pt.take_profit_x — exits are governed entirely by the manager's
+        # tiered scale-out + wide runner trail. Tuning optimal_tp_x here was
+        # computing a value nothing consumes. new_tp is now frozen at
+        # cur_tp; only SL (still read as the pre-scale-1 base-SL floor) and
+        # position sizing are actually learned. If the manager is ever
+        # disabled, re-enabling TP learning is a straight revert of this diff.
         new_tp = cur_tp
         new_sl = cur_sl
         reasons: list[str] = []
@@ -578,41 +592,19 @@ async def _optimize_trade_params(regime: str) -> int:
             new_sl = max(SL_FLOOR, new_sl - 3.0)
             reasons.append(f"dead_hit_rate={dead_hit_rate:.0%}>25% → tighten SL")
 
-        # Peaks exceeding TP — raise TP to capture more upside
-        if peak_exceeds_tp > 0.30:
-            step = 1.0 if peak_exceeds_tp > 0.50 else 0.5
-            new_tp = min(TP_CEILING, new_tp + step)
-            reasons.append(f"peak>tp in {peak_exceeds_tp:.0%} → raise TP +{step}")
-
-        # Average peak well below TP — lower TP to actually hit it
-        if avg_peak < cur_tp * 0.60:
-            new_tp = max(TP_FLOOR, new_tp - 0.5)
-            reasons.append(f"avg_peak={avg_peak:.2f}x<tp*0.6 → lower TP")
-
-        # Sold too early — price kept running after we exited
-        if avg_runup > 1.15 and runup_samples:
-            new_tp = min(TP_CEILING, new_tp + 0.5)
-            reasons.append(f"1h_runup={avg_runup:.2f}x (sold early)")
-
-        # Post-close signals: sold_too_early / sold_too_late from paper monitor
-        early_count = sum(1 for t in trades if getattr(t, "sold_too_early", False))
+        # Post-close signal: sold_too_late from paper monitor (TP-raising
+        # signals here removed — see freeze note above).
         late_count = sum(1 for t in trades if getattr(t, "sold_too_late", False))
-        early_rate = early_count / n
         late_rate = late_count / n
-
-        if early_rate > 0.15:
-            new_tp = min(TP_CEILING, new_tp + 0.8)
-            reasons.append(f"sold_too_early={early_rate:.0%} → raise TP")
 
         if late_rate > 0.20:
             new_sl = min(SL_CEILING, new_sl + 5.0)
             reasons.append(f"sold_too_late={late_rate:.0%} → widen SL")
 
         # Clamp
-        new_tp = round(max(TP_FLOOR, min(TP_CEILING, new_tp)), 2)
         new_sl = round(max(SL_FLOOR, min(SL_CEILING, new_sl)), 1)
 
-        changed = (abs(new_tp - cur_tp) >= 0.01) or (abs(new_sl - cur_sl) >= 0.1)
+        changed = abs(new_sl - cur_sl) >= 0.1
 
         # Position sizing follows win_rate + regime
         if win_rate >= 0.70:
@@ -652,20 +644,15 @@ async def _optimize_trade_params(regime: str) -> int:
 
         reason_str = "; ".join(reasons) or "no rule fired — stats refreshed"
         if changed:
-            # Log param changes for audit trail
-            if abs(new_tp - cur_tp) >= 0.01:
-                await set_param(
-                    f"ai_trade_params.{ptype}.optimal_tp_x", new_tp,
-                    reason=f"[{ptype}] {reason_str}", trades=n, win_rate=win_rate,
-                )
-            if abs(new_sl - cur_sl) >= 0.1:
-                await set_param(
-                    f"ai_trade_params.{ptype}.optimal_sl_pct", new_sl,
-                    reason=f"[{ptype}] {reason_str}", trades=n, win_rate=win_rate,
-                )
+            # Log param change for audit trail. TP branch removed — new_tp is
+            # frozen at cur_tp (see freeze note above), so it can never differ.
+            await set_param(
+                f"ai_trade_params.{ptype}.optimal_sl_pct", new_sl,
+                reason=f"[{ptype}] {reason_str}", trades=n, win_rate=win_rate,
+            )
             logger.info(
-                "Agent6 tune %s: tp %.2f->%.2f sl %.1f->%.1f n=%d wr=%.0f%% avg_peak=%.2f [%s]",
-                ptype, cur_tp, new_tp, cur_sl, new_sl, n, win_rate * 100, avg_peak, reason_str,
+                "Agent6 tune %s: sl %.1f->%.1f n=%d wr=%.0f%% avg_peak=%.2f [%s]",
+                ptype, cur_sl, new_sl, n, win_rate * 100, avg_peak, reason_str,
             )
         else:
             logger.info(

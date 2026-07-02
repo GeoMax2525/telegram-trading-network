@@ -765,9 +765,26 @@ async def claude_warm_loop() -> None:
                 "claude_active_max_actions_per_hour",
                 "claude_active_min_exit_age_sec",
                 "time_stop_minutes",
+                "scaling_manager_enabled",
             )
             enabled = float(cfg.get("claude_active_enabled") or 0.0) >= 0.5
             if not enabled:
+                await asyncio.sleep(POLL_TICK_SEC * 4)
+                continue
+
+            # GUARD (July 2026 architecture audit): verified SET_TP,
+            # LOOSEN_TRAIL, TIGHTEN_TRAIL, DISABLE_LADDER, and ENABLE_LADDER
+            # all write to fields (take_profit_x, claude_trail_override_pct,
+            # claude_ladder_disabled) the SmartScalingExitManager branch in
+            # paper_monitor.py never reads when it owns exits (the default).
+            # Worse, TAKE_PARTIAL mutates remaining_pct directly WITHOUT
+            # updating the manager's scale_tier bookkeeping — a real desync
+            # risk if both were ever active together. Rather than delete this
+            # capability outright (it's still real and correct if the
+            # operator ever reverts to legacy exit logic), skip the whole
+            # evaluation while the manager owns exits — saves the Claude API
+            # spend too, not just the dead DB writes.
+            if float(cfg.get("scaling_manager_enabled", 0.0) or 0) >= 0.5:
                 await asyncio.sleep(POLL_TICK_SEC * 4)
                 continue
 

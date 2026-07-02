@@ -203,10 +203,10 @@ async def main() -> None:
     asyncio.create_task(learning_loop(bot))
     asyncio.create_task(paper_monitor_loop(bot))
     asyncio.create_task(gmgn_agent_loop())
-    # Migration Dip Buyer — REMOVED. It overlapped the algo engine (both scan
-    # fresh pump.fun tokens) and added bug surface without proven edge. The
-    # loop is no longer started; migration_sniper.py is left dormant for now.
-    # (param migration_sniper_enabled stays 0; nothing reads it operationally.)
+    # Migration Dip Buyer — REMOVED (July 2026 architecture audit). It
+    # overlapped the algo engine (both scan fresh pump.fun tokens) with no
+    # proven edge. bot/agents/migration_sniper.py is deleted; /migration is
+    # a retired-stub command pointing to /migrationreport for history.
 
     # Health watchdog — pages admins if any critical loop stalls.
     from bot.health import watchdog_loop

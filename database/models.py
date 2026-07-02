@@ -3885,21 +3885,11 @@ AGENT_PARAM_DEFAULTS = {
     # skip the fast-cut killers and ALWAYS keep an un-stoppable moonbag so a
     # token that dumps-then-moons is never fully missed. EV is hugely positive
     # given the peak distribution. Toggle off with tg_let_runners_run 0.
-    # ── Migration Dip Buyer (its own alert + buy source) ─────────────────────
-    # Buy the post-graduation dip on pump.fun → Raydium migrations. Gated off.
-    "migration_sniper_enabled": 0.0,    # 1 = on (subscribe to migrations + buy dips)
-    "migration_dip_pct":       20.0,    # % drop from migration MC to trigger a buy
-    "migration_min_liq_usd": 15000.0,   # liquidity floor at entry
-    "migration_size_sol":      0.25,    # position size
-    "migration_tp_x":          1.8,     # take-profit (+80%)
-    "migration_sl_pct":       35.0,     # stop-loss
-    "migration_watch_min":     8.0,     # ONLY catch the immediate post-migration dip
-    "migration_max_buy_min":   8.0,     # never buy a token this long after migration
-    # Quality gates — select STRONG candidates, don't catch falling knives.
-    "migration_require_recovery":   1.0,  # dip must bounce off its low before buying
-    "migration_recovery_pct":       3.0,  # how far off the low = "recovered"
-    "migration_min_buy_sell_ratio": 1.2,  # buyers must be stepping in on the dip
-    "migration_require_smart_money":0.0,  # 1 = ONLY buy if a tier wallet is buying
+    # Migration Dip Buyer params REMOVED (July 2026 architecture audit) — the
+    # module was deleted; these 12 keys had no reader left. Any pre-existing
+    # rows in the live agent_params table are now inert (harmless orphans,
+    # left as-is rather than risking a DELETE against production data for
+    # zero functional gain).
 
     # ── Self-improving wallet list (Option C) ────────────────────────────────
     "wallet_promote_min_peak":     5.0,   # only promote early buyers of >=5x winners
