@@ -3924,6 +3924,12 @@ AGENT_PARAM_DEFAULTS = {
     "algo_discovery_interval_sec": 30.0,  # how often to poll pump.fun discovery endpoints
     "algo_tp_x":             5.0,   # algo trade take-profit
     "algo_sl_pct":          25.0,   # algo trade stop-loss
+    # Baseline on-chain safety gate for algo auto-buys (audit: algos had ZERO
+    # on-chain check). Loose by design — catches only extreme rugs, not
+    # ordinary bundles (which are sized down elsewhere, not blocked).
+    "algo_safety_gate_enabled":   1.0,
+    "algo_max_top10_pct":        90.0,   # reject if top-10 hold > this % of supply
+    "algo_check_mint_authority":  1.0,   # 1 = reject if mint authority still active
 
     "tg_signal_sl_pct":    38.0,    # 4am initial stop-loss % (wide — survive the
                                     #   early dump-then-moon chop; was a tight 20%)

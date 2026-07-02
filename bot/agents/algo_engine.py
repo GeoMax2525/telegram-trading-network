@@ -263,6 +263,39 @@ async def _poll_loop() -> None:
                         if bal < size + 0.02:
                             continue
 
+                        # BASELINE SAFETY GATE (audit finding: algos had ZERO
+                        # on-chain check — the only source that could buy a pure
+                        # rug with no protection at all). Deliberately loose vs
+                        # 4am's optional filter — normal fresh launches often
+                        # have high early concentration, so this only rejects
+                        # the EXTREME cases (single-wallet-style domination,
+                        # active mint authority), not ordinary bundles (which
+                        # already get sized down below, not blocked).
+                        try:
+                            from database.models import get_params as _gp2
+                            _sg = await _gp2("algo_safety_gate_enabled",
+                                             "algo_max_top10_pct",
+                                             "algo_check_mint_authority")
+                            if float(_sg.get("algo_safety_gate_enabled") or 1.0) >= 0.5:
+                                from bot.agents.entry_filter import (
+                                    _fetch_top_holders, _fetch_mint_authority_active,
+                                )
+                                _max_top10 = float(_sg.get("algo_max_top10_pct") or 90.0)
+                                _top10_pct, _ = await _fetch_top_holders(mint)
+                                if _top10_pct is not None and _top10_pct > _max_top10:
+                                    logger.info(
+                                        "algo_engine: SAFETY REJECT %s — top10 %.0f%% > %.0f%%",
+                                        mint[:12], _top10_pct, _max_top10)
+                                    continue
+                                if float(_sg.get("algo_check_mint_authority") or 1.0) >= 0.5:
+                                    if await _fetch_mint_authority_active(mint) is True:
+                                        logger.info(
+                                            "algo_engine: SAFETY REJECT %s — mint authority active",
+                                            mint[:12])
+                                        continue
+                        except Exception as _sge:
+                            logger.debug("algo_engine: safety gate error %s: %s", mint[:12], _sge)
+
                         # Enrichment (rules #3 + #5): wallet-confluence sizes the
                         # position UP; bundle/top-holder data sizes it DOWN and
                         # tightens TP/SL. The algo keeps its own identity tag so
