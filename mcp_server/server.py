@@ -1,18 +1,21 @@
 """
-mcp_server/server.py — REVOLT Trading Bot MCP server.
+mcp_server/server.py — REVOLT Trading Bot MCP tools.
 
 Exposes read-only tools over MCP so Claude (Desktop, Code, or Claude.ai) can
 query the bot's REAL, LIVE data directly — the same Postgres database the bot
 itself reads and writes — instead of you running a Telegram command and
 pasting the reply back into a conversation.
 
-DESIGN — why this is a SEPARATE local process, not mounted into bot/web.py:
-bot/web.py already runs a FastAPI dashboard inside the live bot's process on
-Railway. Mounting an MCP server into that same process was considered and
-rejected: it would couple an experimental, evolving tool surface to a
-production, money-adjacent process for zero real benefit (personal use, one
-user). This server runs independently — same database, decoupled process —
-so nothing it does can ever affect the live bot, even if this file has a bug.
+DEPLOYMENT — mounted live inside bot/web.py's FastAPI app at /mcp, so it's
+running 24/7 on Railway as part of the bot's existing dashboard process
+(same DB pool, no separate deployment or local script needed). This module
+is ALSO runnable standalone (`python mcp_server/server.py`, stdio transport)
+for local testing against a real Postgres before connecting Claude to the
+live /mcp endpoint. That's why the DB check below (HAS_REAL_DB) is a flag
+the caller inspects, not a hard exit-on-import: bot/web.py must be able to
+import this module even during local bot development on the SQLite
+fallback, without crashing the whole bot process over it — see the
+HAS_REAL_DB comment for exactly how that's handled.
 
 DESIGN — why read-only in v1: every tool here does exactly what its matching
 Telegram command already displays. There are NO write tools yet (no
@@ -25,12 +28,11 @@ importable async functions. Reusing them means the numbers this MCP server
 reports can never drift from what /hub, /sourcestats, etc. show in Telegram —
 same functions, same data, zero duplication risk.
 
-REQUIRES: the DATABASE_URL environment variable pointing at the REAL Railway
-Postgres instance (the public/external connection string, not the internal
-one — this process does not run inside Railway's network). Get it from the
-Railway dashboard: your Postgres service -> Connect tab -> "Public Network".
-Without it, bot.config falls back to a local empty SQLite file and every
-tool here would silently report "no trades" — see the startup check below.
+REQUIRES (for real answers): DATABASE_URL resolving to the real Postgres
+instance. On Railway this is already set for the bot itself. For standalone
+local runs, use the PUBLIC/external connection string (Railway -> your
+Postgres service -> Connect tab -> "Public Network") since a standalone
+process runs outside Railway's private network.
 """
 
 from __future__ import annotations
@@ -43,34 +45,35 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-# ── Startup check: refuse to silently query an empty local DB ──────────────
+# ── DB check: exposed as a flag, NOT a hard exit-on-import ──────────────────
 # bot.config.py falls back to SQLite whenever DATABASE_URL is unset OR isn't
 # prefixed with postgres://ipostgresql:// — meaning it's easy to set SOME
 # value here and still silently end up on the empty local SQLite file with
 # NO error (confirmed directly: bot/config.py's else-branch overwrites any
-# non-postgres-prefixed value with the hardcoded SQLite path). For this tool
-# that's actively misleading — every query would return "no trades found"
-# instead of an error, and someone reading the answer could mistake an
-# empty local DB for a real "nothing happened" result. So we check the
-# RESOLVED bot.config.DATABASE_URL after its own normalization, not just
-# that the raw env var is non-empty. Errors go to stderr — stdout is
-# reserved for the MCP protocol stream over stdio transport.
+# non-postgres-prefixed value with the hardcoded SQLite path).
+#
+# This module is imported two ways:
+#   1. Standalone (`python mcp_server/server.py`) — a real Postgres DB is
+#      REQUIRED, so we exit loudly if it's missing (see __main__ below).
+#   2. As a library, mounted into bot/web.py's live FastAPI app — that
+#      process legitimately runs on SQLite during local bot development
+#      (see database/models.py's own docstring). Hard-exiting on import
+#      would crash the ENTIRE bot process on a plain local dev run, which
+#      is a much worse failure mode than just not mounting these tools.
+#      bot/web.py checks HAS_REAL_DB itself and skips mounting if False,
+#      logging a warning instead of taking the process down.
 from bot.config import DATABASE_URL as _RESOLVED_DB_URL  # noqa: E402
 
-if not _RESOLVED_DB_URL.startswith("postgresql"):
-    print(
-        "FATAL: DATABASE_URL did not resolve to a Postgres connection "
-        f"(resolved to: {_RESOLVED_DB_URL!r}).\n"
-        "bot/config.py silently falls back to a local SQLite file for any\n"
-        "value that isn't prefixed postgres:// or postgresql:// — this\n"
-        "server refuses to start against that fallback, since it would\n"
-        "silently query an empty/unrelated database.\n"
-        "Get the PUBLIC connection string from Railway -> your Postgres\n"
-        "service -> Connect tab -> \"Public Network\", then set it as\n"
-        "DATABASE_URL in this server's environment (see mcp_server/README.md).",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+HAS_REAL_DB = _RESOLVED_DB_URL.startswith("postgresql")
+
+_DB_WARNING = (
+    f"DATABASE_URL did not resolve to a Postgres connection "
+    f"(resolved to: {_RESOLVED_DB_URL!r}). bot/config.py silently falls back "
+    "to a local SQLite file for any value that isn't prefixed postgres:// or "
+    "postgresql:// — refusing to serve real-looking-but-wrong data from that "
+    "fallback. Get the PUBLIC connection string from Railway -> your "
+    "Postgres service -> Connect tab -> \"Public Network\"."
+)
 
 from datetime import datetime, timedelta  # noqa: E402
 
@@ -355,4 +358,11 @@ async def get_agent_params(names: list[str]) -> dict:
 
 
 if __name__ == "__main__":
+    # Standalone execution genuinely requires a real Postgres DB — there's
+    # no reasonable fallback, so fail loudly here (not at import time; see
+    # the HAS_REAL_DB note above for why the check itself isn't at import).
+    if not HAS_REAL_DB:
+        print(f"FATAL: {_DB_WARNING}\nSet DATABASE_URL and try again "
+              "(see mcp_server/README.md).", file=sys.stderr)
+        sys.exit(1)
     mcp.run()  # stdio transport by default — launched by Claude Code/Desktop

@@ -55,7 +55,32 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = REPO_ROOT / "dashboard"
 
-app = FastAPI(title="Revolt Trading Hub", version="0.1.0")
+# ── MCP tools mount (Claude can query live bot data directly) ────────────────
+# Read-only tools defined in mcp_server/server.py — mounted here so they run
+# inside the SAME already-public, already-running dashboard process instead
+# of requiring a separate local script. Same DB pool, same data, zero
+# duplicated queries. Data trust level matches this file's existing dashboard
+# API (no auth gating in v1) — this doesn't add a new risk category, it's the
+# same read-only data already served at /api/dashboard, over MCP instead of
+# plain REST.
+#
+# HAS_REAL_DB guards the mount rather than crashing: local bot development
+# legitimately runs on a SQLite fallback (see database/models.py), and this
+# import must never take down the whole bot process over that.
+from mcp_server.server import mcp as _trading_mcp, HAS_REAL_DB as _MCP_HAS_REAL_DB
+
+if _MCP_HAS_REAL_DB:
+    _mcp_app = _trading_mcp.http_app(path="/")
+    app = FastAPI(title="Revolt Trading Hub", version="0.1.0", lifespan=_mcp_app.lifespan)
+    app.mount("/mcp", _mcp_app)
+    logger.info("MCP tools mounted at /mcp (real Postgres detected)")
+else:
+    app = FastAPI(title="Revolt Trading Hub", version="0.1.0")
+    logger.warning(
+        "MCP tools NOT mounted — DATABASE_URL doesn't resolve to Postgres "
+        "(local dev SQLite fallback). /mcp will 404 until run against the "
+        "real database."
+    )
 
 app.add_middleware(
     CORSMiddleware,

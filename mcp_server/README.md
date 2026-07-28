@@ -1,71 +1,75 @@
-# REVOLT MCP Server
+# REVOLT MCP Tools
 
 Lets Claude (Desktop, Code, or Claude.ai) query the bot's real, live Postgres
-database directly — the same data `/hub`, `/sourcestats`, `/4amreport`, etc.
-show in Telegram — without you running a command and pasting the reply back.
+data directly — the same data `/hub`, `/sourcestats`, `/4amreport`, etc. show
+in Telegram — without you running a command and pasting the reply back.
 
 **Read-only. v1 has no write tools** — nothing here can change the bot's
 behavior, params, or trades. See "What's not here yet" below.
 
-## What it is (and isn't)
+## What it is
 
-- A **separate, local process** you run on your own machine — not mounted
-  into the bot's own Railway process (`bot/web.py`). If this script has a
-  bug, crashes, or hangs, the live bot is completely unaffected.
-- Connects to the **same Railway Postgres** the bot uses, via `DATABASE_URL`.
-  Every number it reports comes from the exact same query functions the bot
-  itself uses (`database/models.py`) — there is no separate/duplicated
-  calculation path, so it can't drift from what Telegram shows.
+- **Live on Railway, 24/7, as part of the bot itself.** These tools are
+  mounted at `/mcp` inside `bot/web.py`'s existing FastAPI dashboard app —
+  the same process that already serves the dashboard on Railway. There's
+  nothing to install or run to use this day-to-day; it's already running
+  whenever the bot is.
+- Every number comes straight from the same query functions the bot uses
+  internally (`database/models.py`) — no separate/duplicated calculation
+  path, so it can never drift from what Telegram shows.
+- If DATABASE_URL somehow doesn't resolve to a real Postgres connection
+  (shouldn't happen on Railway — it does there already, for the bot itself),
+  `bot/web.py` skips mounting `/mcp` and logs a warning instead of crashing
+  the whole bot. This is checked at boot; see `HAS_REAL_DB` in `server.py`.
 
-## Setup
+## Connecting Claude to the live endpoint
 
-1. **Use the main repo's venv** (this server imports `database.models`
-   directly, so it needs the same SQLAlchemy/asyncpg/etc. dependencies
-   already in the repo root's `requirements.txt`). From the repo root:
-   ```
-   ./venv/Scripts/pip install -r mcp_server/requirements.txt
-   ```
-   (adds `fastmcp` on top of what's already installed)
-
-2. **Get the real Postgres connection string.** Railway dashboard → your
-   Postgres service → **Connect** tab → the **Public Network** URL (not the
-   internal one — this script runs on your machine, outside Railway's
-   private network, so it needs the externally-reachable connection string).
-
-3. **⚠️ Treat that URL like a password.** It contains real DB credentials
-   for production data. Never commit it, never paste it into chat, never put
-   it directly in a config file you might check into git.
-
-4. **Set `DATABASE_URL`** to that string when running this server (see
-   "Connecting to Claude" below for exactly where it goes).
-
-### Verify it locally before connecting Claude
-
-```
-DATABASE_URL="<your Railway public Postgres URL>" ./venv/Scripts/python mcp_server/server.py
-```
-
-If `DATABASE_URL` is missing, or set to something that isn't a real
-`postgres://`/`postgresql://` URL, the server **refuses to start** and
-prints a clear error instead of silently querying an empty local database.
-This is a deliberate, hardened check — an earlier version of this bot's own
-config (`bot/config.py`) was found to silently fall back to a local SQLite
-file for any non-Postgres value, which would have made this tool's answers
-quietly wrong instead of visibly broken.
-
-## Connecting to Claude
+You need the bot's public Railway URL (Railway dashboard → the service
+running `bot/web.py` → **Settings → Networking** → the public domain it's
+assigned, something like `https://<something>.up.railway.app`). The MCP
+endpoint is that domain + `/mcp`.
 
 **Claude Code:**
 ```
-claude mcp add --transport stdio revolt-trading -- <path-to-venv-python> <path-to-mcp_server/server.py>
+claude mcp add --transport http revolt-trading https://<your-railway-domain>/mcp
 ```
-Set `DATABASE_URL` in the environment Claude Code's config uses for this
-server (check `claude mcp` docs for the current env-var syntax — this
-changes between versions).
 
-**Claude Desktop:** Settings → Developer → Edit Config, add an entry under
-`mcpServers` pointing at the same python executable + script path, with
-`DATABASE_URL` in its `env` block.
+**Claude Desktop / Claude.ai:** Settings → Connectors → Add custom connector
+→ paste the same URL. (Not `claude_desktop_config.json` — remote servers
+configured there are ignored.)
+
+No auth is configured in v1 — this matches `bot/web.py`'s existing dashboard
+API (`/api/dashboard`), which has also had no auth gating since it shipped.
+Same data, same trust level, nothing new introduced.
+
+## Standalone / local testing (secondary — not needed day-to-day)
+
+The same tools can also run as a local stdio script, useful for testing
+against a real Postgres before trusting the live `/mcp` endpoint, or for
+debugging:
+
+```
+DATABASE_URL="<Railway Postgres PUBLIC connection string>" ./venv/Scripts/python mcp_server/server.py
+```
+
+Use the **Public Network** connection string here (Railway → your Postgres
+service → Connect tab), not the internal one — a script on your own machine
+runs outside Railway's private network. **Treat that URL like a password** —
+never commit it, never paste it into chat.
+
+If `DATABASE_URL` is missing or isn't a real Postgres URL, standalone
+execution refuses to start and prints a clear error, instead of silently
+querying an empty local database. This is a deliberate, hardened check — an
+earlier version of `bot/config.py` was found to silently fall back to a
+local SQLite file for any non-Postgres value, which would have made this
+tool's answers quietly wrong instead of visibly broken.
+
+## Setup (only needed for standalone/local use above — the live /mcp path needs nothing)
+
+```
+./venv/Scripts/pip install -r mcp_server/requirements.txt
+```
+(adds `fastmcp` on top of what's already in the repo's main `requirements.txt`)
 
 ## Tools (all read-only)
 
