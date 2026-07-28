@@ -80,10 +80,15 @@ from datetime import datetime, timedelta  # noqa: E402
 from fastmcp import FastMCP  # noqa: E402
 
 from database.models import (  # noqa: E402
+    AgentParam,
     AsyncSessionLocal,
+    Candidate,
+    META_CLOSE_REASONS,
     PaperTrade,
+    STRATEGY_CLOSE_REASONS,
     algo_stats,
     compute_paper_balance,
+    func,
     get_all_algos,
     get_hub_stats,
     get_open_paper_trades,
@@ -94,7 +99,10 @@ from database.models import (  # noqa: E402
     get_wallet_cluster,
     get_wallet_token_trades,
     select,
+    top_bundle_wallets,
 )
+from bot import state  # noqa: E402 — live in-memory bot state (safe: same process)
+from bot.health import health_snapshot  # noqa: E402
 
 mcp = FastMCP(
     name="revolt-trading-bot",
@@ -355,6 +363,313 @@ async def get_agent_params(names: list[str]) -> dict:
     keys (e.g. 'scaling_manager_enabled', 'tg_signal_sl_pct',
     'algo_engine_enabled'). Mirrors /getparam. Pass a list even for one key."""
     return await get_params(*names)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_weekly_report(days: int = 7) -> dict:
+    """Overall HQ performance snapshot: total/strategy/meta PnL, win rate,
+    breakdown by close reason (sl_hit/dead_token/scaled_exit/etc.), the 4am
+    subset, and the sold-too-early rate. Mirrors /weeklyreport. 'Strategy'
+    PnL excludes manual_close/reset (human decisions, not the bot's own
+    outcome) — that split matters for judging the bot vs. your own actions."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    async with AsyncSessionLocal() as session:
+        rows = list((await session.execute(
+            select(PaperTrade).where(
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.status == "closed",
+                PaperTrade.closed_at >= cutoff,
+                PaperTrade.paper_pnl_sol.is_not(None),
+            )
+        )).scalars().all())
+
+    n = len(rows)
+    if n == 0:
+        return {"window_days": days, "trades": 0}
+
+    wins = sum(1 for r in rows if (r.paper_pnl_sol or 0) > 0)
+    total_pnl = sum((r.paper_pnl_sol or 0) for r in rows)
+
+    strat_rows = [r for r in rows if (r.close_reason or "") in STRATEGY_CLOSE_REASONS]
+    meta_rows = [r for r in rows if (r.close_reason or "") in META_CLOSE_REASONS]
+    strat_wins = sum(1 for r in strat_rows if (r.paper_pnl_sol or 0) > 0)
+
+    by_reason: dict[str, dict] = {}
+    for r in rows:
+        reason = r.close_reason or "?"
+        d = by_reason.setdefault(reason, {"trades": 0, "wins": 0, "pnl_sol": 0.0})
+        d["trades"] += 1
+        d["pnl_sol"] += (r.paper_pnl_sol or 0)
+        if (r.paper_pnl_sol or 0) > 0:
+            d["wins"] += 1
+    for d in by_reason.values():
+        d["win_rate_pct"] = round(d["wins"] / d["trades"] * 100, 1)
+        d["pnl_sol"] = round(d["pnl_sol"], 4)
+
+    tg_rows = [r for r in rows if "tg_signal" in (r.pattern_type or "")]
+    early_rows = [r for r in rows if getattr(r, "sold_too_early", False)]
+
+    return {
+        "window_days": days, "trades": n, "wins": wins, "losses": n - wins,
+        "win_rate_pct": round(wins / n * 100, 1),
+        "total_pnl_sol": round(total_pnl, 4),
+        "strategy_pnl_sol": round(sum((r.paper_pnl_sol or 0) for r in strat_rows), 4),
+        "strategy_trades": len(strat_rows),
+        "strategy_win_rate_pct": round(strat_wins / len(strat_rows) * 100, 1) if strat_rows else 0.0,
+        "meta_pnl_sol": round(sum((r.paper_pnl_sol or 0) for r in meta_rows), 4),
+        "meta_trades": len(meta_rows),
+        "by_close_reason": by_reason,
+        "4am_subset": {
+            "trades": len(tg_rows),
+            "pnl_sol": round(sum((r.paper_pnl_sol or 0) for r in tg_rows), 4),
+        } if tg_rows else None,
+        "sold_too_early_rate_pct": round(len(early_rows) / n * 100, 1),
+    }
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_pnl_outliers(limit: int = 10) -> dict:
+    """The trades with the largest absolute PnL (win or loss), across ALL
+    time, not just closed-recently. Use this to spot data anomalies — e.g. a
+    trade with peak_multiple=1.0x but a large positive PnL is a red flag
+    (mathematically the price never rose, so the PnL shouldn't be positive;
+    this exact pattern once revealed a manual-close accounting bug). Mirrors
+    /pnloutliers."""
+    limit = max(1, min(limit, 50))
+    async with AsyncSessionLocal() as session:
+        rows = list((await session.execute(
+            select(PaperTrade).where(
+                PaperTrade.paper_pnl_sol.is_not(None),
+                PaperTrade.subscriber_id.is_(None),
+            )
+        )).scalars().all())
+    rows.sort(key=lambda r: abs(r.paper_pnl_sol or 0), reverse=True)
+    top = rows[:limit]
+    return {
+        "outliers": [
+            {
+                "id": r.id, "token_name": r.token_name, "pnl_sol": round(r.paper_pnl_sol or 0, 4),
+                "size_sol": r.paper_sol_spent, "entry_mc": r.entry_mc, "peak_mc": r.peak_mc,
+                "peak_multiple_x": round(r.peak_multiple, 2) if r.peak_multiple else None,
+                "close_reason": r.close_reason,
+                "opened_at": r.opened_at.isoformat() if r.opened_at else None,
+                "closed_at": r.closed_at.isoformat() if r.closed_at else None,
+            }
+            for r in top
+        ]
+    }
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_bundle_wallets(limit: int = 20) -> dict:
+    """Leaderboard of bundle-participant wallets ranked by the average peak
+    multiple their bundled tokens reached (min 2 resolved bundles to qualify
+    — one lucky bundle doesn't prove skill). High avg X across many bundles =
+    worth copy-following; low avg X = a dumper. Mirrors /bundlers."""
+    limit = max(1, min(limit, 50))
+    board = await top_bundle_wallets(limit=limit, min_bundles=2)
+    return {"wallets": board}
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_hourly_edge(days: int = 7) -> dict:
+    """Net PnL, win/loss, and best peak broken out by the UTC hour a trade
+    OPENED — answers 'which hours are actually hot'. NOT yet used to size
+    positions (needs a longer clean window first) — this tool is the
+    measurement, not a live sizing input. Mirrors /hourstats."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    async with AsyncSessionLocal() as session:
+        rows = list((await session.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.opened_at >= cutoff,
+            )
+        )).scalars().all())
+
+    buckets: dict[int, list] = {h: [] for h in range(24)}
+    for t in rows:
+        if t.opened_at is not None:
+            buckets[t.opened_at.hour].append(t)
+
+    hours = []
+    for h in range(24):
+        g = buckets[h]
+        if not g:
+            continue
+        pnl = sum((x.paper_pnl_sol or 0) for x in g)
+        wins = sum(1 for x in g if (x.paper_pnl_sol or 0) > 0)
+        best = max((x.peak_multiple or 0 for x in g), default=0.0)
+        hours.append({
+            "hour_utc": h, "trades": len(g), "wins": wins,
+            "pnl_sol": round(pnl, 4), "best_peak_x": round(best, 2),
+        })
+    if not hours:
+        return {"window_days": days, "hours": []}
+
+    hottest = max(hours, key=lambda r: r["pnl_sol"])
+    coldest = min(hours, key=lambda r: r["pnl_sol"])
+    return {"window_days": days, "hours": hours, "hottest_hour": hottest, "coldest_hour": coldest}
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_bot_health() -> dict:
+    """Liveness of every monitored background loop (scanner, paper_monitor,
+    wallet_analyst, etc.) — age since last heartbeat and whether it's stale.
+    Use this to check whether a source going quiet is 'nothing to trade'
+    or 'the loop actually died'. Mirrors /health."""
+    rows = health_snapshot()
+    return {"loops": rows, "any_stale": any(r.get("stale") for r in rows)}
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_scanner_substats(days: int = 30) -> dict:
+    """Scanner performance broken out by SUB-SOURCE (insider-wallet /
+    new-launch / volume-spike / gmgn-flagged) — shows which of the scanner's
+    4 internal signal sources actually carries edge vs. which is noise.
+    Mirrors /scannerstats."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    async with AsyncSessionLocal() as session:
+        rows = list((await session.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.closed_at >= cutoff,
+            )
+        )).scalars().all())
+
+    def _sub(t) -> str | None:
+        p = (t.pattern_type or "").lower()
+        if "tg_signal" in p or "migration_dip" in p or "algo:" in p:
+            return None
+        if "insider" in p:
+            return "insider"
+        if "new_launch" in p:
+            return "new_launch"
+        if "volume" in p:
+            return "volume"
+        if "gmgn" in p:
+            return "gmgn"
+        return "other"
+
+    groups: dict[str, list] = {}
+    for t in rows:
+        sub = _sub(t)
+        if sub is not None:
+            groups.setdefault(sub, []).append(t)
+
+    out = {}
+    for sub, ts in groups.items():
+        n = len(ts)
+        pnl = sum((t.paper_pnl_sol or 0) for t in ts)
+        wins = sum(1 for t in ts if (t.paper_pnl_sol or 0) > 0)
+        r5 = sum(1 for t in ts if (t.peak_multiple or 0) >= 5) / n * 100 if n else 0
+        out[sub] = {
+            "trades": n, "win_rate_pct": round(wins / n * 100, 1) if n else 0,
+            "pnl_sol": round(pnl, 4), "hit_rate_5x_pct": round(r5, 1),
+        }
+    return {"window_days": days, "by_sub_source": out}
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_4am_channel_attribution(days: int = 30) -> dict:
+    """Per-CHANNEL 4am edge — which specific Telegram channels feeding 4am
+    are actually profitable vs. dragging the average down. Combines signal
+    quality (avg peak, tail hit-rates) with OUR realized PnL per channel, so
+    you can tell 'good channel, bad capture' from 'bad channel'. Mirrors
+    /4amattribution."""
+    import re as _re
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    async with AsyncSessionLocal() as session:
+        rows = list((await session.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.closed_at >= cutoff,
+            )
+        )).scalars().all())
+
+    def _channel(t):
+        if "tg_signal" not in (t.pattern_type or ""):
+            return None
+        if t.channel_name and t.channel_name not in ("scanner", "?"):
+            return t.channel_name
+        m = _re.search(r"\[([^\]]+)\]", t.trade_reasoning or "")
+        return m.group(1) if m else "unknown"
+
+    ch: dict[str, list] = {}
+    for t in rows:
+        c = _channel(t)
+        if c is not None:
+            ch.setdefault(c, []).append(t)
+
+    out = {}
+    for name, ts in ch.items():
+        n = len(ts)
+        pnl = sum((t.paper_pnl_sol or 0) for t in ts)
+        wins = sum(1 for t in ts if (t.paper_pnl_sol or 0) > 0)
+        peaks = [float(t.peak_multiple or 0) for t in ts]
+        out[name] = {
+            "trades": n, "win_rate_pct": round(wins / n * 100, 1) if n else 0,
+            "pnl_sol": round(pnl, 4), "avg_peak_x": round(sum(peaks) / n, 2) if n else 0,
+            "hit_rate_2x_pct": round(sum(1 for p in peaks if p >= 2) / n * 100, 1) if n else 0,
+            "hit_rate_5x_pct": round(sum(1 for p in peaks if p >= 5) / n * 100, 1) if n else 0,
+            "hit_rate_10x_pct": round(sum(1 for p in peaks if p >= 10) / n * 100, 1) if n else 0,
+        }
+    return {"window_days": days, "by_channel": out}
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_scanner_gate_status() -> dict:
+    """Every gate that could currently block a scanner paper trade from
+    opening: trade_mode (both DB-persisted and live in-memory), confidence
+    threshold, manual-close cooldown, open trade count, and the last 10
+    scored candidates with their decision. Use this when the scanner has
+    gone quiet and you need to know WHY. Mirrors /scannerwhy. Reads live
+    in-memory bot state directly (this tool runs inside the same process)."""
+    now = datetime.utcnow()
+    recent_cutoff = now - timedelta(hours=2)
+    cooldown_cutoff = now - timedelta(hours=24)
+
+    async with AsyncSessionLocal() as session:
+        trade_mode_val = (await session.execute(
+            select(AgentParam.param_value).where(AgentParam.param_name == "trade_mode")
+        )).scalar_one_or_none()
+        conf_thresh = (await session.execute(
+            select(AgentParam.param_value).where(AgentParam.param_name == "conf_paper_threshold")
+        )).scalar_one_or_none()
+        open_count = (await session.execute(
+            select(func.count(PaperTrade.id)).where(PaperTrade.status == "open")
+        )).scalar() or 0
+        recent_manual_close = (await session.execute(
+            select(func.count(PaperTrade.id)).where(
+                PaperTrade.close_reason == "manual_close",
+                PaperTrade.closed_at >= cooldown_cutoff,
+            )
+        )).scalar() or 0
+        recent_candidates = list((await session.execute(
+            select(Candidate).where(Candidate.created_at >= recent_cutoff)
+            .order_by(Candidate.id.desc()).limit(10)
+        )).scalars().all())
+
+    tm_int = int(trade_mode_val or 0)
+    thresh_val = float(conf_thresh) if conf_thresh is not None else 20.0
+
+    return {
+        "trade_mode_db": {0: "off", 1: "paper", 2: "live"}.get(tm_int, "?"),
+        "trade_mode_live_memory": state.trade_mode,
+        "conf_paper_threshold": thresh_val,
+        "open_paper_trades": open_count,
+        "manual_closes_last_24h": recent_manual_close,
+        "recent_candidates_2h": [
+            {
+                "token_name": c.token_name, "confidence_score": c.confidence_score,
+                "decision": c.decision, "source": c.source,
+                "passed_threshold": (c.confidence_score or 0) >= thresh_val,
+            }
+            for c in recent_candidates
+        ],
+    }
 
 
 if __name__ == "__main__":

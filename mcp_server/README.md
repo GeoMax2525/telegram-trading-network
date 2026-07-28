@@ -84,6 +84,28 @@ tool's answers quietly wrong instead of visibly broken.
 | `get_exit_strategy_config(trade_type)` | Live SmartScalingExitManager ladder for a trade type |
 | `get_open_trades` | Currently open positions (last-known price, no live fetch) |
 | `get_agent_params(names)` | `/getparam` — current value of one or more config keys |
+| `get_weekly_report(days)` | `/weeklyreport` — total/strategy/meta PnL, by close reason, 4am subset |
+| `get_pnl_outliers(limit)` | `/pnloutliers` — largest abs-PnL trades (finds data anomalies) |
+| `get_bundle_wallets(limit)` | `/bundlers` — bundle-participant wallet leaderboard |
+| `get_hourly_edge(days)` | `/hourstats` — net PnL by UTC hour opened |
+| `get_bot_health` | `/health` — background loop heartbeats + staleness |
+| `get_scanner_substats(days)` | `/scannerstats` — scanner performance by internal sub-source |
+| `get_4am_channel_attribution(days)` | `/4amattribution` — per-channel 4am edge |
+| `get_scanner_gate_status` | `/scannerwhy` — every gate that could block a scanner trade, incl. live in-memory `trade_mode` |
+
+**Note on `get_scanner_gate_status`:** this is the one tool that reads live
+in-memory bot state (`bot.state.trade_mode`) directly, not just the
+database — possible only because these tools run inside the same process as
+the bot now.
+
+## Known reporting gap this tooling surfaced
+
+`get_weekly_report`'s `strategy_pnl_sol` (and the Telegram `/weeklyreport`
+it mirrors) currently **excludes `scaled_exit`** trades — SmartScalingExitManager's
+own close reason isn't in `STRATEGY_CLOSE_REASONS` or `META_CLOSE_REASONS`
+(`database/models.py`). Those trades still count in the overall total, just
+not in the strategy-specific breakdown. Not fixed here — flagging it since
+it understates the newest exit mechanism's real performance in that one report.
 
 ## What's not here yet (deliberately)
 
