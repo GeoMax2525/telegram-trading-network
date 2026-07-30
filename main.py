@@ -282,6 +282,13 @@ async def main() -> None:
     asyncio.create_task(ecco_tg_listener_loop())
     logger.info("ECCO TG listener: queued (gated by ECCO_TG_SESSION)")
 
+    # Ecconos — transparent AI developer teammate, present in the main
+    # community chat (separate token, shared Data Hub). No-op unless
+    # ECCONOS_BOT_TOKEN is set, so the trading bot is unaffected.
+    from bot.ecconos.app import start_ecconos
+    asyncio.create_task(start_ecconos())
+    logger.info("Ecconos: queued for startup (gated by ECCONOS_BOT_TOKEN)")
+
     # Register the "/" command menu so commands autocomplete in HQ + DM.
     try:
         from aiogram.types import BotCommand
