@@ -98,21 +98,39 @@ from database.models import (  # noqa: E402
     get_wallet_by_address,
     get_wallet_cluster,
     get_wallet_token_trades,
+    get_active_locks,
     select,
+    set_algo_mode,
+    set_param,
     top_bundle_wallets,
 )
 from bot import state  # noqa: E402 — live in-memory bot state (safe: same process)
 from bot.health import health_snapshot  # noqa: E402
 
+# Params this server will NEVER write, regardless of caller. Arming live
+# trading (real capital) is a deliberate, human-only decision point in this
+# project — explicitly agreed, multiple times, across this whole engagement.
+# Autonomous trading-CONFIG tuning (stop-loss %, algo thresholds, source
+# on/off) is fine; autonomously flipping the switch that moves real money is
+# not the same category of action and is hard-blocked here, not just
+# discouraged. If this policy ever changes, it changes by editing this
+# constant deliberately, not by a caller argument overriding it.
+WRITE_BLOCKLIST = frozenset({"live_trading_armed", "trade_mode"})
+
 mcp = FastMCP(
     name="revolt-trading-bot",
     instructions=(
-        "Read-only tools over REVOLT's live trading data (Postgres on Railway). "
-        "Start with get_hub_status for a quick snapshot, then get_source_stats "
-        "or get_4am_channel_stats for a deeper read. All figures come straight "
-        "from the same database the bot's own Telegram reports use — there is "
-        "no separate/duplicated calculation path. There are no write tools; "
-        "this cannot change any bot behavior."
+        "Tools over REVOLT's live trading data (Postgres on Railway) and its "
+        "config. Start with get_hub_status for a quick snapshot. Most tools "
+        "are read-only; set_trading_param/set_algo_mode_tool/toggle_source "
+        "are the write tools — they change LIVE trading behavior immediately, "
+        "no confirmation step, by design (autonomous trading-config tuning "
+        "was explicitly agreed). They refuse to touch trade_mode or "
+        "live_trading_armed under any circumstance — arming real-money "
+        "trading is a separate, human-only decision, not something this "
+        "server will ever do. All figures come straight from the same "
+        "database the bot's own Telegram reports use — no duplicated "
+        "calculation path."
     ),
 )
 
@@ -670,6 +688,75 @@ async def get_scanner_gate_status() -> dict:
             for c in recent_candidates
         ],
     }
+
+
+# ── Write tools — change LIVE trading behavior, no confirmation step ───────
+# Autonomous trading-config tuning, explicitly agreed: these execute
+# immediately, no approval gate. Every write is logged (via set_param's own
+# reason field) so changes stay auditable even without a human in the loop.
+# WRITE_BLOCKLIST (trade_mode / live_trading_armed) is enforced here in code,
+# not by convention — see the constant's own comment for why.
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+async def set_trading_param(name: str, value: float, reason: str) -> dict:
+    """Set a trading-config param to a new value, immediately, live. No
+    confirmation step — this changes bot behavior the instant it's called.
+    `reason` is required and gets logged with the change (visible via
+    /getparam history and get_agent_params). Examples: 'tg_signal_sl_pct'
+    (4am stop-loss %), 'scanner_paper_rug_floor', 'runner_floor_arm'.
+    Refuses to touch 'trade_mode' or 'live_trading_armed' under any
+    circumstance — arming real-money trading is a separate, human-only
+    decision this tool will never make."""
+    if name in WRITE_BLOCKLIST:
+        return {
+            "applied": False,
+            "reason": f"'{name}' is hard-blocked — arming live trading is a "
+                      "human-only decision, not something this tool will do.",
+        }
+    await set_param(name, value, reason=reason)
+    locks = get_active_locks()
+    result = {"applied": True, "param": name, "value": value, "reason": reason}
+    if name in locks and abs(locks[name] - value) > 0.0001:
+        result["warning"] = (
+            f"'{name}' is env-locked on Railway to {locks[name]} — the DB row "
+            "was updated for audit, but the bot will keep reading the locked "
+            "value until the operator removes the env var."
+        )
+    return result
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+async def set_algo_mode_tool(name: str, mode: str) -> dict:
+    """Set a custom algo's mode: 'off' (idle), 'manual' (alert only, no
+    auto-buy), or 'auto' (trades on its own). Immediate, no confirmation.
+    Valid names: X-FILES, ZANZIBAR, BLOWJOB, OUT OF CONTROL, GELATO (see
+    get_algo_stats for current performance before deciding)."""
+    ok = await set_algo_mode(name, mode)
+    if not ok:
+        return {"applied": False, "reason": f"unknown algo '{name}' or invalid mode '{mode}'"}
+    return {"applied": True, "algo": name, "mode": mode.lower()}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+async def toggle_source(source: str, enabled: bool, reason: str) -> dict:
+    """Turn an entire signal source on/off at the structural level (not just
+    tuning it). `source` is one of: 'scanner', '4am' (tg_scraper), 'algo_engine'.
+    This is the hard switch — /4amonly, /scanneronly-style — separate from
+    tuning individual params on a source that stays on. `reason` is required
+    and logged."""
+    _param_map = {
+        "scanner": "scanner_enabled",
+        "4am": "tg_scraper_enabled",
+        "tg_scraper": "tg_scraper_enabled",
+        "algo_engine": "algo_engine_enabled",
+        "algos": "algo_engine_enabled",
+    }
+    key = _param_map.get(source.lower())
+    if key is None:
+        return {"applied": False, "reason": f"unknown source '{source}' — "
+                "use one of: scanner, 4am, algo_engine"}
+    await set_param(key, 1.0 if enabled else 0.0, reason=reason)
+    return {"applied": True, "source": source, "enabled": enabled, "param": key, "reason": reason}
 
 
 if __name__ == "__main__":

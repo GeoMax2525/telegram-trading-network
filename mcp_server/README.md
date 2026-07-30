@@ -4,8 +4,15 @@ Lets Claude (Desktop, Code, or Claude.ai) query the bot's real, live Postgres
 data directly — the same data `/hub`, `/sourcestats`, `/4amreport`, etc. show
 in Telegram — without you running a command and pasting the reply back.
 
-**Read-only. v1 has no write tools** — nothing here can change the bot's
-behavior, params, or trades. See "What's not here yet" below.
+**17 read-only tools + 3 write tools.** The write tools (`set_trading_param`,
+`set_algo_mode_tool`, `toggle_source`) change live trading config immediately,
+no confirmation step — this was an explicit decision: autonomous tuning of
+bounded, reversible, logged trading-config values (stop-losses, algo modes,
+source on/off) is a different risk category from code changes or arming real
+capital, and is treated differently on purpose. They hard-refuse to touch
+`trade_mode` or `live_trading_armed` under any circumstance — see
+`WRITE_BLOCKLIST` in `server.py`. Arming live trading stays a deliberate,
+human-only action.
 
 ## What it is
 
@@ -71,7 +78,7 @@ tool's answers quietly wrong instead of visibly broken.
 ```
 (adds `fastmcp` on top of what's already in the repo's main `requirements.txt`)
 
-## Tools (all read-only)
+## Read-only tools
 
 | Tool | Mirrors |
 |---|---|
