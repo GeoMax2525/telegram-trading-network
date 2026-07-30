@@ -11,4 +11,12 @@ solana==0.34.3
 telethon==1.37.0
 fastapi==0.115.6
 uvicorn==0.32.1
-fastmcp>=3.0
+# fastmcp REMOVED from the deploy manifest (July 2026 incident) -- its
+# "client" extra requires starlette>=1.0.1, conflicting with
+# fastapi==0.115.6's starlette<0.42.0 pin. This is a real, unresolved
+# version conflict, not something to patch under live-outage pressure.
+# bot/web.py's MCP mount degrades gracefully without this package (see the
+# try/except guard in main.py around the dashboard-server startup) -- the
+# dashboard/MCP tools are simply unavailable until this is solved properly,
+# with time to test, not during a service-down emergency. See
+# mcp_server/README.md for the follow-up plan.
