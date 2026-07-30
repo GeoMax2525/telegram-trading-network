@@ -255,12 +255,29 @@ async def main() -> None:
     asyncio.create_task(claude_cold_loop())
     logger.info("Claude cold path: queued for startup")
 
-    # Dashboard web server — serves /api/dashboard + static cyberpunk UI.
+    # Dashboard web server — serves /api/dashboard + the MCP tools mount.
     # Skipped only if DISABLE_WEB=1 (e.g. local-only bot mode).
+    #
+    # Guarded (July 2026 incident): bot/web.py now imports mcp_server/server.py
+    # at module level, which brought in a new dependency (fastmcp) that got
+    # missed from the main requirements.txt on first deploy. That bare,
+    # unguarded import crashed the ENTIRE bot's startup, not just the
+    # dashboard, taking down live trading with it -- for a component (the
+    # dashboard/MCP mount) that has no business being able to do that. Never
+    # again: a bad dashboard/MCP dependency or import error now just disables
+    # the dashboard for that boot and logs loudly, while the actual trading
+    # bot (scanner, tg_scraper, everything money-relevant) keeps running.
     if os.getenv("DISABLE_WEB", "0") != "1":
-        from bot.web import run_server as _run_web
-        asyncio.create_task(_run_web())
-        logger.info("Dashboard web server: queued for startup")
+        try:
+            from bot.web import run_server as _run_web
+            asyncio.create_task(_run_web())
+            logger.info("Dashboard web server: queued for startup")
+        except Exception as exc:
+            logger.error(
+                "Dashboard web server FAILED TO START (%s) — trading bot "
+                "continues without it. Fix and redeploy when convenient; "
+                "this is not a trading-path outage.", exc,
+            )
 
     logger.info("Bot is starting. Press Ctrl+C to stop.")
     # Expose bot reference so background tasks (scanner, tg_scraper,
