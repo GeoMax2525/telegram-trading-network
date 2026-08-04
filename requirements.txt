@@ -6,17 +6,28 @@ psycopg2-binary==2.9.10
 python-dotenv==1.2.2
 SQLAlchemy==2.0.49
 solders==0.21.0
-httpx==0.27.2
-solana==0.34.3
+httpx==0.28.1
+# solana (solana-py) REMOVED: verified zero usage anywhere in this codebase
+# (exhaustive grep for `solana\.` / `from solana`/`import solana`, including
+# lazy in-function imports -- none found). All real Solana primitives this
+# bot uses (Keypair, VersionedTransaction) come from `solders` directly
+# (see bot/wallet.py, bot/trading.py, bot/subscriber.py), which stays
+# untouched here and has zero conflicting dependencies of its own (checked
+# its METADATA directly: only typing-extensions + jsonalias). solana==0.34.3
+# was the ONLY thing pinning websockets<12.0, which conflicted with
+# fastmcp's websockets>=15.0.1 -- removing genuinely dead weight instead of
+# bumping a trading-critical package to satisfy a dashboard dependency.
 telethon==1.37.0
-fastapi==0.115.6
-uvicorn==0.32.1
-# fastmcp REMOVED from the deploy manifest (July 2026 incident) -- its
-# "client" extra requires starlette>=1.0.1, conflicting with
-# fastapi==0.115.6's starlette<0.42.0 pin. This is a real, unresolved
-# version conflict, not something to patch under live-outage pressure.
-# bot/web.py's MCP mount degrades gracefully without this package (see the
-# try/except guard in main.py around the dashboard-server startup) -- the
-# dashboard/MCP tools are simply unavailable until this is solved properly,
-# with time to test, not during a service-down emergency. See
-# mcp_server/README.md for the follow-up plan.
+# fastapi bumped from 0.115.6 (July 2026 incident follow-up, done WITHOUT
+# outage pressure, properly verified): 0.115.6 pinned starlette<0.42.0,
+# which conflicts with fastmcp's starlette>=1.0.1 requirement. Modern
+# fastapi only declares starlette>=0.46.0 (no upper cap), so it coexists
+# with fastmcp's floor instead of blocking it. Checked bot/web.py's actual
+# usage first (FastAPI, HTTPException, Request, CORSMiddleware, standard
+# response classes, StaticFiles) -- all long-stable surface, low upgrade risk.
+fastapi==0.140.13
+# uvicorn bumped from 0.32.1: fastmcp's server extra requires uvicorn>=0.35.
+# Only uvicorn.Config/uvicorn.Server are used in this repo (bot/web.py) --
+# stable, unchanged public API across this range.
+uvicorn==0.35.0
+fastmcp==3.4.5
