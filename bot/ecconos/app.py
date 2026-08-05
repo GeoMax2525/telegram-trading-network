@@ -94,6 +94,23 @@ ECCONOS_TOOLS = [
             "required": ["source", "enabled", "reason"],
         },
     },
+    {
+        "name": "post_to_main_chat",
+        "description": (
+            "Post a message to the main Revolt community chat, as yourself "
+            "(Ecconos), independent of whatever chat this request came from. "
+            "Use for things the whole community should see -- an "
+            "introduction, an announcement -- not for replying to whoever "
+            "is talking to you right now (that happens automatically)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+            },
+            "required": ["text"],
+        },
+    },
 ]
 
 
@@ -107,6 +124,10 @@ async def _execute_ecconos_tool(name: str, tool_input: dict) -> dict:
         return await set_algo_mode_tool(**tool_input)
     if name == "toggle_source":
         return await toggle_source(**tool_input)
+    if name == "post_to_main_chat":
+        from bot.ecconos.announce import post_as_ecconos
+        ok = await post_as_ecconos(tool_input.get("text", ""))
+        return {"posted": ok}
     return {"error": f"unknown tool '{name}'"}
 
 # Anthropic Haiku pricing estimate (same constants used elsewhere in this repo).
