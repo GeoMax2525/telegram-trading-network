@@ -38,12 +38,19 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 # Model selection — Haiku for high-frequency, Sonnet for reasoning
 HAIKU_MODEL = os.getenv("ANTHROPIC_HAIKU_MODEL", "claude-haiku-4-5").strip()
-SONNET_MODEL = os.getenv("ANTHROPIC_SONNET_MODEL", "claude-sonnet-4-6").strip()
+# Bumped 4-6 -> 5 (Aug 2026): verified real ID against Anthropic's live docs
+# before changing (the earlier claude-fable-5 404 came from guessing at an
+# unverified ID -- not repeating that). Sonnet 5 is strictly better and
+# currently CHEAPER than 4-6 (introductory pricing through Aug 31 2026).
+SONNET_MODEL = os.getenv("ANTHROPIC_SONNET_MODEL", "claude-sonnet-5").strip()
 # Deep-reasoning model for escalated mid-trade decisions (winners only).
-# Was claude-fable-5 — retired by Anthropic (API 404s with "use Opus 4.8").
-# Defaulting to Opus 4.8 per that migration notice so the winner-drawdown
-# escalation lane (claude_warm) doesn't silently fall back to a dead model.
-FABLE_MODEL = os.getenv("ANTHROPIC_FABLE_MODEL", "claude-opus-4-8").strip()
+# Bumped Opus 4.8 -> Opus 5 (Aug 2026, verified real ID). Opus 5 is
+# positioned for complex agentic work, a good fit for a single high-stakes
+# trading decision, and costs half of what claude-fable-5 would ($5/$25 vs
+# $10/$50 per MTok) -- fable-5 is GA again now but its "multi-day research"
+# framing doesn't match this per-trade escalation use case, so staying on
+# the Opus lane rather than reintroducing it here.
+FABLE_MODEL = os.getenv("ANTHROPIC_FABLE_MODEL", "claude-opus-5").strip()
 
 TIMEOUT_SEC = 15.0
 
