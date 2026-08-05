@@ -119,6 +119,96 @@ async def call_claude(
     return None
 
 
+async def call_claude_with_tools(
+    *,
+    system: str,
+    user: str,
+    tools: list[dict],
+    tool_executor,
+    model: str = HAIKU_MODEL,
+    max_tokens: int = 1024,
+    timeout_sec: float = TIMEOUT_SEC,
+    max_turns: int = 4,
+) -> str | None:
+    """Like call_claude, but actually handles Claude's tool_use blocks —
+    call_claude itself only ever extracts "text" content blocks and
+    silently drops tool_use ones, so it can't be used for real tool
+    calling as-is. This runs the standard agentic loop: call, execute any
+    tool_use blocks via `tool_executor(name, input) -> Any` (may be sync
+    or async), feed the results back as a tool_result turn, repeat until
+    Claude returns a final text-only response or max_turns is hit.
+
+    Returns the final text, or None on any failure (no key, network error,
+    non-200, unparseable, or max_turns exceeded without a text reply)."""
+    global LAST_ERROR
+    if not ANTHROPIC_API_KEY:
+        LAST_ERROR = "ANTHROPIC_API_KEY not set"
+        return None
+
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    messages: list[dict] = [{"role": "user", "content": user}]
+
+    for _turn in range(max_turns):
+        body = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": messages,
+            "tools": tools,
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=timeout_sec)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(ANTHROPIC_URL, headers=headers, json=body) as resp:
+                    if resp.status != 200:
+                        err = await resp.text()
+                        logger.warning("Claude (tools) HTTP %d: %s", resp.status, err[:300])
+                        LAST_ERROR = f"HTTP {resp.status} (model={model}): {err[:200]}"
+                        return None
+                    data = await resp.json()
+        except Exception as exc:
+            logger.warning("Claude (tools) API failed: %s", exc)
+            LAST_ERROR = f"{type(exc).__name__}: {exc} (model={model}, timeout={timeout_sec}s)"
+            return None
+
+        blocks = data.get("content", []) or []
+        tool_uses = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+        text = "".join(
+            b.get("text", "") for b in blocks
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+
+        if not tool_uses:
+            LAST_ERROR = None if text else f"200 OK but no text/tool blocks (model={model})"
+            return text or None
+
+        messages.append({"role": "assistant", "content": blocks})
+        tool_results = []
+        for tu in tool_uses:
+            tool_name = tu.get("name", "")
+            tool_input = tu.get("input") or {}
+            try:
+                result = tool_executor(tool_name, tool_input)
+                if hasattr(result, "__await__"):
+                    result = await result
+            except Exception as exc:
+                result = {"error": f"{type(exc).__name__}: {exc}"}
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tu.get("id", ""),
+                "content": json.dumps(result, separators=(",", ":"), default=str),
+            })
+        messages.append({"role": "user", "content": tool_results})
+
+    logger.warning("Claude (tools): exceeded max_turns=%d without a final text reply", max_turns)
+    LAST_ERROR = f"exceeded max_turns={max_turns}"
+    return None
+
+
 def parse_json_response(text: str) -> dict | None:
     """Strip markdown fences and parse JSON. Returns None on parse failure."""
     text = (text or "").strip()

@@ -49,6 +49,10 @@ STRATEGY_CLOSE_REASONS = frozenset({
                        # in WR per user request; Agent 6 also sees these in
                        # learning corpus, mild bias risk if operator
                        # consistently closes earlier than bot would
+    "claude_exit",     # claude_warm_loop EXIT_NOW decision — a real strategy
+                       # exit, just AI-driven instead of a fixed rule; was
+                       # missing from this set (silently excluded from
+                       # strategy/meta reporting split) until this fix
 })
 
 # Reasons that are NOT strategy decisions — time-based cleanup
@@ -476,6 +480,29 @@ class ClaudePositionAction(Base):
     cost_usd        = Column(Float,    nullable=True)
     executed        = Column(Boolean,  nullable=False, default=False)
     exec_note       = Column(String(256), nullable=True)
+
+
+class ClaudeDiscretionaryAction(Base):
+    """Phase 6: log every discretionary-play decision Claude makes —
+    both OPEN and SKIP. Lets /discretionary (or the MCP get_discretionary_actions
+    tool) show what Claude has been considering, not just what it traded."""
+    __tablename__ = "claude_discretionary_actions"
+
+    id              = Column(Integer,  primary_key=True, autoincrement=True)
+    decided_at      = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    candidate_id    = Column(Integer,  nullable=True, index=True)
+    token_name      = Column(String(64),  nullable=True)
+    token_address   = Column(String(64),  nullable=True, index=True)
+    action          = Column(String(16), nullable=False)   # OPEN / SKIP
+    params_json     = Column(Text,     nullable=True)
+    reason          = Column(String(512), nullable=True)
+    confidence      = Column(String(16),  nullable=True)
+    rug_score       = Column(Float,    nullable=True)
+    model_tier      = Column(String(16),  nullable=True)   # haiku_triage / sonnet_decision
+    latency_ms      = Column(Integer,  nullable=True)
+    cost_usd        = Column(Float,    nullable=True)
+    trade_id        = Column(Integer,  nullable=True, index=True)  # set when action=OPEN
+    announced       = Column(Boolean,  nullable=False, default=False)
 
 
 # ── Paper Trades table ────────────────────────────────────────────────────────
@@ -3159,13 +3186,21 @@ async def open_paper_trade(
     # algo_engine_enabled + per-algo mode in the algo loop). Must not route
     # through the scanner gate — else /4amonly silently blocks every algo trade.
     _is_algo = "algo:" in _pt_str
+    # Claude's discretionary picks are their OWN independent source too
+    # (gated by claude_discretionary_enabled, checked upstream in
+    # claude_discretionary.py before this is ever called). Must not route
+    # through the scanner gate — else /4amonly silently blocks every
+    # discretionary trade, which was never scanner traffic to begin with.
+    _is_claude_discretionary = "claude_discretionary" in _pt_str
 
     # Direct env-var check FIRST — bulletproof against any get_params
     # weirdness. If SCANNER_LOCK env var is off, no scanner trade can pass
-    # (but tg_signal, migration, and algo are exempt — their own sources).
+    # (but tg_signal, migration, algo, and claude_discretionary are exempt —
+    # each is its own source).
     _scanner_lock_env = os.getenv("SCANNER_LOCK", "").strip().lower()
     _tg_lock_env = os.getenv("TG_SCRAPER_LOCK", "").strip().lower()
     if (not _is_tg and not _is_migration and not _is_algo
+            and not _is_claude_discretionary
             and _scanner_lock_env in ("off", "0", "false", "no", "n")):
         logger.warning(
             "open_paper_trade GATE BLOCK: SCANNER_LOCK=%s refused scanner trade "
@@ -3184,11 +3219,17 @@ async def open_paper_trade(
         raise PaperTradeBlocked(f"TG_SCRAPER_LOCK={_tg_lock_env}")
 
     _gate = await get_params("scanner_enabled", "tg_scraper_enabled")
-    if _is_migration or _is_algo:
+    if _is_migration or _is_algo or _is_claude_discretionary:
         pass  # independent sources — gated upstream (migration_sniper_enabled /
-              # algo_engine_enabled + per-algo mode), never by the scanner toggle
+              # algo_engine_enabled + per-algo mode / claude_discretionary_enabled),
+              # never by the scanner toggle
     elif _is_tg:
-        if float(_gate.get("tg_scraper_enabled", 1.0) or 1.0) < 0.5:
+        # BUG FIX (found while testing the claude_discretionary gate, Aug 2026):
+        # `X or 1.0` treats a legitimate 0.0 as falsy and silently substitutes
+        # 1.0 (enabled) — meaning tg_scraper_enabled=0 was never actually
+        # blocking a trade. get_params() already fills in a default for any
+        # missing key, so the `or 1.0` was dead-weight AND actively wrong.
+        if float(_gate.get("tg_scraper_enabled", 1.0)) < 0.5:
             logger.warning(
                 "open_paper_trade GATE BLOCK: tg_scraper_enabled=0 refused tg trade "
                 "%s mint=%s pattern=%s", (token_name or "?")[:24],
@@ -3196,7 +3237,8 @@ async def open_paper_trade(
             )
             raise PaperTradeBlocked("tg_scraper_enabled=0")
     else:
-        if float(_gate.get("scanner_enabled", 1.0) or 1.0) < 0.5:
+        # Same fix as above — see comment on the tg_scraper_enabled check.
+        if float(_gate.get("scanner_enabled", 1.0)) < 0.5:
             logger.warning(
                 "open_paper_trade GATE BLOCK: scanner_enabled=0 refused scanner trade "
                 "%s mint=%s pattern=%s", (token_name or "?")[:24],
@@ -4132,6 +4174,21 @@ AGENT_PARAM_DEFAULTS = {
     "tg_signal_confidence_boost": 20.0,
     "tg_signal_volume_boost":     5.0,
     "tg_signal_clean_dev_boost":  5.0,
+
+    # ── Claude discretionary paper trading (Phase 6) ─────────────────────────
+    # Independent source — see claude_discretionary.py + the
+    # _is_claude_discretionary gate branch in open_paper_trade(). Off by
+    # default: this is a new, publicly-posting decision path, not something
+    # to ship live without the operator having seen it run first.
+    "claude_discretionary_enabled":              0.0,
+    "claude_discretionary_interval_sec":       300.0,
+    "claude_discretionary_candidate_window_min": 20.0,
+    "claude_discretionary_min_rug_score":       55.0,  # stricter than scanner_paper_rug_floor
+    "claude_discretionary_daily_budget_usd":     2.0,
+    "claude_discretionary_max_trades_per_day":   3.0,
+    "claude_discretionary_max_open":             3.0,
+    "claude_discretionary_size_sol":             0.15,
+    "claude_announce_enabled":                   1.0,  # separate toggle for the public post
 }
 
 

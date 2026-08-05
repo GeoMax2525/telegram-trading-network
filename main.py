@@ -255,6 +255,22 @@ async def main() -> None:
     asyncio.create_task(claude_cold_loop())
     logger.info("Claude cold path: queued for startup")
 
+    # Phase 6: Claude discretionary paper trading — proactively picks its
+    # own plays from already-safety-screened candidates, explains them via
+    # Ecconos. Off by default (claude_discretionary_enabled=0); silently
+    # no-ops without ANTHROPIC_API_KEY either way. Guarded (new module,
+    # same discipline as the dashboard fix above) so a bug here can never
+    # take the trading bot down with it.
+    try:
+        from bot.agents.claude_discretionary import claude_discretionary_loop
+        asyncio.create_task(claude_discretionary_loop())
+        logger.info("Claude discretionary path: queued for startup")
+    except Exception as exc:
+        logger.error(
+            "Claude discretionary path FAILED TO START (%s) — trading bot "
+            "continues without it.", exc,
+        )
+
     # Dashboard web server — serves /api/dashboard + the MCP tools mount.
     # Skipped only if DISABLE_WEB=1 (e.g. local-only bot mode).
     #

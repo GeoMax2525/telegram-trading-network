@@ -28,10 +28,86 @@ from bot.ecconos import (
     ECCONOS_RATE_LIMIT_PER_HOUR, ecconos_enabled,
 )
 from bot.ecconos.persona import ECCONOS_SYSTEM
-from bot.agents.claude_reasoning import call_claude, HAIKU_MODEL, ANTHROPIC_API_KEY
+from bot.agents.claude_reasoning import (
+    call_claude, call_claude_with_tools, HAIKU_MODEL, ANTHROPIC_API_KEY,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+# ── Real tool-use (Phase 1b) ─────────────────────────────────────────────────
+# Ecconos can act, not just describe — it gets the SAME write tools already
+# exposed over MCP (mcp_server/server.py), called directly in-process rather
+# than over the network (same DB, same process, no reason to round-trip
+# through HTTP). Same safety posture as MCP: bounded, reversible, logged
+# trading-CONFIG changes only. set_trading_param/set_algo_mode_tool/
+# toggle_source already hard-refuse trade_mode/live_trading_armed
+# (WRITE_BLOCKLIST in mcp_server/server.py) regardless of what's asked here.
+ECCONOS_TOOLS = [
+    {
+        "name": "set_trading_param",
+        "description": (
+            "Set a trading-config param to a new value, immediately, live. "
+            "No confirmation step. `reason` is required and gets logged. "
+            "Refuses to touch 'trade_mode' or 'live_trading_armed' under "
+            "any circumstance."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "value": {"type": "number"},
+                "reason": {"type": "string"},
+            },
+            "required": ["name", "value", "reason"],
+        },
+    },
+    {
+        "name": "set_algo_mode_tool",
+        "description": (
+            "Set a custom algo's mode: 'off', 'manual' (alert only), or "
+            "'auto' (trades on its own). Immediate, no confirmation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "mode": {"type": "string"},
+            },
+            "required": ["name", "mode"],
+        },
+    },
+    {
+        "name": "toggle_source",
+        "description": (
+            "Turn an entire signal source on/off at the structural level. "
+            "`source` is one of: 'scanner', '4am', 'algo_engine'. `reason` "
+            "is required and logged."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string"},
+                "enabled": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": ["source", "enabled", "reason"],
+        },
+    },
+]
+
+
+async def _execute_ecconos_tool(name: str, tool_input: dict) -> dict:
+    from mcp_server.server import (
+        set_trading_param, set_algo_mode_tool, toggle_source,
+    )
+    if name == "set_trading_param":
+        return await set_trading_param(**tool_input)
+    if name == "set_algo_mode_tool":
+        return await set_algo_mode_tool(**tool_input)
+    if name == "toggle_source":
+        return await toggle_source(**tool_input)
+    return {"error": f"unknown tool '{name}'"}
 
 # Anthropic Haiku pricing estimate (same constants used elsewhere in this repo).
 _PRICE_IN = 1.0 / 1_000_000
@@ -134,9 +210,28 @@ async def _reply(message: Message) -> None:
         f"LIVE PROJECT CONTEXT:\n{ctx_str}\n\n"
         f"Reply to the most recent message, in character."
     )
-    text = await call_claude(
-        system=ECCONOS_SYSTEM, user=user_msg, model=HAIKU_MODEL, max_tokens=400,
-    )
+
+    # Tool-use is admin-only. Ecconos reads every message in the public
+    # group (privacy mode off), so without this gate, ANY user's message
+    # could attempt to prompt-inject a live trading-config write
+    # (set_trading_param / toggle_source / set_algo_mode_tool) with zero
+    # human review — that's a real prompt-injection surface, not something
+    # "full autonomy" was ever meant to open up to the public. Ecconos can
+    # still act autonomously on its OWN initiative elsewhere (e.g. the
+    # discretionary trading loop, which reasons over vetted candidate data,
+    # not arbitrary chat text) — this gate is specifically about actions
+    # triggered by someone else's message content.
+    sender_id = message.from_user.id if message.from_user else None
+    is_admin = sender_id is not None and sender_id in ECCONOS_ADMIN_IDS
+    if is_admin:
+        text = await call_claude_with_tools(
+            system=ECCONOS_SYSTEM, user=user_msg, tools=ECCONOS_TOOLS,
+            tool_executor=_execute_ecconos_tool, model=HAIKU_MODEL, max_tokens=400,
+        )
+    else:
+        text = await call_claude(
+            system=ECCONOS_SYSTEM, user=user_msg, model=HAIKU_MODEL, max_tokens=400,
+        )
     if not text:
         return
     _spend_record(input_toks=len(user_msg) // 3, output_toks=len(text) // 3)

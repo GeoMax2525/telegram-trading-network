@@ -83,6 +83,7 @@ from database.models import (  # noqa: E402
     AgentParam,
     AsyncSessionLocal,
     Candidate,
+    ClaudeDiscretionaryAction,
     META_CLOSE_REASONS,
     PaperTrade,
     STRATEGY_CLOSE_REASONS,
@@ -757,6 +758,50 @@ async def toggle_source(source: str, enabled: bool, reason: str) -> dict:
                 "use one of: scanner, 4am, algo_engine"}
     await set_param(key, 1.0 if enabled else 0.0, reason=reason)
     return {"applied": True, "source": source, "enabled": enabled, "param": key, "reason": reason}
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_discretionary_actions(limit: int = 20) -> dict:
+    """Recent Claude discretionary-play decisions (Phase 6) — both OPEN and
+    SKIP, newest first. Mirrors the claude_discretionary_actions table.
+    Shows what Claude has been considering on its own initiative, not just
+    what it actually traded."""
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(ClaudeDiscretionaryAction)
+            .order_by(ClaudeDiscretionaryAction.id.desc())
+            .limit(max(1, min(limit, 100)))
+        )).scalars().all()
+    return {
+        "actions": [
+            {
+                "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+                "token_name": r.token_name,
+                "token_address": r.token_address,
+                "action": r.action,
+                "reason": r.reason,
+                "confidence": r.confidence,
+                "rug_score": r.rug_score,
+                "model_tier": r.model_tier,
+                "cost_usd": r.cost_usd,
+                "trade_id": r.trade_id,
+                "announced": r.announced,
+            }
+            for r in rows
+        ],
+    }
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+async def trigger_discretionary_scan() -> dict:
+    """Force one Claude discretionary-trading evaluation cycle right now,
+    instead of waiting for the 5-min timer. Runs the exact same code path
+    as the background loop (not a separate copy) — useful for testing
+    without waiting. Still respects claude_discretionary_enabled and every
+    other gate/budget check; calling this when the feature is off just
+    returns {"enabled": false} and does nothing."""
+    from bot.agents.claude_discretionary import run_once
+    return await run_once()
 
 
 if __name__ == "__main__":
