@@ -17,6 +17,7 @@ Tables:
   param_changes    — log of every parameter change with reason.
 """
 
+import json
 import logging
 import os
 from datetime import datetime, timedelta
@@ -503,6 +504,30 @@ class ClaudeDiscretionaryAction(Base):
     cost_usd        = Column(Float,    nullable=True)
     trade_id        = Column(Integer,  nullable=True, index=True)  # set when action=OPEN
     announced       = Column(Boolean,  nullable=False, default=False)
+
+
+class ClaudeEngineerAttempt(Base):
+    """Phase 2: log every attempt of Ecconos's self-shipping code
+    pipeline — shipped or not. Since there is no human approval step for
+    this pipeline, this table (surfaced via the get_engineer_status admin
+    tool) is the primary oversight mechanism, so it needs to actually be
+    complete, not just a token audit log."""
+    __tablename__ = "claude_engineer_attempts"
+
+    id                = Column(Integer,  primary_key=True, autoincrement=True)
+    requested_at      = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    requested_by      = Column(BigInteger, nullable=True)  # Telegram admin user id
+    description       = Column(Text,     nullable=False)
+    status            = Column(String(32), nullable=False)
+    # running / shipped / failed_gates / failed_no_finish / push_failed /
+    # deploy_unhealthy_rolled_back / rollback_failed / error
+    files_changed_json = Column(Text,    nullable=True)
+    commit_sha        = Column(String(64), nullable=True)
+    revert_sha        = Column(String(64), nullable=True)
+    gate_results_json = Column(Text,     nullable=True)
+    cost_usd          = Column(Float,    nullable=True)
+    duration_sec      = Column(Float,    nullable=True)
+    rolled_back       = Column(Boolean,  nullable=False, default=False)
 
 
 # ── Paper Trades table ────────────────────────────────────────────────────────
@@ -4189,6 +4214,19 @@ AGENT_PARAM_DEFAULTS = {
     "claude_discretionary_max_open":             3.0,
     "claude_discretionary_size_sol":             0.15,
     "claude_announce_enabled":                   1.0,  # separate toggle for the public post
+
+    # ── Claude engineer self-shipping code pipeline (Phase 2) ────────────────
+    # Off by default -- this ships code with zero human review. See
+    # bot/agents/claude_engineer.py for the full safety design (isolated
+    # clone, 6-gate test sequence, auto-rollback on unhealthy deploy).
+    "claude_engineer_enabled":                   0.0,
+    "claude_engineer_max_changes_per_day":       2.0,  # lower than discretionary trading's 3 -- bigger blast radius
+    "claude_engineer_daily_budget_usd":          3.0,
+    "claude_engineer_max_gate_retries":          3.0,
+    "claude_engineer_max_turns_per_attempt":    12.0,
+    "claude_engineer_max_files_changed":         4.0,
+    "claude_engineer_max_lines_changed":       150.0,
+    "claude_engineer_health_poll_max_wait_sec": 600.0,
 }
 
 
@@ -5468,3 +5506,42 @@ async def is_authorized(telegram_id: int) -> bool:
         return True
     sub = await get_subscriber(telegram_id)
     return sub is not None and sub.status == "active"
+
+
+# ── Claude engineer pipeline helpers (Phase 2) ───────────────────────────────
+
+async def get_engineer_attempts_today_count() -> int:
+    """How many engineer attempts (of any outcome) started today (UTC) —
+    used for the daily rate cap before a new attempt is even started."""
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    async with AsyncSessionLocal() as session:
+        return (await session.execute(
+            select(func.count(ClaudeEngineerAttempt.id)).where(
+                ClaudeEngineerAttempt.requested_at >= today_start,
+            )
+        )).scalar() or 0
+
+
+async def log_engineer_attempt(
+    *, requested_by: int | None, description: str, status: str,
+    files_changed: list[str], commit_sha: str | None, revert_sha: str | None,
+    gate_results: list[dict], cost_usd: float, duration_sec: float, rolled_back: bool,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        session.add(ClaudeEngineerAttempt(
+            requested_by=requested_by, description=description[:4000], status=status[:32],
+            files_changed_json=json.dumps(files_changed, separators=(",", ":")),
+            commit_sha=commit_sha, revert_sha=revert_sha,
+            gate_results_json=json.dumps(gate_results, separators=(",", ":"), default=str),
+            cost_usd=cost_usd, duration_sec=duration_sec, rolled_back=rolled_back,
+        ))
+        await session.commit()
+
+
+async def get_recent_engineer_attempts(limit: int = 10) -> list["ClaudeEngineerAttempt"]:
+    async with AsyncSessionLocal() as session:
+        return list((await session.execute(
+            select(ClaudeEngineerAttempt)
+            .order_by(ClaudeEngineerAttempt.id.desc())
+            .limit(limit)
+        )).scalars().all())

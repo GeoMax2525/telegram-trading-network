@@ -271,6 +271,17 @@ async def main() -> None:
             "continues without it.", exc,
         )
 
+    # Phase 2: sweep any stale scratch workspaces left over from a
+    # claude_engineer attempt that was mid-flight when the container last
+    # restarted. Runs once at boot; each new attempt also sweeps before
+    # starting. Reactive-only pipeline (no background loop to wire here) —
+    # see bot/agents/claude_engineer.py.
+    try:
+        from bot.agents.claude_engineer import sweep_stale_workspaces
+        asyncio.create_task(sweep_stale_workspaces())
+    except Exception as exc:
+        logger.error("Claude engineer startup sweep failed (%s) — non-fatal.", exc)
+
     # Dashboard web server — serves /api/dashboard + the MCP tools mount.
     # Skipped only if DISABLE_WEB=1 (e.g. local-only bot mode).
     #

@@ -139,29 +139,92 @@ ECCONOS_WRITE_TOOLS = [
             "required": ["text"],
         },
     },
+    {
+        "name": "propose_code_change",
+        "description": (
+            "Write, test, and ship a real code change to this bot's own "
+            "repository -- an isolated pipeline clones the repo fresh, "
+            "writes the change, runs a full automated test gate (syntax, "
+            "dependency resolution, import checks, the existing test "
+            "suite), and only ships it if everything passes. Off unless "
+            "claude_engineer_enabled is set; runs in the background and "
+            "reports back to HQ when done (can take several minutes) -- "
+            "this call returns immediately, it does not wait for the "
+            "result. Use only for concrete, well-scoped changes you can "
+            "describe precisely, not vague ideas."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "description": "Precise description of the change to make."},
+            },
+            "required": ["description"],
+        },
+    },
+    {
+        "name": "get_engineer_status",
+        "description": "Recent attempts by the self-shipping code pipeline -- what was tried, whether it shipped, failed, or rolled back.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer"}},
+        },
+    },
 ]
 
 
-async def _execute_ecconos_tool(name: str, tool_input: dict) -> dict:
-    from mcp_server.server import (
-        set_trading_param, set_algo_mode_tool, toggle_source,
-        get_hub_status, get_open_trades,
-    )
-    if name == "get_hub_status":
-        return await get_hub_status()
-    if name == "get_open_trades":
-        return await get_open_trades()
-    if name == "set_trading_param":
-        return await set_trading_param(**tool_input)
-    if name == "set_algo_mode_tool":
-        return await set_algo_mode_tool(**tool_input)
-    if name == "toggle_source":
-        return await toggle_source(**tool_input)
-    if name == "post_to_main_chat":
-        from bot.ecconos.announce import post_as_ecconos
-        ok = await post_as_ecconos(tool_input.get("text", ""))
-        return {"posted": ok}
-    return {"error": f"unknown tool '{name}'"}
+def _make_tool_executor(sender_id: int | None):
+    """Returns a tool_executor closure carrying the requesting admin's
+    Telegram id -- needed by propose_code_change (requested_by, and
+    where to report the eventual result) without threading extra
+    parameters through call_claude_with_tools' generic callback signature."""
+
+    async def _execute(name: str, tool_input: dict) -> dict:
+        from mcp_server.server import (
+            set_trading_param, set_algo_mode_tool, toggle_source,
+            get_hub_status, get_open_trades,
+        )
+        if name == "get_hub_status":
+            return await get_hub_status()
+        if name == "get_open_trades":
+            return await get_open_trades()
+        if name == "set_trading_param":
+            return await set_trading_param(**tool_input)
+        if name == "set_algo_mode_tool":
+            return await set_algo_mode_tool(**tool_input)
+        if name == "toggle_source":
+            return await toggle_source(**tool_input)
+        if name == "post_to_main_chat":
+            from bot.ecconos.announce import post_as_ecconos
+            ok = await post_as_ecconos(tool_input.get("text", ""))
+            return {"posted": ok}
+        if name == "propose_code_change":
+            from bot.agents.claude_engineer import propose_code_change
+            from bot.ecconos.announce import post_as_ecconos
+            from bot.config import CALLER_GROUP_ID
+
+            async def _notify(text: str) -> None:
+                await post_as_ecconos(text, chat_id=CALLER_GROUP_ID)
+
+            return await propose_code_change(
+                description=tool_input.get("description", ""),
+                requested_by=sender_id, notify=_notify,
+            )
+        if name == "get_engineer_status":
+            from database.models import get_recent_engineer_attempts
+            rows = await get_recent_engineer_attempts(int(tool_input.get("limit") or 10))
+            return {
+                "attempts": [
+                    {
+                        "requested_at": r.requested_at.isoformat() if r.requested_at else None,
+                        "description": r.description, "status": r.status,
+                        "commit_sha": r.commit_sha, "rolled_back": r.rolled_back,
+                    }
+                    for r in rows
+                ],
+            }
+        return {"error": f"unknown tool '{name}'"}
+
+    return _execute
 
 # Anthropic Haiku pricing estimate (same constants used elsewhere in this repo).
 _PRICE_IN = 1.0 / 1_000_000
@@ -284,7 +347,7 @@ async def _reply(message: Message) -> None:
     tools = ECCONOS_READ_TOOLS + ECCONOS_WRITE_TOOLS if is_admin else ECCONOS_READ_TOOLS
     text = await call_claude_with_tools(
         system=ECCONOS_SYSTEM, user=user_msg, tools=tools,
-        tool_executor=_execute_ecconos_tool, model=HAIKU_MODEL, max_tokens=400,
+        tool_executor=_make_tool_executor(sender_id), model=HAIKU_MODEL, max_tokens=400,
     )
     if not text:
         return
