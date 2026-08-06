@@ -54,6 +54,19 @@ FABLE_MODEL = os.getenv("ANTHROPIC_FABLE_MODEL", "claude-opus-5").strip()
 
 TIMEOUT_SEC = 15.0
 
+# Server-side web search — Anthropic runs the actual search and hands
+# Claude the results within the same request; no scraping/search
+# infrastructure needed on our side. Verified schema against Anthropic's
+# live docs before using (same discipline as the model ID bumps above —
+# not guessing at an unverified tool type). $10/1000 searches + normal
+# token cost; max_uses caps it per call, real cost control, not just a
+# budget-tracking afterthought. Pass as `tools=[WEB_SEARCH_TOOL]` to
+# call_claude or call_claude_with_tools — works with either, since a
+# search-only turn (no client tool_use blocks) already falls through
+# call_claude_with_tools' existing "no tool_use -> return text" path with
+# zero changes needed there.
+WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+
 # Last failure detail from call_claude — lets operator commands show the
 # real error instead of "check Railway logs".
 LAST_ERROR: str | None = None

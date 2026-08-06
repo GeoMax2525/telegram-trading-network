@@ -51,7 +51,8 @@ from bot.agents.claude_engineer_gates import (
 )
 from bot.agents.claude_engineer_tools import ENGINEER_TOOLS, EngineerToolExecutor
 from bot.agents.claude_reasoning import (
-    ANTHROPIC_API_KEY, ANTHROPIC_URL, SONNET_MODEL, call_claude, parse_json_response,
+    ANTHROPIC_API_KEY, ANTHROPIC_URL, SONNET_MODEL,
+    call_claude, parse_json_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -532,7 +533,7 @@ async def _page_admins(text: str) -> None:
 
 OPPORTUNITY_SYSTEM_PROMPT = """You are reviewing a Solana memecoin paper-trading bot's recent state to decide if a CODE CHANGE (not a parameter tune) is worth proposing right now. Nobody is asking you to do this -- you're deciding on your own initiative, and if you say yes, the change ships automatically with no human review.
 
-You'll see: the last few daily strategy reviews (structured summaries of trading performance + parameter recommendations), recent attempts by this same code-shipping pipeline (so you don't repeat something that already failed or got rolled back), and recent scans like this one (so you don't repeat an idea you already surfaced).
+You'll see: the last few daily strategy reviews (structured summaries of trading performance + parameter recommendations), recent attempts by this same code-shipping pipeline (so you don't repeat something that already failed or got rolled back), and recent scans like this one (so you don't repeat an idea you already surfaced). This is the ONLY data you have -- no web access, no external content. Base your decision entirely on these internal, already-verified sources.
 
 CRITICAL SCOPE RULE: you may only propose an actual CODE change -- a structural gap, a recurring bug pattern, a missing safety check, better handling of something that keeps showing up as a problem. If the right fix is really a parameter value, that is NOT your job -- the daily strategy review + apply_review already handles parameter tuning. Proposing a parameter tune here is a scope violation, not a valid PROPOSE.
 
@@ -621,6 +622,17 @@ async def run_opportunity_scan() -> dict | None:
     digest = _build_scan_digest(reviews, attempts, scans)
 
     user_msg = "STATE\n\n" + json.dumps(digest, separators=(",", ":"), default=str)
+    # Deliberately NO web search here -- this scan's output can lead
+    # directly to autonomously shipping code with zero human review. The
+    # six test gates check mechanical correctness (syntax, dependencies,
+    # imports, tests) -- none of them evaluate whether the underlying
+    # LOGIC of a change was shaped by misleading or malicious content read
+    # from the open web. That's a real, unmitigated prompt-injection-to-
+    # production path, not a formality. Bounded, already-structured
+    # internal data only (recent reviews + recent attempts) -- unchanged
+    # from the original design. Web search stays available to Ecconos's
+    # conversational replies, where a bad answer is just a wrong chat
+    # message, not a shipped change.
     text = await call_claude(
         system=OPPORTUNITY_SYSTEM_PROMPT, user=user_msg,
         model=SONNET_MODEL, max_tokens=500, timeout_sec=30.0,

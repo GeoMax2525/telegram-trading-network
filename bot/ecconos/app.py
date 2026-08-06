@@ -29,7 +29,7 @@ from bot.ecconos import (
 )
 from bot.ecconos.persona import ECCONOS_SYSTEM
 from bot.agents.claude_reasoning import (
-    call_claude_with_tools, HAIKU_MODEL, ANTHROPIC_API_KEY,
+    call_claude_with_tools, HAIKU_MODEL, ANTHROPIC_API_KEY, WEB_SEARCH_TOOL,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,10 @@ router = Router()
 # honestly) tell people it couldn't answer specifics about what's actually
 # open — this fixes that real gap, not a bug, just a missing capability.
 ECCONOS_READ_TOOLS = [
+    WEB_SEARCH_TOOL,  # server-side, Anthropic-executed -- real-time research,
+                      # available to everyone same as the other read tools
+                      # (no state mutation, cost bounded by max_uses + the
+                      # existing daily budget/rate caps below)
     {
         "name": "get_hub_status",
         "description": (
