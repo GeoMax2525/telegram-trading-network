@@ -516,7 +516,11 @@ class ClaudeEngineerAttempt(Base):
 
     id                = Column(Integer,  primary_key=True, autoincrement=True)
     requested_at      = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    requested_by      = Column(BigInteger, nullable=True)  # Telegram admin user id
+    # Telegram admin user id for a reactive (admin-requested) attempt.
+    # -1 is a reserved sentinel for a PROACTIVE (self-initiated, Phase 3)
+    # attempt -- real Telegram ids are always positive, so this is
+    # unambiguous and queryable. NULL stays reserved for unknown/legacy.
+    requested_by      = Column(BigInteger, nullable=True)
     description       = Column(Text,     nullable=False)
     status            = Column(String(32), nullable=False)
     # running / shipped / failed_gates / failed_no_finish / push_failed /
@@ -528,6 +532,26 @@ class ClaudeEngineerAttempt(Base):
     cost_usd          = Column(Float,    nullable=True)
     duration_sec      = Column(Float,    nullable=True)
     rolled_back       = Column(Boolean,  nullable=False, default=False)
+
+
+class ClaudeEngineerScan(Base):
+    """Phase 3: log every proactive opportunity-scan tick, regardless of
+    outcome -- act / mention-only (worth_mentioning) / capped-mention /
+    silent-nothing. Complete audit trail independent of what actually
+    reaches HQ chat (only some outcomes generate a message)."""
+    __tablename__ = "claude_engineer_scans"
+
+    id                = Column(Integer,  primary_key=True, autoincrement=True)
+    scanned_at        = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    action            = Column(String(16), nullable=False)   # PROPOSE / NONE
+    description       = Column(Text,     nullable=True)      # the proposed change, if action=PROPOSE
+    confidence        = Column(String(16), nullable=True)    # low / medium / high
+    reason            = Column(Text,     nullable=True)
+    worth_mentioning  = Column(Boolean,  nullable=False, default=False)
+    acted             = Column(Boolean,  nullable=False, default=False)  # True if this scan actually kicked off an attempt
+    capped            = Column(Boolean,  nullable=False, default=False)  # True if PROPOSE+high but blocked by a cap
+    attempt_id        = Column(Integer,  nullable=True)      # ClaudeEngineerAttempt.id, if acted=True
+    cost_usd          = Column(Float,    nullable=True)
 
 
 # ── Paper Trades table ────────────────────────────────────────────────────────
@@ -4227,6 +4251,18 @@ AGENT_PARAM_DEFAULTS = {
     "claude_engineer_max_files_changed":         4.0,
     "claude_engineer_max_lines_changed":       150.0,
     "claude_engineer_health_poll_max_wait_sec": 600.0,
+
+    # ── Proactive (self-initiated) engineer scanning (Phase 3) ──────────────
+    # Off by default -- decides on its OWN, with nobody asking, whether a
+    # code change is worth attempting. Strict superset of
+    # claude_engineer_enabled (both must be 1); its own daily count/budget
+    # are sub-caps CARVED OUT OF the shared claude_engineer_* caps above,
+    # not additional to them, so an admin's direct request can never be
+    # silently blocked by this loop having already spent today's budget.
+    "claude_engineer_proactive_enabled":            0.0,
+    "claude_engineer_proactive_interval_sec":   21600.0,  # 6h
+    "claude_engineer_proactive_max_per_day":        1.0,  # sub-cap of claude_engineer_max_changes_per_day=2
+    "claude_engineer_proactive_daily_budget_usd":   1.0,  # sub-cap of claude_engineer_daily_budget_usd=3.0
 }
 
 
@@ -5508,34 +5544,57 @@ async def is_authorized(telegram_id: int) -> bool:
     return sub is not None and sub.status == "active"
 
 
-# ── Claude engineer pipeline helpers (Phase 2) ───────────────────────────────
+# ── Claude engineer pipeline helpers (Phase 2 + Phase 3 proactive) ──────────
 
-async def get_engineer_attempts_today_count() -> int:
+async def get_engineer_attempts_today_count(requested_by: int | None = None) -> int:
     """How many engineer attempts (of any outcome) started today (UTC) —
-    used for the daily rate cap before a new attempt is even started."""
+    used for the daily rate cap before a new attempt is even started.
+    Pass requested_by=PROACTIVE_SENTINEL (-1) to count only proactive
+    attempts, for the Phase 3 sub-cap."""
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     async with AsyncSessionLocal() as session:
+        conditions = [ClaudeEngineerAttempt.requested_at >= today_start]
+        if requested_by is not None:
+            conditions.append(ClaudeEngineerAttempt.requested_by == requested_by)
         return (await session.execute(
-            select(func.count(ClaudeEngineerAttempt.id)).where(
-                ClaudeEngineerAttempt.requested_at >= today_start,
-            )
+            select(func.count(ClaudeEngineerAttempt.id)).where(*conditions)
         )).scalar() or 0
+
+
+async def get_engineer_spend_today(requested_by: int | None = None) -> float:
+    """Total cost_usd across today's engineer attempts — was previously
+    fetched into config but never actually enforced anywhere (a real gap,
+    fixed alongside Phase 3). Pass requested_by=PROACTIVE_SENTINEL (-1)
+    for the proactive-only sub-budget check."""
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    async with AsyncSessionLocal() as session:
+        conditions = [ClaudeEngineerAttempt.requested_at >= today_start]
+        if requested_by is not None:
+            conditions.append(ClaudeEngineerAttempt.requested_by == requested_by)
+        return (await session.execute(
+            select(func.coalesce(func.sum(ClaudeEngineerAttempt.cost_usd), 0.0)).where(*conditions)
+        )).scalar() or 0.0
 
 
 async def log_engineer_attempt(
     *, requested_by: int | None, description: str, status: str,
     files_changed: list[str], commit_sha: str | None, revert_sha: str | None,
     gate_results: list[dict], cost_usd: float, duration_sec: float, rolled_back: bool,
-) -> None:
+) -> int:
+    """Returns the new row's id, so a proactive attempt kicked off by a
+    ClaudeEngineerScan can be linked back via scan.attempt_id."""
     async with AsyncSessionLocal() as session:
-        session.add(ClaudeEngineerAttempt(
+        row = ClaudeEngineerAttempt(
             requested_by=requested_by, description=description[:4000], status=status[:32],
             files_changed_json=json.dumps(files_changed, separators=(",", ":")),
             commit_sha=commit_sha, revert_sha=revert_sha,
             gate_results_json=json.dumps(gate_results, separators=(",", ":"), default=str),
             cost_usd=cost_usd, duration_sec=duration_sec, rolled_back=rolled_back,
-        ))
+        )
+        session.add(row)
         await session.commit()
+        await session.refresh(row)
+        return row.id
 
 
 async def get_recent_engineer_attempts(limit: int = 10) -> list["ClaudeEngineerAttempt"]:
@@ -5543,5 +5602,41 @@ async def get_recent_engineer_attempts(limit: int = 10) -> list["ClaudeEngineerA
         return list((await session.execute(
             select(ClaudeEngineerAttempt)
             .order_by(ClaudeEngineerAttempt.id.desc())
+            .limit(limit)
+        )).scalars().all())
+
+
+async def log_engineer_scan(
+    *, action: str, description: str, confidence: str | None, reason: str,
+    worth_mentioning: bool, acted: bool, capped: bool,
+    attempt_id: int | None, cost_usd: float,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        session.add(ClaudeEngineerScan(
+            action=action[:16], description=(description or "")[:4000],
+            confidence=(confidence or "")[:16] or None, reason=(reason or "")[:2000],
+            worth_mentioning=worth_mentioning, acted=acted, capped=capped,
+            attempt_id=attempt_id, cost_usd=cost_usd,
+        ))
+        await session.commit()
+
+
+async def get_recent_engineer_scans(limit: int = 10) -> list["ClaudeEngineerScan"]:
+    async with AsyncSessionLocal() as session:
+        return list((await session.execute(
+            select(ClaudeEngineerScan)
+            .order_by(ClaudeEngineerScan.id.desc())
+            .limit(limit)
+        )).scalars().all())
+
+
+async def get_recent_claude_reviews(limit: int = 3) -> list["ClaudeReview"]:
+    """Most recent daily strategy reviews (claude_cold's output) — feeds
+    the Phase 3 opportunity scan's digest. A pattern across several days
+    is a much safer signal than any single day's review."""
+    async with AsyncSessionLocal() as session:
+        return list((await session.execute(
+            select(ClaudeReview)
+            .order_by(ClaudeReview.id.desc())
             .limit(limit)
         )).scalars().all())

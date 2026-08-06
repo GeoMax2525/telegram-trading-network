@@ -50,7 +50,9 @@ from bot.agents.claude_engineer_gates import (
     gate_dependency_install, gate_imports, gate_test_suite,
 )
 from bot.agents.claude_engineer_tools import ENGINEER_TOOLS, EngineerToolExecutor
-from bot.agents.claude_reasoning import ANTHROPIC_API_KEY, ANTHROPIC_URL, SONNET_MODEL
+from bot.agents.claude_reasoning import (
+    ANTHROPIC_API_KEY, ANTHROPIC_URL, SONNET_MODEL, call_claude, parse_json_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +297,54 @@ async def _push(workspace: str, pat: str) -> tuple[bool, str]:
     return code == 0, out.replace(pat, "***")
 
 
-# ── Main entry point ─────────────────────────────────────────────────────────
+# Reserved sentinel for a self-initiated (Phase 3 proactive) attempt's
+# requested_by column. Real Telegram ids are always positive.
+PROACTIVE_SENTINEL = -1
+
+
+async def _preflight(
+    cfg: dict, pat: str, sentinel: int | None = None,
+    per_source_max: int | None = None, per_source_budget: float | None = None,
+) -> tuple[bool, str]:
+    """Shared gating for both entry points. `sentinel` + the two
+    per_source_* args add an EXTRA, narrower sub-cap on top of the shared
+    checks -- used by the proactive path so it can never consume more
+    than its own carved-out slice of the shared daily allowance (see
+    propose_code_change_proactive). Reactive calls this with defaults,
+    which is byte-for-byte the same behavior as before this was extracted."""
+    if float(cfg.get("claude_engineer_enabled") or 0.0) < 0.5:
+        return False, "claude_engineer_enabled=0"
+    if not pat:
+        return False, "ECCONOS_ENGINEER_GITHUB_PAT not set"
+    if _attempt_lock.locked():
+        return False, "another attempt is already in progress"
+
+    from database.models import get_engineer_attempts_today_count, get_engineer_spend_today
+
+    total_count = await get_engineer_attempts_today_count()
+    if total_count >= int(cfg.get("claude_engineer_max_changes_per_day") or 2):
+        return False, "daily change limit reached"
+
+    # Fix for a real pre-existing gap: this budget was fetched into cfg
+    # but never actually checked against accumulated spend before today.
+    total_spend = await get_engineer_spend_today()
+    if total_spend >= float(cfg.get("claude_engineer_daily_budget_usd") or 3.0):
+        return False, "daily budget reached"
+
+    if sentinel is not None:
+        if per_source_max is not None:
+            sub_count = await get_engineer_attempts_today_count(requested_by=sentinel)
+            if sub_count >= per_source_max:
+                return False, "proactive daily change limit reached"
+        if per_source_budget is not None:
+            sub_spend = await get_engineer_spend_today(requested_by=sentinel)
+            if sub_spend >= per_source_budget:
+                return False, "proactive daily budget reached"
+
+    return True, ""
+
+
+# ── Main entry point (reactive — an admin asked for this specific change) ───
 
 async def propose_code_change(description: str, requested_by: int, notify) -> dict:
     """Kicks off one full attempt. `notify(text)` is an async callable
@@ -311,26 +360,21 @@ async def propose_code_change(description: str, requested_by: int, notify) -> di
         "claude_engineer_max_turns_per_attempt", "claude_engineer_max_files_changed",
         "claude_engineer_max_lines_changed", "claude_engineer_health_poll_max_wait_sec",
     )
-    if float(cfg.get("claude_engineer_enabled") or 0.0) < 0.5:
-        return {"started": False, "reason": "claude_engineer_enabled=0"}
-
     pat = os.getenv("ECCONOS_ENGINEER_GITHUB_PAT", "").strip()
-    if not pat:
-        return {"started": False, "reason": "ECCONOS_ENGINEER_GITHUB_PAT not set"}
 
-    if _attempt_lock.locked():
-        return {"started": False, "reason": "another attempt is already in progress"}
-
-    from database.models import get_engineer_attempts_today_count
-    today_count = await get_engineer_attempts_today_count()
-    if today_count >= int(cfg.get("claude_engineer_max_changes_per_day") or 2):
-        return {"started": False, "reason": "daily change limit reached"}
+    ok, reason = await _preflight(cfg, pat)
+    if not ok:
+        return {"started": False, "reason": reason}
 
     asyncio.create_task(_run_attempt(description, requested_by, notify, cfg, pat))
     return {"started": True}
 
 
-async def _run_attempt(description: str, requested_by: int, notify, cfg: dict, pat: str) -> None:
+async def _run_attempt(description: str, requested_by: int, notify, cfg: dict, pat: str) -> dict:
+    """Returns {"attempt_id": int, "status": str, "cost_usd": float} once
+    logged -- the reactive caller (asyncio.create_task, fire-and-forget)
+    ignores this; the proactive caller (Phase 3, awaits this directly)
+    uses it to link the triggering ClaudeEngineerScan row."""
     from database.models import log_engineer_attempt
 
     async with _attempt_lock:
@@ -433,7 +477,7 @@ async def _run_attempt(description: str, requested_by: int, notify, cfg: dict, p
                 shutil.rmtree(workspace, ignore_errors=True)
 
         duration = _time.time() - t0
-        await log_engineer_attempt(
+        attempt_id = await log_engineer_attempt(
             requested_by=requested_by, description=description, status=status,
             files_changed=sorted(executor.changed_files) if 'executor' in dir() else [],
             commit_sha=commit_sha, revert_sha=revert_sha,
@@ -445,6 +489,8 @@ async def _run_attempt(description: str, requested_by: int, notify, cfg: dict, p
             await notify(_summarize_for_admin(status, description, commit_sha, revert_sha))
         except Exception as exc:
             logger.debug("claude_engineer: notify failed: %s", exc)
+
+        return {"attempt_id": attempt_id, "status": status, "cost_usd": round(cost_usd, 4)}
 
 
 def _summarize_for_admin(status: str, description: str, commit_sha: str | None, revert_sha: str | None) -> str:
@@ -474,3 +520,226 @@ async def _page_admins(text: str) -> None:
                 pass
     except Exception:
         pass
+
+
+# ── Phase 3: proactive opportunity scan ─────────────────────────────────────
+# Ecconos deciding FOR ITSELF, on a schedule, whether a code change is worth
+# attempting -- nobody asks. Deliberately fed only two bounded, already-
+# structured data sources (never raw logs/trades/code) -- see the digest
+# builder below. A second, independent confidence gate on top of the six
+# existing test gates: the scan decides whether to try at all, the gates
+# decide whether the attempt is safe to ship. Both must pass.
+
+OPPORTUNITY_SYSTEM_PROMPT = """You are reviewing a Solana memecoin paper-trading bot's recent state to decide if a CODE CHANGE (not a parameter tune) is worth proposing right now. Nobody is asking you to do this -- you're deciding on your own initiative, and if you say yes, the change ships automatically with no human review.
+
+You'll see: the last few daily strategy reviews (structured summaries of trading performance + parameter recommendations), recent attempts by this same code-shipping pipeline (so you don't repeat something that already failed or got rolled back), and recent scans like this one (so you don't repeat an idea you already surfaced).
+
+CRITICAL SCOPE RULE: you may only propose an actual CODE change -- a structural gap, a recurring bug pattern, a missing safety check, better handling of something that keeps showing up as a problem. If the right fix is really a parameter value, that is NOT your job -- the daily strategy review + apply_review already handles parameter tuning. Proposing a parameter tune here is a scope violation, not a valid PROPOSE.
+
+A wrong PROPOSE is expensive in a way a wrong NONE never is -- it consumes today's limited attempt budget and, if it ships something subtly wrong, real trading behavior changes. Only ever return "PROPOSE" at confidence "high". If you're not genuinely confident, return "NONE" -- there is no penalty for that, and NONE should be the common, expected result most of the time.
+
+Output STRICT JSON only:
+{
+  "action": "PROPOSE" | "NONE",
+  "description": "<precise description of the code change, if PROPOSE -- empty string if NONE>",
+  "confidence": "low" | "medium" | "high",
+  "reason": "<why -- specific, references the actual data you saw>",
+  "worth_mentioning": true | false
+}
+
+worth_mentioning: set this true if you have a genuinely specific idea worth surfacing to the operator even when action is NONE (e.g. you noticed something interesting but aren't confident enough to act, or you're proposing but confidence isn't "high" so it won't actually run). Set it false for the default case of "nothing in particular stood out this cycle" -- that case should produce NO message to the operator, so don't inflate this."""
+
+
+def _build_scan_digest(reviews: list, attempts: list, scans: list) -> dict:
+    """Aggregates the three bounded input sources into a compact JSON
+    digest -- Claude never sees raw rows, only this summary. Same
+    philosophy as claude_cold._build_trade_summary: do the aggregation in
+    Python, hand the model a digest, not a data dump."""
+    review_digest = []
+    for r in reviews:
+        try:
+            parsed = json.loads(r.review_json)
+        except Exception:
+            parsed = {}
+        review_digest.append({
+            "generated_at": r.generated_at.isoformat() if r.generated_at else None,
+            "trade_count": r.trade_count,
+            "summary": parsed.get("summary"),
+            "recommendations": parsed.get("recommendations") or [],
+            "no_change_explanation": parsed.get("no_change_explanation"),
+            "applied": r.applied,
+        })
+
+    attempt_digest = []
+    for a in attempts:
+        first_failed_gate = None
+        try:
+            gate_results = json.loads(a.gate_results_json or "[]")
+            for g in gate_results:
+                if not g.get("passed"):
+                    first_failed_gate = g.get("gate")
+                    break
+        except Exception:
+            pass
+        attempt_digest.append({
+            "requested_at": a.requested_at.isoformat() if a.requested_at else None,
+            "requested_by": a.requested_by,
+            "description": a.description,
+            "status": a.status,
+            "rolled_back": a.rolled_back,
+            "first_failed_gate": first_failed_gate,
+        })
+
+    scan_digest = []
+    for s in scans:
+        scan_digest.append({
+            "scanned_at": s.scanned_at.isoformat() if s.scanned_at else None,
+            "action": s.action,
+            "description": s.description,
+            "worth_mentioning": s.worth_mentioning,
+            "reason": s.reason,
+        })
+
+    return {
+        "recent_reviews": review_digest,
+        "recent_engineer_attempts": attempt_digest,
+        "recent_scans": scan_digest,
+    }
+
+
+async def run_opportunity_scan() -> dict | None:
+    """One Sonnet call over the bounded digest. Returns the parsed verdict
+    dict, or None on any failure (API error, unparseable response) --
+    callers treat None identically to action=NONE."""
+    from database.models import (
+        get_recent_claude_reviews, get_recent_engineer_attempts, get_recent_engineer_scans,
+    )
+
+    reviews = await get_recent_claude_reviews(3)
+    attempts = await get_recent_engineer_attempts(15)
+    scans = await get_recent_engineer_scans(10)
+    digest = _build_scan_digest(reviews, attempts, scans)
+
+    user_msg = "STATE\n\n" + json.dumps(digest, separators=(",", ":"), default=str)
+    text = await call_claude(
+        system=OPPORTUNITY_SYSTEM_PROMPT, user=user_msg,
+        model=SONNET_MODEL, max_tokens=500, timeout_sec=30.0,
+    )
+    if not text:
+        return None
+    parsed = parse_json_response(text)
+    if not parsed:
+        return None
+
+    return {
+        "action": str(parsed.get("action", "NONE")).upper(),
+        "description": str(parsed.get("description", ""))[:2000],
+        "confidence": str(parsed.get("confidence", "low")).lower(),
+        "reason": str(parsed.get("reason", ""))[:1000],
+        "worth_mentioning": bool(parsed.get("worth_mentioning", False)),
+    }
+
+
+# ── Phase 3: proactive entry point + background loop ────────────────────────
+
+async def propose_code_change_proactive() -> None:
+    """One full proactive cycle: scan, decide, and either kick off an
+    attempt or (maybe) just surface an idea. Always logs to
+    ClaudeEngineerScan regardless of outcome."""
+    from database.models import (
+        get_params, get_recent_engineer_attempts, log_engineer_scan,
+    )
+    from bot.ecconos.announce import post_as_ecconos
+    from bot.config import CALLER_GROUP_ID
+
+    async def _notify(text: str) -> None:
+        await post_as_ecconos(text, chat_id=CALLER_GROUP_ID)
+
+    cfg = await get_params(
+        "claude_engineer_enabled", "claude_engineer_proactive_enabled",
+        "claude_engineer_max_changes_per_day", "claude_engineer_daily_budget_usd",
+        "claude_engineer_proactive_max_per_day", "claude_engineer_proactive_daily_budget_usd",
+        "claude_engineer_max_gate_retries", "claude_engineer_max_turns_per_attempt",
+        "claude_engineer_max_files_changed", "claude_engineer_max_lines_changed",
+        "claude_engineer_health_poll_max_wait_sec",
+    )
+    # Proactive is a strict superset of the reactive kill switch -- both
+    # must be on. Checked BEFORE spending a scan call, since scanning
+    # while the underlying pipeline is off is pure wasted cost.
+    if float(cfg.get("claude_engineer_enabled") or 0.0) < 0.5:
+        return
+    if float(cfg.get("claude_engineer_proactive_enabled") or 0.0) < 0.5:
+        return
+
+    verdict = await run_opportunity_scan()
+    if verdict is None:
+        return  # API/parse failure -- treated as a silent NONE, no log spam for transient errors
+
+    action = verdict["action"]
+    high_confidence_propose = action == "PROPOSE" and verdict["confidence"] == "high"
+
+    if not high_confidence_propose:
+        # NONE, or a PROPOSE that didn't clear the confidence bar -- never
+        # attempted. Only message HQ if there's a genuine idea to surface.
+        if verdict["worth_mentioning"]:
+            await _notify(f"Something I noticed, not acting on it: {verdict['reason']}")
+        await log_engineer_scan(
+            action=action, description=verdict["description"], confidence=verdict["confidence"],
+            reason=verdict["reason"], worth_mentioning=verdict["worth_mentioning"],
+            acted=False, capped=False, attempt_id=None, cost_usd=0.0,
+        )
+        return
+
+    pat = os.getenv("ECCONOS_ENGINEER_GITHUB_PAT", "").strip()
+    ok, reason = await _preflight(
+        cfg, pat, sentinel=PROACTIVE_SENTINEL,
+        per_source_max=int(cfg.get("claude_engineer_proactive_max_per_day") or 1),
+        per_source_budget=float(cfg.get("claude_engineer_proactive_daily_budget_usd") or 1.0),
+    )
+    if not ok:
+        # High-confidence idea, but capped -- surface it rather than silently dropping it.
+        await _notify(f"Found something worth doing, but today's proactive budget/slot is used ({reason}). Revisiting next window: {verdict['description']}")
+        await log_engineer_scan(
+            action=action, description=verdict["description"], confidence=verdict["confidence"],
+            reason=verdict["reason"], worth_mentioning=True,
+            acted=False, capped=True, attempt_id=None, cost_usd=0.0,
+        )
+        return
+
+    await _notify(f"Working on something on my own: {verdict['description']}\n\n{verdict['reason']}")
+    result = await _run_attempt(verdict["description"], PROACTIVE_SENTINEL, _notify, cfg, pat)
+    await log_engineer_scan(
+        action=action, description=verdict["description"], confidence=verdict["confidence"],
+        reason=verdict["reason"], worth_mentioning=True,
+        acted=True, capped=False, attempt_id=result.get("attempt_id"), cost_usd=result.get("cost_usd", 0.0),
+    )
+
+
+async def claude_engineer_proactive_loop() -> None:
+    """Background loop -- ticks every claude_engineer_proactive_interval_sec
+    (default 6h). No-ops entirely unless both claude_engineer_enabled and
+    claude_engineer_proactive_enabled are set."""
+    logger.info(
+        "claude_engineer_proactive: starting (will no-op unless "
+        "claude_engineer_enabled=1 AND claude_engineer_proactive_enabled=1)"
+    )
+    while True:
+        try:
+            if not ANTHROPIC_API_KEY:
+                await asyncio.sleep(21600)
+                continue
+            await propose_code_change_proactive()
+        except asyncio.CancelledError:
+            logger.info("claude_engineer_proactive: cancelled")
+            raise
+        except Exception as exc:
+            logger.error("claude_engineer_proactive: cycle error: %s", exc)
+
+        interval = 21600.0
+        try:
+            from database.models import get_params
+            cfg = await get_params("claude_engineer_proactive_interval_sec")
+            interval = float(cfg.get("claude_engineer_proactive_interval_sec") or 21600.0)
+        except Exception:
+            pass
+        await asyncio.sleep(interval)

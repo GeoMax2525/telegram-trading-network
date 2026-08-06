@@ -274,13 +274,28 @@ async def main() -> None:
     # Phase 2: sweep any stale scratch workspaces left over from a
     # claude_engineer attempt that was mid-flight when the container last
     # restarted. Runs once at boot; each new attempt also sweeps before
-    # starting. Reactive-only pipeline (no background loop to wire here) —
-    # see bot/agents/claude_engineer.py.
+    # starting. See bot/agents/claude_engineer.py.
     try:
         from bot.agents.claude_engineer import sweep_stale_workspaces
         asyncio.create_task(sweep_stale_workspaces())
     except Exception as exc:
         logger.error("Claude engineer startup sweep failed (%s) — non-fatal.", exc)
+
+    # Phase 3: proactive engineer loop — Ecconos deciding on its OWN, every
+    # ~6h, whether a code change is worth attempting; nobody has to ask.
+    # Strict superset of claude_engineer_enabled (both must be 1) and off
+    # by default (claude_engineer_proactive_enabled=0). Guarded so a bug
+    # here can never take the trading bot down with it, same as every
+    # other autonomous loop.
+    try:
+        from bot.agents.claude_engineer import claude_engineer_proactive_loop
+        asyncio.create_task(claude_engineer_proactive_loop())
+        logger.info("Claude engineer proactive loop: queued for startup")
+    except Exception as exc:
+        logger.error(
+            "Claude engineer proactive loop FAILED TO START (%s) — trading "
+            "bot continues without it.", exc,
+        )
 
     # Dashboard web server — serves /api/dashboard + the MCP tools mount.
     # Skipped only if DISABLE_WEB=1 (e.g. local-only bot mode).

@@ -163,7 +163,7 @@ ECCONOS_WRITE_TOOLS = [
     },
     {
         "name": "get_engineer_status",
-        "description": "Recent attempts by the self-shipping code pipeline -- what was tried, whether it shipped, failed, or rolled back.",
+        "description": "Recent activity from the self-shipping code pipeline -- both actual attempts (what was tried, whether it shipped/failed/rolled back) and proactive scans (what the loop has been considering, including ideas it decided not to act on).",
         "input_schema": {
             "type": "object",
             "properties": {"limit": {"type": "integer"}},
@@ -210,16 +210,28 @@ def _make_tool_executor(sender_id: int | None):
                 requested_by=sender_id, notify=_notify,
             )
         if name == "get_engineer_status":
-            from database.models import get_recent_engineer_attempts
-            rows = await get_recent_engineer_attempts(int(tool_input.get("limit") or 10))
+            from database.models import get_recent_engineer_attempts, get_recent_engineer_scans
+            limit = int(tool_input.get("limit") or 10)
+            rows = await get_recent_engineer_attempts(limit)
+            scans = await get_recent_engineer_scans(limit)
             return {
                 "attempts": [
                     {
                         "requested_at": r.requested_at.isoformat() if r.requested_at else None,
+                        "requested_by": "proactive" if r.requested_by == -1 else r.requested_by,
                         "description": r.description, "status": r.status,
                         "commit_sha": r.commit_sha, "rolled_back": r.rolled_back,
                     }
                     for r in rows
+                ],
+                "recent_scans": [
+                    {
+                        "scanned_at": s.scanned_at.isoformat() if s.scanned_at else None,
+                        "action": s.action, "description": s.description,
+                        "confidence": s.confidence, "worth_mentioning": s.worth_mentioning,
+                        "acted": s.acted, "capped": s.capped,
+                    }
+                    for s in scans
                 ],
             }
         return {"error": f"unknown tool '{name}'"}
