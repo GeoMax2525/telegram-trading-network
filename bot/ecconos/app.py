@@ -29,21 +29,49 @@ from bot.ecconos import (
 )
 from bot.ecconos.persona import ECCONOS_SYSTEM
 from bot.agents.claude_reasoning import (
-    call_claude, call_claude_with_tools, HAIKU_MODEL, ANTHROPIC_API_KEY,
+    call_claude_with_tools, HAIKU_MODEL, ANTHROPIC_API_KEY,
 )
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 # ── Real tool-use (Phase 1b) ─────────────────────────────────────────────────
-# Ecconos can act, not just describe — it gets the SAME write tools already
+# Read tools: available to EVERYONE, not just admins. These are the same
+# read-only MCP tools (mcp_server/server.py) already safe for anyone to
+# query — no state mutation, no injection risk beyond API spend, which is
+# already budget/rate-limited. Without these, Ecconos only ever had a bare
+# open-position COUNT (see _project_context below) and would (correctly,
+# honestly) tell people it couldn't answer specifics about what's actually
+# open — this fixes that real gap, not a bug, just a missing capability.
+ECCONOS_READ_TOOLS = [
+    {
+        "name": "get_hub_status",
+        "description": (
+            "Live snapshot: paper balance, all-time and today's PnL, win "
+            "rate, open position count. Same data /hub shows."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_open_trades",
+        "description": (
+            "Every currently open paper position: token name, entry MC, "
+            "size, last-known peak multiple, age. Use this whenever "
+            "someone asks what's actually open right now."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+]
+
+# Write tools: admin-only (see the is_admin gate in _reply below). Ecconos
+# can act, not just describe — it gets the SAME write tools already
 # exposed over MCP (mcp_server/server.py), called directly in-process rather
 # than over the network (same DB, same process, no reason to round-trip
 # through HTTP). Same safety posture as MCP: bounded, reversible, logged
 # trading-CONFIG changes only. set_trading_param/set_algo_mode_tool/
 # toggle_source already hard-refuse trade_mode/live_trading_armed
 # (WRITE_BLOCKLIST in mcp_server/server.py) regardless of what's asked here.
-ECCONOS_TOOLS = [
+ECCONOS_WRITE_TOOLS = [
     {
         "name": "set_trading_param",
         "description": (
@@ -117,7 +145,12 @@ ECCONOS_TOOLS = [
 async def _execute_ecconos_tool(name: str, tool_input: dict) -> dict:
     from mcp_server.server import (
         set_trading_param, set_algo_mode_tool, toggle_source,
+        get_hub_status, get_open_trades,
     )
+    if name == "get_hub_status":
+        return await get_hub_status()
+    if name == "get_open_trades":
+        return await get_open_trades()
     if name == "set_trading_param":
         return await set_trading_param(**tool_input)
     if name == "set_algo_mode_tool":
@@ -232,7 +265,11 @@ async def _reply(message: Message) -> None:
         f"Reply to the most recent message, in character."
     )
 
-    # Tool-use is admin-only. Ecconos reads every message in the public
+    # Read tools (get_hub_status, get_open_trades) are available to EVERYONE
+    # — safe, no state mutation, this is exactly what community members
+    # asking "what's open right now" need real answers to.
+    #
+    # Write tools are admin-only. Ecconos reads every message in the public
     # group (privacy mode off), so without this gate, ANY user's message
     # could attempt to prompt-inject a live trading-config write
     # (set_trading_param / toggle_source / set_algo_mode_tool) with zero
@@ -244,15 +281,11 @@ async def _reply(message: Message) -> None:
     # triggered by someone else's message content.
     sender_id = message.from_user.id if message.from_user else None
     is_admin = sender_id is not None and sender_id in ECCONOS_ADMIN_IDS
-    if is_admin:
-        text = await call_claude_with_tools(
-            system=ECCONOS_SYSTEM, user=user_msg, tools=ECCONOS_TOOLS,
-            tool_executor=_execute_ecconos_tool, model=HAIKU_MODEL, max_tokens=400,
-        )
-    else:
-        text = await call_claude(
-            system=ECCONOS_SYSTEM, user=user_msg, model=HAIKU_MODEL, max_tokens=400,
-        )
+    tools = ECCONOS_READ_TOOLS + ECCONOS_WRITE_TOOLS if is_admin else ECCONOS_READ_TOOLS
+    text = await call_claude_with_tools(
+        system=ECCONOS_SYSTEM, user=user_msg, tools=tools,
+        tool_executor=_execute_ecconos_tool, model=HAIKU_MODEL, max_tokens=400,
+    )
     if not text:
         return
     _spend_record(input_toks=len(user_msg) // 3, output_toks=len(text) // 3)
