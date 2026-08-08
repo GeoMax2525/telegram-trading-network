@@ -76,6 +76,10 @@ class EngineerToolExecutor:
             return self._read_file(tool_input.get("path", ""))
         if name == "write_file":
             return self._write_file(tool_input.get("path", ""), tool_input.get("content", ""))
+        if name == "edit_file":
+            return self._edit_file(
+                tool_input.get("path", ""), tool_input.get("old_string", ""), tool_input.get("new_string", ""),
+            )
         if name == "finish_change":
             self.finished = {
                 "summary": tool_input.get("summary", ""),
@@ -142,6 +146,43 @@ class EngineerToolExecutor:
         self.changed_files.add(rel)
         return {"ok": True, "path": rel, "bytes_written": len(content.encode("utf-8"))}
 
+    def _edit_file(self, path: str, old_string: str, new_string: str) -> dict:
+        """Targeted string replacement -- for editing an EXISTING file
+        without needing to reproduce its full content. write_file requires
+        the complete file content on every call; for a large file, that
+        forces a large model response, which can get cut off mid-write
+        (found directly via a real sandbox test: a large file + a tight
+        output token budget produced repeated truncated/corrupted
+        write_file calls that never actually completed). This tool avoids
+        that failure mode entirely for the common case of a small, targeted
+        change to an existing file."""
+        rel = _normalize_rel(path)
+        if rel is None:
+            return {"error": "absolute paths are rejected -- use a path relative to the repo root"}
+        if rel in ENGINEER_HARD_BLOCKED_FILES:
+            return {
+                "error": f"'{rel}' is hard-blocked -- this pipeline can never "
+                         f"write to it, regardless of reasoning. Not something "
+                         f"a different explanation will change.",
+            }
+        full = _resolve_and_contain(self.workspace_root, rel)
+        if full is None:
+            return {"error": "path escapes workspace"}
+        if not os.path.isfile(full):
+            return {"error": f"'{rel}' does not exist -- use write_file to create a new file"}
+        with open(full, encoding="utf-8") as f:
+            current = f.read()
+        count = current.count(old_string)
+        if count == 0:
+            return {"error": "old_string not found in the file -- read the file again and match it exactly"}
+        if count > 1:
+            return {"error": f"old_string appears {count} times -- must be unique; include more surrounding context"}
+        new_content = current.replace(old_string, new_string)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        self.changed_files.add(rel)
+        return {"ok": True, "path": rel}
+
 
 ENGINEER_TOOLS = [
     {
@@ -163,7 +204,7 @@ ENGINEER_TOOLS = [
     },
     {
         "name": "write_file",
-        "description": "Write (create or overwrite) a text file, path relative to repo root. Refuses hard-blocked files and any path outside the repo.",
+        "description": "Create a NEW file, or fully overwrite an existing one, with the given content. Path relative to repo root. Refuses hard-blocked files and any path outside the repo. For editing an EXISTING file, prefer edit_file -- write_file requires the complete file content on every call, which for a large file risks the response getting cut off mid-write before it finishes (this happened in testing). Only use write_file on an existing file for a small file, or when you're genuinely replacing most of it.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -171,6 +212,19 @@ ENGINEER_TOOLS = [
                 "content": {"type": "string"},
             },
             "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "edit_file",
+        "description": "Make a targeted change to an EXISTING file by replacing one exact string with another -- does not require reproducing the file's full content. old_string must appear EXACTLY ONCE in the file (include enough surrounding context, e.g. a few lines before/after, to make it unique). This is the preferred way to edit an existing file, especially a large one.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old_string": {"type": "string", "description": "Exact text to find, must be unique in the file."},
+                "new_string": {"type": "string", "description": "Text to replace it with."},
+            },
+            "required": ["path", "old_string", "new_string"],
         },
     },
     {

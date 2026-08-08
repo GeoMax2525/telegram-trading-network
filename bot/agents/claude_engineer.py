@@ -77,12 +77,12 @@ Your change ships automatically if it passes an automated test gate -- there is 
 Process:
 1. Use list_files and read_file to understand the relevant existing code BEFORE writing anything. Match existing patterns and conventions exactly -- don't introduce a new style for something this codebase already has a convention for.
 2. Make the smallest change that correctly accomplishes the task. Prefer editing an existing file over creating a new one unless a new file is clearly warranted.
-3. Call write_file for each file you need to change.
+3. For an EXISTING file, use edit_file (targeted string replacement) instead of write_file -- write_file requires the complete file content on every call, and for a large file that risks your response getting cut off mid-write before it finishes. Only use write_file on an existing file if it's small or you're genuinely replacing most of it. Use write_file freely for a brand-new file.
 4. Call finish_change with a clear summary and a good commit message when you're done. Nothing happens until you call this.
 
 If your change fails the automated tests, you'll get the exact failure output back and a chance to fix it. Read the failure carefully -- fix the actual problem, don't just retry the same thing.
 
-You cannot see or run anything outside list_files/read_file/write_file. You cannot install new dependencies beyond what's already in requirements.txt unless the task specifically requires it (if so, add it there normally). Some files are off-limits and write_file will refuse them -- if that happens, the task cannot be done as asked; explain why in your summary and finish_change with your best safe alternative, or make no change and say why not."""
+You cannot see or run anything outside list_files/read_file/write_file/edit_file. You cannot install new dependencies beyond what's already in requirements.txt unless the task specifically requires it (if so, add it there normally). Some files are off-limits and write_file/edit_file will refuse them -- if that happens, the task cannot be done as asked; explain why in your summary and finish_change with your best safe alternative, or make no change and say why not."""
 
 
 def _venv_python(workspace: str) -> str:
@@ -194,7 +194,7 @@ def _gate_failure_summary(results: list[GateResult]) -> str:
 
 # ── The resumable Claude tool-calling loop ──────────────────────────────────
 
-async def _call_claude_raw(messages: list[dict], max_tokens: int = 3000) -> tuple[list[dict], int, int]:
+async def _call_claude_raw(messages: list[dict], max_tokens: int = 8000) -> tuple[list[dict], int, int]:
     """One raw Messages API call with the engineer tool set. Returns
     (content_blocks, input_tokens, output_tokens). Does not use
     call_claude_with_tools — that helper terminates when Claude stops

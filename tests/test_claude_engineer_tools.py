@@ -96,6 +96,60 @@ def test_finish_change_records_state():
     assert ex.finished == {"summary": "did a thing", "commit_message": "fix: thing"}
 
 
+# ── edit_file: added after a real sandbox test showed write_file's
+# full-content-required interface can fail on large files (the model's
+# response got cut off mid-write repeatedly, since write_file requires
+# reproducing the ENTIRE file on every call) ────────────────────────────────
+
+def test_edit_file_replaces_unique_match():
+    ex = _mk_executor()
+    asyncio.run(ex.execute("write_file", {"path": "target.py", "content": "x = 1\ny = 2\nz = 3\n"}))
+    r = asyncio.run(ex.execute("edit_file", {"path": "target.py", "old_string": "y = 2", "new_string": "y = 99"}))
+    assert r.get("ok") is True
+    content = asyncio.run(ex.execute("read_file", {"path": "target.py"}))["content"]
+    assert content == "x = 1\ny = 99\nz = 3\n"
+
+
+def test_edit_file_rejects_nonexistent_file():
+    ex = _mk_executor()
+    r = asyncio.run(ex.execute("edit_file", {"path": "nope.py", "old_string": "a", "new_string": "b"}))
+    assert "error" in r and "does not exist" in r["error"]
+
+
+def test_edit_file_rejects_missing_old_string():
+    ex = _mk_executor()
+    asyncio.run(ex.execute("write_file", {"path": "target.py", "content": "hello\n"}))
+    r = asyncio.run(ex.execute("edit_file", {"path": "target.py", "old_string": "not present", "new_string": "x"}))
+    assert "error" in r and "not found" in r["error"]
+
+
+def test_edit_file_rejects_ambiguous_old_string():
+    ex = _mk_executor()
+    asyncio.run(ex.execute("write_file", {"path": "target.py", "content": "dup\ndup\n"}))
+    r = asyncio.run(ex.execute("edit_file", {"path": "target.py", "old_string": "dup", "new_string": "x"}))
+    assert "error" in r and "appears 2 times" in r["error"]
+
+
+def test_edit_file_respects_hard_blocklist():
+    ex = _mk_executor()
+    r = asyncio.run(ex.execute("edit_file", {"path": "database/models.py", "old_string": "a", "new_string": "b"}))
+    assert "error" in r and "hard-blocked" in r["error"]
+
+
+def test_edit_file_respects_path_containment():
+    ex = _mk_executor()
+    r = asyncio.run(ex.execute("edit_file", {"path": "../../etc/passwd", "old_string": "a", "new_string": "b"}))
+    assert "error" in r and "escapes workspace" in r["error"]
+
+
+def test_edit_file_tracks_changed_files():
+    ex = _mk_executor()
+    asyncio.run(ex.execute("write_file", {"path": "target.py", "content": "a = 1\n"}))
+    ex.changed_files.clear()  # write_file already tracked it; reset to isolate edit_file's own tracking
+    asyncio.run(ex.execute("edit_file", {"path": "target.py", "old_string": "a = 1", "new_string": "a = 2"}))
+    assert "target.py" in ex.changed_files
+
+
 def test_unknown_tool_returns_error():
     ex = _mk_executor()
     r = asyncio.run(ex.execute("delete_everything", {}))
