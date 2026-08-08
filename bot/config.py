@@ -82,6 +82,14 @@ HELIUS_PARSE_URL: str = os.getenv(
 )
 HELIUS_LASERSTREAM_URL: str = os.getenv("HELIUS_LASERSTREAM_URL", "")
 
+# Optional secondary Solana RPC provider (e.g. Alchemy, QuickNode, Triton --
+# any standard JSON-RPC endpoint works, no Helius-specific features needed
+# here). Used only when the primary (Helius) RPC exhausts its retries, so a
+# single provider's rate limit or quota exhaustion can't fully stall trade
+# execution or balance checks. Empty = fallback disabled (default, no
+# behavior change).
+FALLBACK_RPC_URL: str = os.getenv("FALLBACK_RPC_URL", "").strip()
+
 # ── Database ──────────────────────────────────────────────────────────────────
 # Railway injects DATABASE_URL as postgres:// or postgresql://.
 # asyncpg (SQLAlchemy async driver) requires the postgresql+asyncpg:// scheme.

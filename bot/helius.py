@@ -17,7 +17,7 @@ import time
 
 import aiohttp
 
-from bot.config import HELIUS_RPC_URL, HELIUS_API_KEY, HELIUS_PARSE_URL
+from bot.config import HELIUS_RPC_URL, HELIUS_API_KEY, HELIUS_PARSE_URL, FALLBACK_RPC_URL
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +145,16 @@ async def rpc_call(method: str, params: list, label: str = "rpc") -> dict | None
     """
     Solana JSON-RPC call via Helius RPC endpoint.
     Returns the full JSON response (caller checks .get("result")).
-    Retries on 429/5xx with exponential backoff.
+    Retries on 429/5xx with exponential backoff, then falls back to
+    FALLBACK_RPC_URL (if configured) so one provider's rate limit or
+    quota exhaustion can't fully stall trade execution or balance checks.
     """
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     data = await _request_with_retry("POST", HELIUS_RPC_URL, json=payload, label=label)
+
+    if data is None and FALLBACK_RPC_URL:
+        logger.warning("%s: primary RPC exhausted, trying fallback", label)
+        data = await _request_with_retry("POST", FALLBACK_RPC_URL, json=payload, label=f"{label}:fallback")
 
     if data is None:
         return None
@@ -169,8 +175,13 @@ async def rpc_batch(payloads: list[dict], label: str = "rpc_batch") -> list[dict
     """
     Batch multiple JSON-RPC calls in one HTTP request.
     Returns list of response objects (same order as input).
+    Falls back to FALLBACK_RPC_URL (if configured) if the primary is
+    exhausted -- same reasoning as rpc_call.
     """
     data = await _request_with_retry("POST", HELIUS_RPC_URL, json=payloads, label=label)
+    if data is None and FALLBACK_RPC_URL:
+        logger.warning("%s: primary RPC exhausted, trying fallback", label)
+        data = await _request_with_retry("POST", FALLBACK_RPC_URL, json=payloads, label=f"{label}:fallback")
     if data is None:
         return []
     if isinstance(data, list):
