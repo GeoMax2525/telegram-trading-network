@@ -691,6 +691,75 @@ async def get_scanner_gate_status() -> dict:
     }
 
 
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_close_reason_breakdown(reason: str, days: int = 7, limit: int = 15) -> dict:
+    """Diagnostic drill-down for ONE close_reason (e.g. 'dead_token',
+    'no_momentum', 'sl_hit') over the last N days: entry MC range, average
+    confidence score, dominant pattern_type tags, channel/source breakdown,
+    and a sample of the most recent trades. Use this to find WHY a losing
+    close-reason category keeps losing, not just that it does -- pairs with
+    get_weekly_report's by_close_reason breakdown."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    async with AsyncSessionLocal() as session:
+        rows = list((await session.execute(
+            select(PaperTrade).where(
+                PaperTrade.status == "closed",
+                PaperTrade.subscriber_id.is_(None),
+                PaperTrade.close_reason == reason,
+                PaperTrade.closed_at >= cutoff,
+            ).order_by(PaperTrade.closed_at.desc())
+        )).scalars().all())
+
+    if not rows:
+        return {"reason": reason, "window_days": days, "trades": 0}
+
+    n = len(rows)
+    entry_mcs = [t.entry_mc for t in rows if t.entry_mc]
+    confidences = [t.confidence_score for t in rows if t.confidence_score is not None]
+    pnl = sum((t.paper_pnl_sol or 0) for t in rows)
+
+    tag_counts: dict[str, int] = {}
+    for t in rows:
+        for tag in (t.pattern_type or "").split(","):
+            tag = tag.strip()
+            if tag:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:10]
+
+    channel_counts: dict[str, int] = {}
+    for t in rows:
+        ch = t.channel_name or "unlabeled"
+        channel_counts[ch] = channel_counts.get(ch, 0) + 1
+    top_channels = sorted(channel_counts.items(), key=lambda x: -x[1])[:10]
+
+    return {
+        "reason": reason,
+        "window_days": days,
+        "trades": n,
+        "pnl_sol": round(pnl, 4),
+        "avg_entry_mc": round(sum(entry_mcs) / len(entry_mcs), 0) if entry_mcs else None,
+        "min_entry_mc": round(min(entry_mcs), 0) if entry_mcs else None,
+        "max_entry_mc": round(max(entry_mcs), 0) if entry_mcs else None,
+        "avg_confidence_score": round(sum(confidences) / len(confidences), 1) if confidences else None,
+        "top_pattern_tags": top_tags,
+        "top_channels": top_channels,
+        "sample_trades": [
+            {
+                "token_name": t.token_name,
+                "entry_mc": t.entry_mc,
+                "confidence_score": t.confidence_score,
+                "pattern_type": t.pattern_type,
+                "channel_name": t.channel_name,
+                "paper_pnl_sol": t.paper_pnl_sol,
+                "peak_multiple": t.peak_multiple,
+                "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+                "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+            }
+            for t in rows[:limit]
+        ],
+    }
+
+
 # ── Write tools — change LIVE trading behavior, no confirmation step ───────
 # Autonomous trading-config tuning, explicitly agreed: these execute
 # immediately, no approval gate. Every write is logged (via set_param's own
