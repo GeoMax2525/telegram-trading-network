@@ -861,6 +861,43 @@ async def get_discretionary_actions(limit: int = 20) -> dict:
     }
 
 
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_ops_status(limit: int = 8) -> dict:
+    """Recent engineering-status feed (OpsLog): what's currently being
+    worked on and what shipped recently, across both Ecconos's own
+    self-shipping pipeline and direct engineering work outside it. This is
+    the same feed Ecconos's conversational replies pull from."""
+    from database.models import get_recent_ops_log
+    rows = await get_recent_ops_log(limit=limit)
+    current = next((r for r in rows if r.is_current), None)
+    return {
+        "currently_working_on": current.summary if current else None,
+        "recent": [
+            {
+                "track": r.track, "summary": r.summary, "detail": r.detail,
+                "logged_at": r.logged_at.isoformat(),
+            }
+            for r in rows if not r.is_current
+        ],
+    }
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+async def log_ops_update(track: str, summary: str, detail: str = "", current: bool = False) -> dict:
+    """Record an engineering-status update so Ecconos's conversational
+    replies (and get_ops_status) reflect what's actually happening. `track`
+    is one of: observation, core_engine, expansion, shipping, measurement.
+    `summary` is a one-line status (max 500 chars). Set current=True if this
+    is what's being actively worked on right now -- clears the previous
+    'current' marker automatically (only one row is ever marked current)."""
+    from database.models import log_ops_update as _log
+    valid_tracks = {"observation", "core_engine", "expansion", "shipping", "measurement"}
+    if track not in valid_tracks:
+        return {"applied": False, "reason": f"track must be one of {sorted(valid_tracks)}"}
+    row_id = await _log(track, summary, detail or None, current=current)
+    return {"applied": True, "id": row_id, "track": track, "current": current}
+
+
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
 async def trigger_discretionary_scan() -> dict:
     """Force one Claude discretionary-trading evaluation cycle right now,

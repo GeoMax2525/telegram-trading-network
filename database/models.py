@@ -401,6 +401,25 @@ class AgentParam(Base):
     updated_at  = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
 
+class OpsLog(Base):
+    """Shared engineering-status feed: what's currently being worked on and
+    what shipped recently, across both Ecconos's own self-shipping pipeline
+    AND direct (Claude Code / operator-supervised) engineering work outside
+    it. Read by Ecconos's context builder (bot/ecconos/app.py) so its
+    conversational replies stay grounded in what's actually happening
+    instead of drifting from it. Written via the log_ops_update MCP tool."""
+    __tablename__ = "ops_log"
+
+    id         = Column(Integer,   primary_key=True, autoincrement=True)
+    logged_at  = Column(DateTime,  default=datetime.utcnow, nullable=False)
+    track      = Column(String(32), nullable=False)   # observation|core_engine|expansion|shipping|measurement
+    summary    = Column(String(500), nullable=False)  # one-line, what shipped/changed
+    detail     = Column(String(2000), nullable=True)  # optional longer context
+    is_current = Column(Boolean,   nullable=False, default=False, server_default="false")
+    # True on at most one row at a time -- "what's being worked on right now."
+    # Set alongside a normal historical row when work starts; cleared when it finishes.
+
+
 class ParamChange(Base):
     __tablename__ = "param_changes"
 
@@ -2193,6 +2212,33 @@ async def get_tier_wallets(max_tier: int = 2) -> list["Wallet"]:
             .where(Wallet.tier >= 1, Wallet.tier <= max_tier)
             .order_by(Wallet.score.desc())
             .limit(30)
+        )
+        return list(result.scalars().all())
+
+
+async def log_ops_update(track: str, summary: str, detail: str | None = None, current: bool = False) -> int:
+    """Record an engineering-status entry (OpsLog). If current=True, this
+    entry becomes 'what's being worked on right now' -- clears is_current
+    on any prior row first, so only one row is ever marked current. Returns
+    the new row's id."""
+    async with AsyncSessionLocal() as session:
+        if current:
+            await session.execute(
+                update(OpsLog).where(OpsLog.is_current.is_(True)).values(is_current=False)
+            )
+        row = OpsLog(track=track[:32], summary=summary[:500], detail=(detail or None), is_current=current)
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+        return row.id
+
+
+async def get_recent_ops_log(limit: int = 8) -> list["OpsLog"]:
+    """Most recent ops-log entries, newest first -- for Ecconos's context
+    builder and the get_ops_status MCP tool."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(OpsLog).order_by(OpsLog.logged_at.desc()).limit(max(1, min(limit, 50)))
         )
         return list(result.scalars().all())
 

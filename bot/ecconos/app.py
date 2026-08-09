@@ -306,13 +306,13 @@ def _is_addressed(message: Message, bot_id: int, bot_username: str | None) -> bo
 # use, so nothing Ecconos says can drift from what /hub shows) ──────────────
 async def _project_context() -> dict:
     from database.models import (
-        get_hub_stats, compute_paper_balance, get_open_paper_trades,
+        get_hub_stats, compute_paper_balance, get_open_paper_trades, get_recent_ops_log,
     )
     try:
         stats = await get_hub_stats()
         balance = await compute_paper_balance(20.0)
         open_trades = await get_open_paper_trades()
-        return {
+        ctx = {
             "balance_sol": round(balance, 4),
             "today_pnl_sol": round(float(stats.get("today_pnl") or 0), 4),
             "open_positions": len([t for t in open_trades if t.subscriber_id is None]),
@@ -320,7 +320,25 @@ async def _project_context() -> dict:
         }
     except Exception as exc:
         logger.debug("ecconos: context fetch failed: %s", exc)
-        return {}
+        ctx = {}
+
+    # Engineering-status feed (OpsLog) -- what's currently being worked on
+    # and what shipped recently, from BOTH Ecconos's own self-shipping
+    # pipeline and direct engineering work outside it. This is what keeps
+    # Ecconos's replies grounded in real current state instead of sounding
+    # disconnected from what's actually happening on the engineering side.
+    try:
+        recent = await get_recent_ops_log(limit=6)
+        current = next((r for r in recent if r.is_current), None)
+        ctx["currently_working_on"] = current.summary if current else None
+        ctx["recent_engineering_updates"] = [
+            {"track": r.track, "summary": r.summary, "logged_at": r.logged_at.isoformat()}
+            for r in recent if not r.is_current
+        ][:5]
+    except Exception as exc:
+        logger.debug("ecconos: ops log fetch failed: %s", exc)
+
+    return ctx
 
 
 async def _reply(message: Message) -> None:
