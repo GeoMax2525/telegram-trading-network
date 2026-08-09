@@ -340,8 +340,25 @@ async def _handle_message(event, channel_name: str) -> None:
             entry_mc = metrics.get("market_cap", 0) or 0
             token_name = metrics.get("name", parsed.get("name") or mint[:12])
 
+            # Same viability check as entry_mc<=0 below, not a quality/opinion
+            # filter (Rule #1 above stays intact — no momentum/liquidity/holder
+            # gates added here). If entry_mc is already at or under the exact
+            # threshold paper_monitor uses to declare a position dead_token
+            # (dead_token_threshold_usd), the token is already effectively dead
+            # BEFORE we'd even buy it -- opening just guarantees an instant
+            # dead_token close and burns a slot + probe size for zero signal.
+            # Found via get_close_reason_breakdown: 91% of dead_token closes
+            # this week were tg_signal entries, several closing 10-30s after
+            # opening, with entry_mc as low as $1,299 -- already-collapsed
+            # data, not tokens that died after a legitimate entry.
             if entry_mc <= 0:
                 skip_reason = "dexscreener_zero_mc"
+            elif entry_mc < (await get_params("dead_token_threshold_usd")).get("dead_token_threshold_usd", 10000):
+                skip_reason = f"already_dead_mc(${entry_mc:.0f})"
+                logger.info(
+                    "TG scraper SKIPPED %s — entry_mc=$%.0f already below dead_token floor",
+                    mint[:12], entry_mc,
+                )
             else:
                 tg_cfg = await get_params("paper_probe_size", "tg_signal_tp_x", "tg_signal_sl_pct")
                 tg_paper_sol = float(tg_cfg.get("paper_probe_size") or 0.2)
