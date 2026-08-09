@@ -314,8 +314,8 @@ async def _poll_gmgn_tokens() -> int:
                             from datetime import datetime
                             tok.last_updated_at = datetime.utcnow()
                             await session.commit()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("GMGN: gmgn_trending flag update failed for %s: %s", mint[:12], exc)
                 continue
 
             name = t.get("name") or t.get("symbol") or "?"
@@ -339,8 +339,8 @@ async def _poll_gmgn_tokens() -> int:
                         tok.gmgn_trending = True
                         tok.gmgn_rank = i + 1
                         await session.commit()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("GMGN: gmgn_trending flag update failed for %s: %s", mint[:12], exc)
 
             saved += 1
             app_state.harvester_gmgn_today += 1
@@ -432,7 +432,8 @@ async def seed_winner_top_traders() -> int:
             continue
         try:
             traders = await gmgn_top_traders(mint)
-        except Exception:
+        except Exception as exc:
+            logger.debug("GMGN: top-traders lookup failed for %s: %s", mint[:12], exc)
             continue
         addrs = _extract_wallet_addrs(traders)
         for a in list(addrs)[:10]:   # cap traders per token
@@ -442,8 +443,8 @@ async def seed_winner_top_traders() -> int:
             try:
                 if await _import_one_wallet(a, source="gmgn_winner_trader"):
                     seeded += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("GMGN: winner-trader import failed for %s: %s", a[:8], exc)
             await asyncio.sleep(1.0)
     logger.info("seed_winner_top_traders: seeded %d wallets from %d winners",
                 seeded, len(winners[:15]))
@@ -629,8 +630,8 @@ async def _track_smart_money_trades() -> int:
                         from datetime import datetime
                         tok.last_updated_at = datetime.utcnow()
                         await session.commit()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("GMGN: gmgn_smart_money flag update failed for %s: %s", mint[:12], exc)
             continue
 
         await save_token(
@@ -646,8 +647,8 @@ async def _track_smart_money_trades() -> int:
                 if tok:
                     tok.gmgn_smart_money = True
                     await session.commit()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("GMGN: gmgn_smart_money flag update failed for %s: %s", mint[:12], exc)
 
         new_signals += 1
         app_state.harvester_gmgn_today += 1

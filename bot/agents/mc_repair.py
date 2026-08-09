@@ -41,8 +41,8 @@ async def _get_mc(mint: str) -> float:
             mc = metrics.get("market_cap", 0) or 0
             if mc > 0:
                 return mc
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("mc_repair: DexScreener failed for %s, trying GMGN: %s", mint[:12], exc)
 
     # Try GMGN
     try:
@@ -57,8 +57,8 @@ async def _get_mc(mint: str) -> float:
             supply = float(info.get("total_supply") or info.get("circulating_supply") or 1e9)
             if price > 0:
                 return price * supply
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("mc_repair: GMGN also failed for %s, MC unresolved: %s", mint[:12], exc)
 
     return 0
 

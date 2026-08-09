@@ -136,8 +136,8 @@ async def _score_insider(candidate: dict) -> float:
                 gmgn_boost += 25
             elif smart_count >= 1:
                 gmgn_boost += 15
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("confidence: GMGN top-traders lookup failed for %s, boost=0: %s", mint[:12], exc)
 
     combined = min(100.0, base + gmgn_boost)
 

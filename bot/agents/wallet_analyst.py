@@ -736,8 +736,8 @@ async def _detect_clusters(wallet_addresses: list[str]) -> int:
                     )
                     w.score = score
                     w.tier = tier
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("cluster re-score failed for %s: %s", addr[:8], exc)
                 w.last_updated_at = datetime.utcnow()
                 await session.commit()
 
@@ -842,8 +842,8 @@ async def run_once() -> tuple[int, int]:
                 _min_wins = int(float(_bf.get("wallet_min_meaningful_wins") or 2))
                 if stats["wins"] < _min_wins:
                     return False
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("bot-filter check failed for %s, filter skipped: %s", address[:8], exc)
 
             wins = stats["wins"]
             losses = stats["losses"]
